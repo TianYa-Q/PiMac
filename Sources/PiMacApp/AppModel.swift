@@ -155,9 +155,8 @@ final class AppModel: ObservableObject {
 
   func addPastedImage(_ data: Data, mimeType: String) {
     let fileExtension = UTType(mimeType: mimeType)?.preferredFilenameExtension ?? "png"
-    let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-      .appendingPathComponent("PiMac/PastedAttachments", isDirectory: true)
-    let url = directory.appendingPathComponent("pasted-\(UUID().uuidString).\(fileExtension)")
+    let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    let url = directory.appendingPathComponent("pi-clipboard-\(UUID().uuidString).\(fileExtension)")
     do {
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
       try data.write(to: url, options: .atomic)
@@ -182,7 +181,7 @@ final class AppModel: ObservableObject {
     guard !additions.isEmpty else { return }
     attachments.append(contentsOf: additions)
 
-    let paths = additions.map { "`\($0.url.path.replacingOccurrences(of: "`", with: "\\`"))`" }
+    let paths = additions.map(\.url.path)
     let prefix = composerText.isEmpty || composerText.hasSuffix("\n") ? "" : "\n"
     composerText += prefix + paths.joined(separator: "\n")
   }

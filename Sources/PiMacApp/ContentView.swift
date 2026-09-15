@@ -701,6 +701,20 @@ private struct ComposerTextView: NSViewRepresentable {
     var onPasteFiles: (([URL]) -> Void)?
     var onPasteImage: ((Data, String) -> Void)?
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+      let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+      if modifiers.contains(.command),
+        !modifiers.contains(.shift),
+        !modifiers.contains(.option),
+        !modifiers.contains(.control),
+        event.charactersIgnoringModifiers?.lowercased() == "v"
+      {
+        paste(nil)
+        return true
+      }
+      return super.performKeyEquivalent(with: event)
+    }
+
     override func paste(_ sender: Any?) {
       let pasteboard = NSPasteboard.general
       let urls =
@@ -717,6 +731,14 @@ private struct ComposerTextView: NSViewRepresentable {
         return
       }
       if let tiff = pasteboard.data(forType: .tiff),
+        let representation = NSBitmapImageRep(data: tiff),
+        let png = representation.representation(using: .png, properties: [:])
+      {
+        onPasteImage?(png, "image/png")
+        return
+      }
+      if let image = NSImage(pasteboard: pasteboard),
+        let tiff = image.tiffRepresentation,
         let representation = NSBitmapImageRep(data: tiff),
         let png = representation.representation(using: .png, properties: [:])
       {
