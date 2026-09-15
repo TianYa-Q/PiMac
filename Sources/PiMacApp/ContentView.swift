@@ -191,19 +191,37 @@ struct ContentView: View {
             )
             .frame(maxWidth: .infinity, minHeight: 360)
           }
-          ForEach(app.messages) { entry in
-            ChatEntryView(entry: entry).id(entry.id)
+          ForEach(conversationTurns) { turn in
+            ConversationTurnView(
+              turn: turn,
+              isActive: app.isStreaming && turn.id == conversationTurns.last?.id
+            )
+            .id(turn.id)
           }
         }
         .padding(20)
       }
       .onChange(of: app.messages.count) {
-        if let id = app.messages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+        if let id = conversationTurns.last?.id { proxy.scrollTo(id, anchor: .bottom) }
       }
       .onChange(of: app.messages.last?.text) {
-        if let id = app.messages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+        if let id = conversationTurns.last?.id { proxy.scrollTo(id, anchor: .bottom) }
       }
     }
+  }
+
+  private var conversationTurns: [ConversationTurn] {
+    var turns: [ConversationTurn] = []
+    var current: [ChatEntry] = []
+    for entry in app.messages {
+      if entry.kind == .user, !current.isEmpty {
+        turns.append(ConversationTurn(entries: current))
+        current = []
+      }
+      current.append(entry)
+    }
+    if !current.isEmpty { turns.append(ConversationTurn(entries: current)) }
+    return turns
   }
 
   private var composer: some View {
@@ -430,6 +448,161 @@ private struct ComposerTextView: NSViewRepresentable {
       }
       onSubmit?()
     }
+  }
+}
+
+private struct ConversationTurn: Identifiable {
+  let entries: [ChatEntry]
+
+  var id: String { entries.first?.id ?? UUID().uuidString }
+
+  var user: ChatEntry? { entries.first(where: { $0.kind == .user }) }
+  var finalAssistant: ChatEntry? { entries.last(where: { $0.kind == .assistant }) }
+  var activity: [ChatEntry] {
+    entries.filter { entry in
+      entry.kind == .thinking || entry.kind == .tool
+        || (entry.kind == .assistant && entry.id != finalAssistant?.id)
+    }
+  }
+  var systemEntries: [ChatEntry] { entries.filter { $0.kind == .system } }
+}
+
+private struct ConversationTurnView: View {
+  let turn: ConversationTurn
+  let isActive: Bool
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      if let user = turn.user { ChatEntryView(entry: user) }
+      if !turn.activity.isEmpty {
+        ActivityGroupView(entries: turn.activity, taskIsRunning: isActive)
+      }
+      if let assistant = turn.finalAssistant { ChatEntryView(entry: assistant) }
+      ForEach(turn.systemEntries) { ChatEntryView(entry: $0) }
+    }
+  }
+}
+
+private struct ActivityGroupView: View {
+  let entries: [ChatEntry]
+  let taskIsRunning: Bool
+  @State private var expanded = false
+
+  private var isRunning: Bool { taskIsRunning || entries.contains(where: \.isRunning) }
+  private var toolCount: Int { entries.filter { $0.kind == .tool }.count }
+
+  var body: some View {
+    DisclosureGroup(isExpanded: $expanded) {
+      VStack(alignment: .leading, spacing: 8) {
+        ForEach(entries) { entry in
+          ActivityEntryView(entry: entry)
+        }
+      }
+      .padding(.top, 7)
+    } label: {
+      HStack(spacing: 7) {
+        if isRunning {
+          ProgressView().controlSize(.mini)
+          Text("正在处理")
+        } else {
+          Image(systemName: "checkmark.circle").foregroundStyle(.green)
+          Text(activitySummary)
+        }
+      }
+      .font(.caption)
+      .foregroundStyle(.secondary)
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 9)
+    .background(Color.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+    .onAppear { expanded = isRunning }
+    .onChange(of: isRunning) { wasRunning, running in
+      if running { expanded = true }
+      if wasRunning && !running { expanded = false }
+    }
+  }
+
+  private var activitySummary: String {
+    if toolCount == 0 { return "已完成思考" }
+    return "已完成 · \(toolCount) 次工具调用"
+  }
+}
+
+private struct ActivityEntryView: View {
+  let entry: ChatEntry
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 5) {
+      HStack(spacing: 6) {
+        Image(systemName: activityIcon)
+        Text(entry.title).fontWeight(.medium)
+        if entry.isRunning { ProgressView().controlSize(.mini) }
+      }
+      .font(.caption)
+      .foregroundStyle(entry.isError ? Color.red : Color.secondary)
+
+      if let diff = entry.diff, !diff.isEmpty {
+        GitDiffView(diff: diff)
+      } else if !entry.text.isEmpty {
+        Text(entry.text)
+          .font(.system(.caption, design: entry.kind == .tool ? .monospaced : .default))
+          .textSelection(.enabled)
+          .frame(maxWidth: .infinity, alignment: .leading)
+      }
+    }
+    .padding(.leading, 4)
+  }
+
+  private var activityIcon: String {
+    switch entry.kind {
+    case .thinking: "brain.head.profile"
+    case .tool: "wrench.and.screwdriver"
+    case .assistant: "sparkles"
+    case .user: "person.crop.circle"
+    case .system: "exclamationmark.circle"
+    }
+  }
+}
+
+private struct GitDiffView: View {
+  let diff: String
+
+  var body: some View {
+    ScrollView(.horizontal) {
+      VStack(alignment: .leading, spacing: 0) {
+        ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+          Text(line.isEmpty ? " " : line)
+            .font(.system(.caption, design: .monospaced))
+            .foregroundStyle(foreground(for: line))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(background(for: line))
+        }
+      }
+      .textSelection(.enabled)
+    }
+    .background(Color(nsColor: .textBackgroundColor).opacity(0.45))
+    .clipShape(RoundedRectangle(cornerRadius: 6))
+    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.16)))
+  }
+
+  private var lines: [String] {
+    diff.components(separatedBy: .newlines)
+  }
+
+  private func background(for line: String) -> Color {
+    if line.hasPrefix("+") && !line.hasPrefix("+++") { return .green.opacity(0.14) }
+    if line.hasPrefix("-") && !line.hasPrefix("---") { return .red.opacity(0.14) }
+    if line.hasPrefix("@@") { return .blue.opacity(0.10) }
+    return .clear
+  }
+
+  private func foreground(for line: String) -> Color {
+    if line.hasPrefix("+") && !line.hasPrefix("+++") { return .green }
+    if line.hasPrefix("-") && !line.hasPrefix("---") { return .red }
+    if line.hasPrefix("@@") { return .blue }
+    return .primary
   }
 }
 

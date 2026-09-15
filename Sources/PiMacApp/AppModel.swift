@@ -560,7 +560,8 @@ final class AppModel: ObservableObject {
           kind: .tool,
           title: "工具 · \(name)",
           text: Self.prettyJSON(event["args"]),
-          isRunning: true
+          isRunning: true,
+          toolName: name
         ))
       return
     }
@@ -568,6 +569,9 @@ final class AppModel: ObservableObject {
     let resultKey = type == "tool_execution_update" ? "partialResult" : "result"
     if let result = event[resultKey] as? PiRPCClient.JSON {
       messages[index].text = Self.resultText(result)
+      if let details = result["details"] as? PiRPCClient.JSON {
+        messages[index].diff = details["diff"] as? String ?? details["patch"] as? String
+      }
     }
     if type == "tool_execution_end" {
       messages[index].isRunning = false
@@ -732,7 +736,10 @@ final class AppModel: ObservableObject {
         kind: .tool,
         title: "工具 · \(message["toolName"] as? String ?? "tool")",
         text: contentText(message["content"]),
-        isError: message["isError"] as? Bool ?? false
+        isError: message["isError"] as? Bool ?? false,
+        toolName: message["toolName"] as? String,
+        diff: (message["details"] as? PiRPCClient.JSON)?["diff"] as? String
+          ?? (message["details"] as? PiRPCClient.JSON)?["patch"] as? String
       )
     case "bashExecution":
       return ChatEntry(

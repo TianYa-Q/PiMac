@@ -40,6 +40,8 @@ struct ChatEntry: Identifiable {
   var text: String
   var isRunning = false
   var isError = false
+  var toolName: String? = nil
+  var diff: String? = nil
 }
 
 struct PiModel: Identifiable, Hashable {
