@@ -22,6 +22,7 @@ struct ContentView: View {
   @State private var composerFocused = false
   @State private var autoScrollEnabled = true
   @State private var autoScrollScheduled = false
+  @AppStorage("projectsCollapsed") private var projectsCollapsed = false
 
   var body: some View {
     NavigationSplitView {
@@ -101,6 +102,18 @@ struct ContentView: View {
         HStack {
           Text("项目").font(.caption.bold()).foregroundStyle(.secondary)
           Spacer()
+          if !workspace.projects.isEmpty {
+            Button {
+              withAnimation(.easeInOut(duration: 0.16)) {
+                projectsCollapsed.toggle()
+              }
+            } label: {
+              Image(
+                systemName: projectsCollapsed ? "rectangle.grid.1x2" : "rectangle.grid.1x2.fill")
+            }
+            .buttonStyle(.plain)
+            .help(projectsCollapsed ? "展开项目" : "折叠为图标")
+          }
           Button {
             choosingProject = true
           } label: {
@@ -114,15 +127,21 @@ struct ContentView: View {
           Button("添加项目…", systemImage: "folder.badge.plus") { choosingProject = true }
             .buttonStyle(.bordered)
             .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-          ScrollView {
-            LazyVStack(spacing: 3) {
+        } else if projectsCollapsed {
+          ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
               ForEach(workspace.projects) { project in
-                projectRow(project)
+                compactProjectButton(project)
               }
             }
+            .padding(.vertical, 1)
           }
-          .frame(maxHeight: 128)
+        } else {
+          LazyVStack(spacing: 3) {
+            ForEach(workspace.projects) { project in
+              projectRow(project)
+            }
+          }
         }
 
         if case .connected = app.connectionState {
@@ -223,14 +242,55 @@ struct ContentView: View {
     .background(Color(nsColor: .controlBackgroundColor).opacity(0.52))
   }
 
+  private func compactProjectButton(_ project: WorkspaceProject) -> some View {
+    let selected = workspace.selectedProject?.id == project.id
+    return Button {
+      workspace.selectProject(project)
+    } label: {
+      projectIcon(project, size: 34)
+        .padding(3)
+        .background(
+          selected ? Color.accentColor.opacity(0.18) : Color.clear,
+          in: RoundedRectangle(cornerRadius: 11)
+        )
+    }
+    .buttonStyle(.plain)
+    .help(project.name)
+    .contextMenu {
+      Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([project.url]) }
+      Divider()
+      Button("从列表移除", role: .destructive) { workspace.removeProject(project) }
+    }
+  }
+
+  private func projectIcon(_ project: WorkspaceProject, size: CGFloat) -> some View {
+    let palette: [(Color, Color)] = [
+      (.blue, .cyan), (.purple, .pink), (.orange, .red), (.green, .teal), (.indigo, .purple),
+      (.mint, .blue),
+    ]
+    let scalarTotal = project.name.unicodeScalars.reduce(0) { $0 + Int($1.value) }
+    let colors = palette[scalarTotal % palette.count]
+    let initial = String(project.name.prefix(1)).uppercased()
+    return ZStack {
+      RoundedRectangle(cornerRadius: size * 0.26)
+        .fill(
+          LinearGradient(
+            colors: [colors.0, colors.1], startPoint: .topLeading, endPoint: .bottomTrailing))
+      Text(initial)
+        .font(.system(size: size * 0.44, weight: .bold, design: .rounded))
+        .foregroundStyle(.white)
+        .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
+    }
+    .frame(width: size, height: size)
+  }
+
   private func projectRow(_ project: WorkspaceProject) -> some View {
     let selected = workspace.selectedProject?.id == project.id
     return Button {
       workspace.selectProject(project)
     } label: {
       HStack(spacing: 8) {
-        Image(systemName: selected ? "folder.fill" : "folder")
-          .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+        projectIcon(project, size: 29)
         VStack(alignment: .leading, spacing: 1) {
           Text(project.name).font(.callout).lineLimit(1)
           Text(project.url.deletingLastPathComponent().path)
@@ -473,6 +533,14 @@ struct ContentView: View {
         }
         .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
+        .onAppear {
+          // 缓存 transcript 可能早于视图创建完成，不能只依赖 messages 的变化事件。
+          // 等首轮布局完成后直接恢复到底部。
+          DispatchQueue.main.async {
+            proxy.scrollTo("conversation-bottom", anchor: .bottom)
+            autoScrollEnabled = true
+          }
+        }
         .onPreferenceChange(ConversationBottomPreferenceKey.self) { bottomY in
           autoScrollEnabled = bottomY <= viewport.size.height + 96
         }
