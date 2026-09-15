@@ -7,6 +7,7 @@ final class WorkspaceModel: ObservableObject {
     let id: UUID
     let model: AppModel
     let requestedSessionPath: String?
+    let createdAt: Date
   }
 
   @Published private(set) var tabs: [Tab] = []
@@ -33,6 +34,7 @@ final class WorkspaceModel: ObservableObject {
     if let existing = tabs.first(where: {
       $0.requestedSessionPath == path || $0.model.currentSessionPath == path
     }) {
+      existing.model.refreshSessionMetadata()
       selectedTabID = existing.id
       return
     }
@@ -56,6 +58,28 @@ final class WorkspaceModel: ObservableObject {
     )
   }
 
+  func sessions(in projectURL: URL) -> [SessionItem] {
+    let projectPath = projectURL.standardizedFileURL.path
+    var merged: [String: SessionItem] = [:]
+    for tab in tabs where tab.model.projectURL?.standardizedFileURL.path == projectPath {
+      for session in tab.model.sessions {
+        if let previous = merged[session.path], previous.modifiedAt >= session.modifiedAt {
+          continue
+        }
+        merged[session.path] = session
+      }
+      let path = tab.model.currentSessionPath
+      if !path.isEmpty, merged[path] == nil {
+        let firstPrompt = tab.model.messages.first(where: { $0.kind == .user })?.text
+        let title =
+          tab.model.sessionName.isEmpty
+          ? String((firstPrompt ?? "未命名会话").prefix(70)) : tab.model.sessionName
+        merged[path] = SessionItem(path: path, title: title, modifiedAt: tab.createdAt)
+      }
+    }
+    return merged.values.sorted { $0.modifiedAt > $1.modifiedAt }
+  }
+
   func model(forSessionPath path: String) -> AppModel? {
     tabs.first(where: {
       $0.requestedSessionPath == path || $0.model.currentSessionPath == path
@@ -69,7 +93,8 @@ final class WorkspaceModel: ObservableObject {
   }
 
   private func addTab(model: AppModel, requestedSessionPath: String?) {
-    let tab = Tab(id: UUID(), model: model, requestedSessionPath: requestedSessionPath)
+    let tab = Tab(
+      id: UUID(), model: model, requestedSessionPath: requestedSessionPath, createdAt: .now)
     tabs.append(tab)
     observations[tab.id] = model.objectWillChange.sink { [weak self] _ in
       self?.objectWillChange.send()

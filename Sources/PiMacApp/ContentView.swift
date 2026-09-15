@@ -90,14 +90,14 @@ struct ContentView: View {
 
             Divider()
             Text("历史会话").font(.caption.bold()).foregroundStyle(.secondary)
-            if app.sessions.isEmpty {
+            if visibleSessions.isEmpty {
               Text("当前项目暂无历史会话")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
             } else {
               ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
-                  ForEach(app.sessions) { session in
+                  ForEach(visibleSessions) { session in
                     Button {
                       guard let projectURL = app.projectURL else { return }
                       workspace.openSession(path: session.path, in: projectURL)
@@ -177,6 +177,11 @@ struct ContentView: View {
         .buttonStyle(.plain)
     }
     .padding()
+  }
+
+  private var visibleSessions: [SessionItem] {
+    guard let projectURL = app.projectURL else { return app.sessions }
+    return workspace.sessions(in: projectURL)
   }
 
   private var conversation: some View {
@@ -358,7 +363,7 @@ private struct ComposerTextView: NSViewRepresentable {
   let onSubmit: () -> Void
 
   func makeCoordinator() -> Coordinator {
-    Coordinator(text: $text, isFocused: $isFocused)
+    Coordinator(text: $text, isFocused: $isFocused, initialText: text)
   }
 
   func makeNSView(context: Context) -> NSScrollView {
@@ -371,6 +376,7 @@ private struct ComposerTextView: NSViewRepresentable {
     let textView = SubmitTextView()
     textView.delegate = context.coordinator
     textView.onSubmit = onSubmit
+    textView.string = text
     textView.isRichText = false
     textView.importsGraphics = false
     textView.drawsBackground = false
@@ -393,9 +399,23 @@ private struct ComposerTextView: NSViewRepresentable {
   func updateNSView(_ scrollView: NSScrollView, context: Context) {
     guard let textView = scrollView.documentView as? SubmitTextView else { return }
     textView.onSubmit = onSubmit
-    if textView.string != text {
-      textView.string = text
-      textView.setSelectedRange(NSRange(location: text.utf16.count, length: 0))
+    // AppModel 的流式事件会频繁触发 SwiftUI 更新。只有 Binding 确实发生了外部
+    // 变化（例如发送后清空）才回写 NSTextView，避免旧的 View 快照覆盖刚输入的字符。
+    if text != context.coordinator.lastBindingText {
+      if let index = context.coordinator.pendingLocalTexts.firstIndex(of: text) {
+        // 这是 NSTextView 先前产生、现在才返回的 Binding 更新。确认它，但不要
+        // 用这个中间快照覆盖用户已经继续输入的新内容。
+        context.coordinator.pendingLocalTexts.removeFirst(index + 1)
+        context.coordinator.lastBindingText = text
+      } else if !textView.hasMarkedText() {
+        // Binding 来自 AppModel（例如消息发送后清空），此时才同步到原生编辑器。
+        context.coordinator.pendingLocalTexts.removeAll()
+        context.coordinator.lastBindingText = text
+        if textView.string != text {
+          textView.string = text
+          textView.setSelectedRange(NSRange(location: text.utf16.count, length: 0))
+        }
+      }
     }
     if isFocused, textView.window?.firstResponder !== textView {
       DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
@@ -406,15 +426,20 @@ private struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
     @Binding var isFocused: Bool
     weak var textView: NSTextView?
+    var lastBindingText: String
+    var pendingLocalTexts: [String] = []
 
-    init(text: Binding<String>, isFocused: Binding<Bool>) {
+    init(text: Binding<String>, isFocused: Binding<Bool>, initialText: String) {
       _text = text
       _isFocused = isFocused
+      lastBindingText = initialText
     }
 
     func textDidChange(_ notification: Notification) {
       guard let textView = notification.object as? NSTextView else { return }
-      text = textView.string
+      let latestText = textView.string
+      if pendingLocalTexts.last != latestText { pendingLocalTexts.append(latestText) }
+      text = latestText
     }
 
     func textDidBeginEditing(_ notification: Notification) {
@@ -689,6 +714,7 @@ private struct ChatEntryView: View {
 
 private struct CodexAccountsView: View {
   @EnvironmentObject private var app: AppModel
+  @State private var isExpanded = false
 
   var body: some View {
     GroupBox {
@@ -709,36 +735,66 @@ private struct CodexAccountsView: View {
             .buttonStyle(.plain)
             .font(.caption)
             .disabled(app.isStreaming)
-        }
-
-        if app.codexAccounts.isEmpty && app.geminiUsage == nil {
-          Text(app.extensionStatuses["codex-accounts"] ?? "等待扩展提供账户信息…")
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .lineLimit(5)
-            .textSelection(.enabled)
-        } else {
-          ScrollView {
-            LazyVStack(spacing: 7) {
-              ForEach(app.codexAccounts) { account in
-                accountRow(account)
-              }
-              if let gemini = app.geminiUsage, gemini.isConfigured {
-                geminiRow(gemini)
-              }
-            }
+          Button {
+            withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
+          } label: {
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
           }
-          .frame(maxHeight: 240)
+          .buttonStyle(.plain)
+          .help(isExpanded ? "折叠账户额度" : "展开全部账户额度")
         }
 
-        if let updatedAt = app.codexAccountsUpdatedAt {
-          Text("更新于 \(updatedAt, style: .relative)")
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+        if isExpanded {
+          expandedAccounts
+          if let updatedAt = app.codexAccountsUpdatedAt {
+            Text("更新于 \(updatedAt, style: .relative)")
+              .font(.caption2)
+              .foregroundStyle(.tertiary)
+          }
+        } else {
+          currentAccount
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
     }
+  }
+
+  @ViewBuilder
+  private var expandedAccounts: some View {
+    if app.codexAccounts.isEmpty && app.geminiUsage == nil {
+      emptyStatus
+    } else {
+      ScrollView {
+        LazyVStack(spacing: 7) {
+          ForEach(app.codexAccounts) { account in
+            accountRow(account)
+          }
+          if let gemini = app.geminiUsage, gemini.isConfigured {
+            geminiRow(gemini)
+          }
+        }
+      }
+      .frame(maxHeight: 240)
+    }
+  }
+
+  @ViewBuilder
+  private var currentAccount: some View {
+    if let gemini = app.geminiUsage, gemini.isConfigured, gemini.isActive {
+      geminiRow(gemini)
+    } else if let account = app.codexAccounts.first(where: \.isActive) {
+      accountRow(account)
+    } else {
+      emptyStatus
+    }
+  }
+
+  private var emptyStatus: some View {
+    Text(app.extensionStatuses["codex-accounts"] ?? "等待扩展提供账户信息…")
+      .font(.caption2)
+      .foregroundStyle(.secondary)
+      .lineLimit(5)
+      .textSelection(.enabled)
   }
 
   private func accountRow(_ account: CodexAccountStatus) -> some View {

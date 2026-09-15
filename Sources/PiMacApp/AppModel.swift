@@ -31,6 +31,7 @@ final class AppModel: ObservableObject {
   private let client = PiRPCClient()
   private var activeAssistantId: String?
   private var activeThinkingId: String?
+  private var sessionLoadGeneration = UUID()
 
   var piPath: String {
     get { UserDefaults.standard.string(forKey: "piPath") ?? Self.suggestedPiPath() }
@@ -410,14 +411,24 @@ final class AppModel: ObservableObject {
     }
   }
 
+  func refreshSessionMetadata() {
+    loadState()
+    loadSessions()
+  }
+
   private func loadSessions() {
     guard let projectURL else { return }
     let projectPath = projectURL.standardizedFileURL.path
+    let generation = UUID()
+    sessionLoadGeneration = generation
     Task { [weak self] in
       let items = await Task.detached(priority: .utility) {
         Self.discoverSessions(for: projectPath)
       }.value
-      guard let self, self.projectURL?.standardizedFileURL.path == projectPath else { return }
+      guard let self,
+        self.projectURL?.standardizedFileURL.path == projectPath,
+        self.sessionLoadGeneration == generation
+      else { return }
       self.sessions = items
     }
   }
@@ -483,13 +494,16 @@ final class AppModel: ObservableObject {
     switch type {
     case "agent_start":
       isStreaming = true
+      // 全新会话的 JSONL 路径通常在第一次请求开始时才创建。
+      // 立即同步状态，确保工作区能把这个 RPC 进程与历史会话稳定关联。
+      refreshSessionMetadata()
     case "agent_settled":
       isStreaming = false
       activeAssistantId = nil
       activeThinkingId = nil
       statusText = ""
       loadStats()
-      loadSessions()
+      refreshSessionMetadata()
     case "message_update":
       handleMessageUpdate(event)
     case "message_end":
