@@ -7,7 +7,7 @@
 
 一个使用 SwiftUI 构建的原生 macOS [Pi coding agent](https://github.com/badlogic/pi-mono) 客户端。它不是终端模拟器，而是通过 Pi 官方 JSONL RPC 协议管理真实的 Agent 会话，并继续使用你已有的 Pi 配置。
 
-![Pi Mac 主界面](docs/images/pi-mac-overview.png)
+![Pi Mac 主界面](docs/images/pi-mac-overview-new.png)
 
 ## 功能特性
 
