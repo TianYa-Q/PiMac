@@ -181,9 +181,6 @@ final class AppModel: ObservableObject {
     guard !additions.isEmpty else { return }
     attachments.append(contentsOf: additions)
 
-    let paths = additions.map(\.url.path)
-    let prefix = composerText.isEmpty || composerText.hasSuffix("\n") ? "" : "\n"
-    composerText += prefix + paths.joined(separator: "\n")
   }
 
   func removeAttachment(_ attachment: PromptAttachment) {
@@ -200,17 +197,25 @@ final class AppModel: ObservableObject {
     let sentAttachments = attachments
     composerText = ""
     attachments = []
+    let displayText = text.isEmpty ? "请查看附件。" : text
     messages.append(
       ChatEntry(
         id: UUID().uuidString,
         kind: .user,
         title: isStreaming ? "你 · 已插入" : "你",
-        text: text
+        text: displayText,
+        attachments: sentAttachments
       ))
 
-    var command: PiRPCClient.JSON = [
-      "type": "prompt", "message": text.isEmpty ? "请查看附件。" : text,
-    ]
+    let filePaths = sentAttachments.filter { !$0.isImage }.map(\.url.path)
+    var rpcText = displayText
+    if !filePaths.isEmpty {
+      rpcText +=
+        "\n\n<pi-mac-attached-files>\n"
+        + filePaths.joined(separator: "\n")
+        + "\n</pi-mac-attached-files>"
+    }
+    var command: PiRPCClient.JSON = ["type": "prompt", "message": rpcText]
     let images: [PiRPCClient.JSON] = sentAttachments.compactMap { attachment in
       guard attachment.isImage,
         let mimeType = attachment.mimeType,
@@ -822,8 +827,14 @@ final class AppModel: ObservableObject {
     guard let role = message["role"] as? String else { return nil }
     switch role {
     case "user":
+      let parsed = parseUserContent(contentText(message["content"]))
       return ChatEntry(
-        id: UUID().uuidString, kind: .user, title: "你", text: contentText(message["content"]))
+        id: UUID().uuidString,
+        kind: .user,
+        title: "你",
+        text: parsed.text,
+        attachments: parsed.attachments
+      )
     case "assistant":
       let text = contentText(message["content"])
       return text.isEmpty
@@ -845,6 +856,30 @@ final class AppModel: ObservableObject {
     default:
       return nil
     }
+  }
+
+  nonisolated private static func parseUserContent(
+    _ content: String
+  ) -> (text: String, attachments: [PromptAttachment]) {
+    let startMarker = "<pi-mac-attached-files>"
+    let endMarker = "</pi-mac-attached-files>"
+    guard let start = content.range(of: startMarker),
+      let end = content.range(of: endMarker, range: start.upperBound..<content.endIndex)
+    else { return (content, []) }
+
+    let paths = content[start.upperBound..<end.lowerBound]
+      .split(separator: "\n")
+      .map(String.init)
+    let attachments = paths.map { path in
+      PromptAttachment(
+        url: URL(fileURLWithPath: path),
+        mimeType: UTType(filenameExtension: URL(fileURLWithPath: path).pathExtension)?
+          .preferredMIMEType
+      )
+    }
+    var displayText = content
+    displayText.removeSubrange(start.lowerBound..<end.upperBound)
+    return (displayText.trimmingCharacters(in: .whitespacesAndNewlines), attachments)
   }
 
   nonisolated private static func removingANSIEscapes(_ text: String) -> String {

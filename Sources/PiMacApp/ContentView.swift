@@ -2,6 +2,14 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private struct ConversationBottomPreferenceKey: PreferenceKey {
+  static var defaultValue: CGFloat = 0
+
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+    value = nextValue()
+  }
+}
+
 struct ContentView: View {
   @EnvironmentObject private var app: AppModel
   @EnvironmentObject private var workspace: WorkspaceModel
@@ -12,6 +20,8 @@ struct ContentView: View {
   @State private var sessionNameDraft = ""
   @State private var diagnosticsExpanded = false
   @State private var composerFocused = false
+  @State private var autoScrollEnabled = true
+  @State private var autoScrollScheduled = false
 
   var body: some View {
     NavigationSplitView {
@@ -383,38 +393,71 @@ struct ContentView: View {
   }
 
   private var conversation: some View {
-    ScrollViewReader { proxy in
-      ScrollView {
-        LazyVStack(alignment: .leading, spacing: 14) {
-          if app.messages.isEmpty {
-            ContentUnavailableView(
-              "开始和 Pi 对话",
-              systemImage: "bubble.left.and.bubble.right",
-              description: Text("Pi 可以读取、编辑文件并执行项目命令。")
-            )
-            .frame(maxWidth: .infinity, minHeight: 360)
-          }
-          ForEach(conversationTurns) { turn in
-            ConversationTurnView(
-              turn: turn,
-              isActive: app.isStreaming && turn.id == conversationTurns.last?.id,
-              onEdit: { text in
-                app.editMessage(text)
-                composerFocused = true
+    GeometryReader { viewport in
+      ScrollViewReader { proxy in
+        ScrollView {
+          // LazyVStack 在工具详情折叠导致高度骤变时，macOS 偶尔会保留失效的
+          // 可视区域并显示白屏。普通 VStack 保持布局连续，完成任务后无需滚动恢复。
+          VStack(alignment: .leading, spacing: 14) {
+            if app.messages.isEmpty {
+              ContentUnavailableView(
+                "开始和 Pi 对话",
+                systemImage: "bubble.left.and.bubble.right",
+                description: Text("Pi 可以读取、编辑文件并执行项目命令。")
+              )
+              .frame(maxWidth: .infinity, minHeight: 360)
+            }
+            ForEach(conversationTurns) { turn in
+              ConversationTurnView(
+                turn: turn,
+                isActive: app.isStreaming && turn.id == conversationTurns.last?.id,
+                onEdit: { text in
+                  app.editMessage(text)
+                  composerFocused = true
+                }
+              )
+              .id(turn.id)
+            }
+            Color.clear
+              .frame(height: 44)
+              .id("conversation-bottom")
+              .background {
+                GeometryReader { marker in
+                  Color.clear.preference(
+                    key: ConversationBottomPreferenceKey.self,
+                    value: marker.frame(in: .named("conversation-scroll")).maxY
+                  )
+                }
               }
-            )
-            .id(turn.id)
           }
-          Color.clear.frame(height: 44).id("conversation-bottom")
+          .padding(20)
         }
-        .padding(20)
+        .coordinateSpace(name: "conversation-scroll")
+        .scrollIndicators(.hidden)
+        .onPreferenceChange(ConversationBottomPreferenceKey.self) { bottomY in
+          autoScrollEnabled = bottomY <= viewport.size.height + 96
+        }
+        .onChange(of: app.messages.count) {
+          scheduleAutoScroll(proxy)
+        }
+        .onChange(of: app.messages.last?.text) {
+          scheduleAutoScroll(proxy)
+        }
+        .onChange(of: app.isStreaming) {
+          scheduleAutoScroll(proxy)
+        }
       }
-      .onChange(of: app.messages.count) {
-        proxy.scrollTo("conversation-bottom", anchor: .bottom)
-      }
-      .onChange(of: app.messages.last?.text) {
-        proxy.scrollTo("conversation-bottom", anchor: .bottom)
-      }
+    }
+  }
+
+  private func scheduleAutoScroll(_ proxy: ScrollViewProxy) {
+    guard autoScrollEnabled, !autoScrollScheduled else { return }
+    autoScrollScheduled = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+      // 调度时已确认用户位于底部；内容增长可能暂时让 marker 越界，不能因此
+      // 取消这次跟随，否则第一段流式文本就会关闭自动滚动。
+      proxy.scrollTo("conversation-bottom", anchor: .bottom)
+      autoScrollScheduled = false
     }
   }
 
@@ -958,13 +1001,16 @@ private struct ChatEntryView: View {
             .help("重新编辑这条消息")
           }
         }
+        if !entry.attachments.isEmpty {
+          MessageAttachmentsView(attachments: entry.attachments)
+        }
         if entry.kind == .tool || entry.kind == .thinking {
           DisclosureGroup(isExpanded: $expanded) {
             content.padding(.top, 5)
           } label: {
             Text(expanded ? "收起详情" : summary).font(.caption)
           }
-        } else {
+        } else if !entry.text.isEmpty {
           content
         }
       }
@@ -1218,6 +1264,38 @@ private struct CodexAccountsView: View {
     if percent < 20 { return .red }
     if percent < 50 { return .orange }
     return .green
+  }
+}
+
+private struct MessageAttachmentsView: View {
+  let attachments: [PromptAttachment]
+
+  var body: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 8) {
+        ForEach(attachments) { attachment in
+          if attachment.isImage, let image = NSImage(contentsOf: attachment.url) {
+            VStack(alignment: .leading, spacing: 4) {
+              Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 118, height: 82)
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: 7))
+              Text(attachment.url.lastPathComponent)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+          } else {
+            Label(attachment.url.lastPathComponent, systemImage: "doc.fill")
+              .font(.caption)
+              .padding(8)
+              .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+          }
+        }
+      }
+    }
   }
 }
 

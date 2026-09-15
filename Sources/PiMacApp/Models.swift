@@ -42,9 +42,10 @@ struct ChatEntry: Identifiable, Sendable {
   var isError = false
   var toolName: String? = nil
   var diff: String? = nil
+  var attachments: [PromptAttachment] = []
 }
 
-struct PromptAttachment: Identifiable, Hashable {
+struct PromptAttachment: Identifiable, Hashable, Sendable {
   let id = UUID()
   let url: URL
   let mimeType: String?
