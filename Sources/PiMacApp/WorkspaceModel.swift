@@ -80,6 +80,11 @@ final class WorkspaceModel: ObservableObject {
     return merged.values.sorted { $0.modifiedAt > $1.modifiedAt }
   }
 
+  func isSelectedSession(path: String) -> Bool {
+    guard let tab = tabs.first(where: { $0.id == selectedTabID }) else { return false }
+    return tab.requestedSessionPath == path || tab.model.currentSessionPath == path
+  }
+
   func model(forSessionPath path: String) -> AppModel? {
     tabs.first(where: {
       $0.requestedSessionPath == path || $0.model.currentSessionPath == path

@@ -25,7 +25,7 @@ enum ConnectionState: Equatable {
   }
 }
 
-enum ChatEntryKind {
+enum ChatEntryKind: Sendable {
   case user
   case assistant
   case thinking
@@ -33,7 +33,7 @@ enum ChatEntryKind {
   case system
 }
 
-struct ChatEntry: Identifiable {
+struct ChatEntry: Identifiable, Sendable {
   let id: String
   var kind: ChatEntryKind
   var title: String
@@ -42,6 +42,14 @@ struct ChatEntry: Identifiable {
   var isError = false
   var toolName: String? = nil
   var diff: String? = nil
+}
+
+struct PromptAttachment: Identifiable, Hashable {
+  let id = UUID()
+  let url: URL
+  let mimeType: String?
+
+  var isImage: Bool { mimeType?.hasPrefix("image/") == true }
 }
 
 struct PiModel: Identifiable, Hashable {

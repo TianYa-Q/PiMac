@@ -7,6 +7,7 @@ struct ContentView: View {
   @EnvironmentObject private var workspace: WorkspaceModel
   @State private var choosingProject = false
   @State private var choosingSession = false
+  @State private var choosingAttachments = false
   @State private var showingSettings = false
   @State private var sessionNameDraft = ""
   @State private var diagnosticsExpanded = false
@@ -14,8 +15,8 @@ struct ContentView: View {
 
   var body: some View {
     NavigationSplitView {
-      sidebar
-        .navigationSplitViewColumnWidth(min: 230, ideal: 270, max: 340)
+      redesignedSidebar
+        .navigationSplitViewColumnWidth(min: 250, ideal: 292, max: 360)
     } detail: {
       VStack(spacing: 0) {
         conversation
@@ -31,6 +32,13 @@ struct ContentView: View {
       guard case .success(let url) = result, let projectURL = app.projectURL else { return }
       workspace.openSession(path: url.path, in: projectURL)
     }
+    .fileImporter(
+      isPresented: $choosingAttachments,
+      allowedContentTypes: [.item],
+      allowsMultipleSelection: true
+    ) { result in
+      if case .success(let urls) = result { app.addAttachments(urls) }
+    }
     .sheet(isPresented: $showingSettings) {
       SettingsView(path: app.piPath) { app.piPath = $0 }
     }
@@ -43,6 +51,196 @@ struct ContentView: View {
         composerFocused = true
       }
     }
+  }
+
+  private var redesignedSidebar: some View {
+    VStack(spacing: 0) {
+      VStack(alignment: .leading, spacing: 12) {
+        HStack(spacing: 10) {
+          ZStack {
+            RoundedRectangle(cornerRadius: 9)
+              .fill(
+                LinearGradient(
+                  colors: [.accentColor, .purple],
+                  startPoint: .topLeading,
+                  endPoint: .bottomTrailing
+                ))
+            Image(systemName: "apple.terminal.fill")
+              .foregroundStyle(.white)
+          }
+          .frame(width: 34, height: 34)
+          VStack(alignment: .leading, spacing: 1) {
+            Text("Pi Mac").font(.headline)
+            HStack(spacing: 5) {
+              Circle().fill(app.connectionState.color).frame(width: 6, height: 6)
+              Text(app.connectionState.label).lineLimit(1)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+          }
+          Spacer()
+          Button {
+            showingSettings = true
+          } label: {
+            Image(systemName: "gearshape")
+          }
+          .buttonStyle(.plain)
+          .help("设置")
+        }
+
+        HStack(spacing: 9) {
+          Image(systemName: "folder.fill")
+            .foregroundStyle(.secondary)
+          VStack(alignment: .leading, spacing: 1) {
+            Text(app.projectURL?.lastPathComponent ?? "选择工作目录")
+              .font(.caption.bold())
+              .lineLimit(1)
+            Text(app.projectURL?.deletingLastPathComponent().path ?? "尚未连接项目")
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+          }
+          Spacer()
+          Button {
+            choosingProject = true
+          } label: {
+            Image(systemName: "ellipsis")
+          }
+          .buttonStyle(.plain)
+        }
+        .padding(9)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .help(app.projectURL?.path ?? "选择工作目录")
+
+        if case .connected = app.connectionState {
+          Button {
+            guard let projectURL = app.projectURL else { return }
+            workspace.newSession(in: projectURL)
+          } label: {
+            Label("新建任务", systemImage: "square.and.pencil")
+              .frame(maxWidth: .infinity)
+          }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.large)
+
+          HStack {
+            Text("会话").font(.caption.bold()).foregroundStyle(.secondary)
+            Spacer()
+            Button {
+              choosingSession = true
+            } label: {
+              Image(systemName: "folder.badge.plus")
+            }
+            .buttonStyle(.plain)
+            .help("打开 Session 文件")
+          }
+
+          if visibleSessions.isEmpty {
+            ContentUnavailableView(
+              "暂无会话",
+              systemImage: "bubble.left",
+              description: Text("新建任务后会显示在这里")
+            )
+            .controlSize(.small)
+          } else {
+            ScrollView {
+              LazyVStack(spacing: 3) {
+                ForEach(visibleSessions) { session in
+                  redesignedSessionRow(session)
+                }
+              }
+            }
+          }
+        }
+      }
+      .padding(.horizontal, 12)
+      .padding(.top, 12)
+
+      Spacer(minLength: 8)
+
+      VStack(alignment: .leading, spacing: 9) {
+        if app.clientConnected {
+          TextField("会话名称", text: $sessionNameDraft)
+            .textFieldStyle(.plain)
+            .font(.caption)
+            .onSubmit {
+              app.sessionName = sessionNameDraft
+              app.setSessionName(sessionNameDraft)
+            }
+            .onAppear { sessionNameDraft = app.sessionName }
+            .onChange(of: app.sessionName) { _, name in sessionNameDraft = name }
+        }
+
+        CodexAccountsView().environmentObject(app)
+
+        if let stats = app.stats {
+          HStack {
+            Label(stats.totalTokens.formatted(), systemImage: "text.word.spacing")
+            Spacer()
+            if let context = stats.contextPercent { Text("上下文 \(Int(context))%") }
+            Text(stats.cost, format: .currency(code: "USD"))
+          }
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+        }
+
+        HStack {
+          Button("压缩", systemImage: "arrow.down.right.and.arrow.up.left", action: app.compact)
+          Spacer()
+          if !app.diagnosticText.isEmpty {
+            Button("诊断") { diagnosticsExpanded.toggle() }
+          }
+        }
+        .buttonStyle(.plain)
+        .font(.caption)
+
+        if diagnosticsExpanded {
+          ScrollView {
+            Text(app.diagnosticText)
+              .font(.caption2.monospaced())
+              .textSelection(.enabled)
+              .frame(maxWidth: .infinity, alignment: .leading)
+          }
+          .frame(maxHeight: 100)
+        }
+      }
+      .padding(12)
+      .background(.ultraThinMaterial)
+    }
+    .background(Color(nsColor: .controlBackgroundColor).opacity(0.52))
+  }
+
+  private func redesignedSessionRow(_ session: SessionItem) -> some View {
+    let selected = workspace.isSelectedSession(path: session.path)
+    let running = workspace.model(forSessionPath: session.path)?.isStreaming == true
+    return Button {
+      guard let projectURL = app.projectURL else { return }
+      workspace.openSession(path: session.path, in: projectURL)
+    } label: {
+      HStack(spacing: 9) {
+        Image(systemName: running ? "circle.dotted.circle.fill" : "bubble.left")
+          .foregroundStyle(running ? Color.orange : selected ? Color.accentColor : Color.secondary)
+          .frame(width: 17)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(session.title)
+            .font(.callout)
+            .lineLimit(2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+          Text(session.modifiedAt, style: .relative)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+        if running { ProgressView().controlSize(.mini) }
+      }
+      .padding(.horizontal, 9)
+      .padding(.vertical, 7)
+      .contentShape(Rectangle())
+      .background(
+        selected ? Color.accentColor.opacity(0.13) : Color.clear,
+        in: RoundedRectangle(cornerRadius: 9)
+      )
+    }
+    .buttonStyle(.plain)
   }
 
   private var sidebar: some View {
@@ -199,18 +397,23 @@ struct ContentView: View {
           ForEach(conversationTurns) { turn in
             ConversationTurnView(
               turn: turn,
-              isActive: app.isStreaming && turn.id == conversationTurns.last?.id
+              isActive: app.isStreaming && turn.id == conversationTurns.last?.id,
+              onEdit: { text in
+                app.editMessage(text)
+                composerFocused = true
+              }
             )
             .id(turn.id)
           }
+          Color.clear.frame(height: 44).id("conversation-bottom")
         }
         .padding(20)
       }
       .onChange(of: app.messages.count) {
-        if let id = conversationTurns.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+        proxy.scrollTo("conversation-bottom", anchor: .bottom)
       }
       .onChange(of: app.messages.last?.text) {
-        if let id = conversationTurns.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+        proxy.scrollTo("conversation-bottom", anchor: .bottom)
       }
     }
   }
@@ -235,11 +438,12 @@ struct ContentView: View {
         ComposerTextView(
           text: $app.composerText,
           isFocused: $composerFocused,
-          onSubmit: app.sendPrompt
+          onSubmit: app.sendPrompt,
+          onPasteFiles: app.addAttachments
         )
         .frame(minHeight: 72, maxHeight: 150)
         if app.composerText.isEmpty {
-          Text("给 Pi 发送消息…")
+          Text("给 Pi 发送消息，或拖入图片和文件…")
             .foregroundStyle(.tertiary)
             .padding(.leading, 9)
             .padding(.top, 9)
@@ -247,7 +451,37 @@ struct ContentView: View {
         }
       }
 
+      if !app.attachments.isEmpty {
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 6) {
+            ForEach(app.attachments) { attachment in
+              HStack(spacing: 5) {
+                Image(systemName: attachment.isImage ? "photo" : "doc")
+                Text(attachment.url.lastPathComponent).lineLimit(1)
+                Button {
+                  app.removeAttachment(attachment)
+                } label: {
+                  Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+              }
+              .font(.caption2)
+              .padding(.horizontal, 7)
+              .padding(.vertical, 4)
+              .background(Color.secondary.opacity(0.10), in: Capsule())
+            }
+          }
+        }
+      }
+
       HStack(spacing: 8) {
+        Button {
+          choosingAttachments = true
+        } label: {
+          Image(systemName: "paperclip")
+        }
+        .buttonStyle(.plain)
+        .help("添加图片或文件")
         modelMenu
         thinkingMenu
         Spacer()
@@ -278,8 +512,8 @@ struct ContentView: View {
           .clipShape(Circle())
           .keyboardShortcut(.return, modifiers: .command)
           .disabled(
-            app.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-              || !app.clientConnected
+            (app.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              && app.attachments.isEmpty) || !app.clientConnected
           )
           .help("发送（Enter）")
         }
@@ -287,6 +521,10 @@ struct ContentView: View {
     }
     .padding(10)
     .background(.quaternary.opacity(0.42), in: RoundedRectangle(cornerRadius: 14))
+    .dropDestination(for: URL.self) { urls, _ in
+      app.addAttachments(urls)
+      return !urls.isEmpty
+    }
     .padding(12)
   }
 
@@ -361,6 +599,7 @@ private struct ComposerTextView: NSViewRepresentable {
   @Binding var text: String
   @Binding var isFocused: Bool
   let onSubmit: () -> Void
+  let onPasteFiles: ([URL]) -> Void
 
   func makeCoordinator() -> Coordinator {
     Coordinator(text: $text, isFocused: $isFocused, initialText: text)
@@ -376,6 +615,7 @@ private struct ComposerTextView: NSViewRepresentable {
     let textView = SubmitTextView()
     textView.delegate = context.coordinator
     textView.onSubmit = onSubmit
+    textView.onPasteFiles = onPasteFiles
     textView.string = text
     textView.isRichText = false
     textView.importsGraphics = false
@@ -399,6 +639,7 @@ private struct ComposerTextView: NSViewRepresentable {
   func updateNSView(_ scrollView: NSScrollView, context: Context) {
     guard let textView = scrollView.documentView as? SubmitTextView else { return }
     textView.onSubmit = onSubmit
+    textView.onPasteFiles = onPasteFiles
     // AppModel 的流式事件会频繁触发 SwiftUI 更新。只有 Binding 确实发生了外部
     // 变化（例如发送后清空）才回写 NSTextView，避免旧的 View 快照覆盖刚输入的字符。
     if text != context.coordinator.lastBindingText {
@@ -453,6 +694,20 @@ private struct ComposerTextView: NSViewRepresentable {
 
   final class SubmitTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    var onPasteFiles: (([URL]) -> Void)?
+
+    override func paste(_ sender: Any?) {
+      let urls =
+        NSPasteboard.general.readObjects(
+          forClasses: [NSURL.self],
+          options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] ?? []
+      if !urls.isEmpty {
+        onPasteFiles?(urls)
+      } else {
+        super.paste(sender)
+      }
+    }
 
     override func keyDown(with event: NSEvent) {
       let isReturn = event.keyCode == 36 || event.keyCode == 76
@@ -495,10 +750,13 @@ private struct ConversationTurn: Identifiable {
 private struct ConversationTurnView: View {
   let turn: ConversationTurn
   let isActive: Bool
+  let onEdit: (String) -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      if let user = turn.user { ChatEntryView(entry: user) }
+      if let user = turn.user {
+        ChatEntryView(entry: user) { onEdit(user.text) }
+      }
       if !turn.activity.isEmpty {
         ActivityGroupView(entries: turn.activity, taskIsRunning: isActive)
       }
@@ -633,10 +891,12 @@ private struct GitDiffView: View {
 
 private struct ChatEntryView: View {
   let entry: ChatEntry
+  let onEdit: (() -> Void)?
   @State private var expanded: Bool
 
-  init(entry: ChatEntry) {
+  init(entry: ChatEntry, onEdit: (() -> Void)? = nil) {
     self.entry = entry
+    self.onEdit = onEdit
     _expanded = State(initialValue: entry.kind != .thinking && entry.kind != .tool)
   }
 
@@ -649,6 +909,15 @@ private struct ChatEntryView: View {
         HStack {
           Text(entry.title).font(.caption.bold()).foregroundStyle(.secondary)
           if entry.isRunning { ProgressView().controlSize(.mini) }
+          Spacer()
+          if let onEdit {
+            Button(action: onEdit) {
+              Image(systemName: "pencil")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("重新编辑这条消息")
+          }
         }
         if entry.kind == .tool || entry.kind == .thinking {
           DisclosureGroup(isExpanded: $expanded) {

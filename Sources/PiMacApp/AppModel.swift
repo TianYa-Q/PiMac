@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import UniformTypeIdentifiers
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -18,6 +19,7 @@ final class AppModel: ObservableObject {
   @Published var currentSessionPath = ""
   @Published var stats: SessionStats?
   @Published var composerText = ""
+  @Published var attachments: [PromptAttachment] = []
   @Published var extensionDialog: ExtensionDialog?
   @Published var statusText = ""
   @Published var extensionStatuses: [String: String] = [:]
@@ -63,11 +65,25 @@ final class AppModel: ObservableObject {
     Task { @MainActor [weak self] in
       await Task.yield()
       if let startupProjectURL {
-        self?.connect(
-          to: startupProjectURL,
-          continueLastSession: continueLastSession,
-          sessionPath: startupSessionPath
-        )
+        if let startupSessionPath {
+          // 本地 JSONL 读取与 RPC 进程启动并行进行，历史内容无需等待 Pi 完成连接。
+          let transcriptTask = Task.detached(priority: .userInitiated) {
+            Self.loadTranscript(at: startupSessionPath)
+          }
+          self?.connect(
+            to: startupProjectURL,
+            continueLastSession: continueLastSession,
+            sessionPath: startupSessionPath
+          )
+          let cachedMessages = await transcriptTask.value
+          if self?.messages.isEmpty == true { self?.messages = cachedMessages }
+        } else {
+          self?.connect(
+            to: startupProjectURL,
+            continueLastSession: continueLastSession,
+            sessionPath: nil
+          )
+        }
       } else {
         self?.restoreLastProject()
       }
@@ -137,10 +153,40 @@ final class AppModel: ObservableObject {
     client.stop()
   }
 
+  func addAttachments(_ urls: [URL]) {
+    let existing = Set(attachments.map { $0.url.standardizedFileURL })
+    let additions =
+      urls
+      .map(\.standardizedFileURL)
+      .filter { $0.isFileURL && !existing.contains($0) }
+      .map {
+        PromptAttachment(
+          url: $0,
+          mimeType: UTType(filenameExtension: $0.pathExtension)?.preferredMIMEType
+        )
+      }
+    guard !additions.isEmpty else { return }
+    attachments.append(contentsOf: additions)
+
+    let paths = additions.map { "`\($0.url.path.replacingOccurrences(of: "`", with: "\\`"))`" }
+    let prefix = composerText.isEmpty || composerText.hasSuffix("\n") ? "" : "\n"
+    composerText += prefix + paths.joined(separator: "\n")
+  }
+
+  func removeAttachment(_ attachment: PromptAttachment) {
+    attachments.removeAll { $0.id == attachment.id }
+  }
+
+  func editMessage(_ text: String) {
+    composerText = text
+  }
+
   func sendPrompt() {
     let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !text.isEmpty, client.isRunning else { return }
+    guard !text.isEmpty || !attachments.isEmpty, client.isRunning else { return }
+    let sentAttachments = attachments
     composerText = ""
+    attachments = []
     messages.append(
       ChatEntry(
         id: UUID().uuidString,
@@ -149,7 +195,18 @@ final class AppModel: ObservableObject {
         text: text
       ))
 
-    var command: PiRPCClient.JSON = ["type": "prompt", "message": text]
+    var command: PiRPCClient.JSON = [
+      "type": "prompt", "message": text.isEmpty ? "请查看附件。" : text,
+    ]
+    let images: [PiRPCClient.JSON] = sentAttachments.compactMap { attachment in
+      guard attachment.isImage,
+        let mimeType = attachment.mimeType,
+        let data = try? Data(contentsOf: attachment.url),
+        data.count <= 20 * 1_024 * 1_024
+      else { return nil }
+      return ["type": "image", "data": data.base64EncodedString(), "mimeType": mimeType]
+    }
+    if !images.isEmpty { command["images"] = images }
     if isStreaming {
       command["streamingBehavior"] = "steer"
     }
@@ -734,7 +791,21 @@ final class AppModel: ObservableObject {
     diagnosticText = lines.joined(separator: "\n")
   }
 
-  private static func chatEntry(from message: PiRPCClient.JSON) -> ChatEntry? {
+  nonisolated private static func loadTranscript(at path: String) -> [ChatEntry] {
+    guard let data = FileManager.default.contents(atPath: path),
+      let text = String(data: data, encoding: .utf8)
+    else { return [] }
+    return text.split(separator: "\n").compactMap { line in
+      guard let data = String(line).data(using: .utf8),
+        let record = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
+        record["type"] as? String == "message",
+        let message = record["message"] as? PiRPCClient.JSON
+      else { return nil }
+      return chatEntry(from: message)
+    }
+  }
+
+  nonisolated private static func chatEntry(from message: PiRPCClient.JSON) -> ChatEntry? {
     guard let role = message["role"] as? String else { return nil }
     switch role {
     case "user":
