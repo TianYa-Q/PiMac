@@ -21,14 +21,14 @@ concurrency:
 jobs:
   release:
     name: Build and release
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Validate version
         shell: bash
