@@ -8,7 +8,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     NSApp.setActivationPolicy(.regular)
     DispatchQueue.main.async {
       NSApp.activate(ignoringOtherApps: true)
-      NSApp.windows.first?.makeKeyAndOrderFront(nil)
+      guard let window = NSApp.windows.first else { return }
+      window.titleVisibility = .hidden
+      window.titlebarAppearsTransparent = true
+      window.titlebarSeparatorStyle = .none
+      window.makeKeyAndOrderFront(nil)
     }
   }
 }
@@ -25,6 +29,7 @@ struct PiMacApp: App {
         .onDisappear { workspace.disconnectAll() }
     }
     .defaultSize(width: 1120, height: 760)
+    .windowToolbarStyle(.unifiedCompact(showsTitle: false))
   }
 }
 

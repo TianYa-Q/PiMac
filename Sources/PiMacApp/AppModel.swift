@@ -154,20 +154,37 @@ final class AppModel: ObservableObject {
     client.stop()
   }
 
-  func addPastedImage(_ data: Data, mimeType: String) {
+  var hasUserMessage: Bool {
+    messages.contains { $0.kind == .user }
+  }
+
+  /// 新建任务在用户首次发送消息前只是草稿。离开草稿时停止进程并清理 Pi
+  /// 可能提前创建的仅含会话头、模型配置等信息的 JSONL 文件。
+  func discardEmptyDraft() {
+    guard !hasUserMessage, !isStreaming else { return }
+    let path = currentSessionPath
+    disconnect()
+    guard !path.isEmpty else { return }
+    try? FileManager.default.removeItem(atPath: path)
+  }
+
+  @discardableResult
+  func addPastedImage(_ data: Data, mimeType: String) -> [PromptAttachment] {
     let fileExtension = UTType(mimeType: mimeType)?.preferredFilenameExtension ?? "png"
     let directory = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
     let url = directory.appendingPathComponent("pi-clipboard-\(UUID().uuidString).\(fileExtension)")
     do {
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
       try data.write(to: url, options: .atomic)
-      addAttachments([url])
+      return addAttachments([url])
     } catch {
       appendSystemError("无法保存剪贴板图片：\(error.localizedDescription)")
+      return []
     }
   }
 
-  func addAttachments(_ urls: [URL]) {
+  @discardableResult
+  func addAttachments(_ urls: [URL]) -> [PromptAttachment] {
     let existing = Set(attachments.map { $0.url.standardizedFileURL })
     let additions =
       urls
@@ -179,9 +196,9 @@ final class AppModel: ObservableObject {
           mimeType: UTType(filenameExtension: $0.pathExtension)?.preferredMIMEType
         )
       }
-    guard !additions.isEmpty else { return }
+    guard !additions.isEmpty else { return [] }
     attachments.append(contentsOf: additions)
-
+    return additions
   }
 
   func removeAttachment(_ attachment: PromptAttachment) {
@@ -302,15 +319,6 @@ final class AppModel: ObservableObject {
     client.request(["type": "set_thinking_level", "level": level]) { [weak self] result in
       switch result {
       case .success: self?.selectedThinkingLevel = level
-      case .failure(let error): self?.appendSystemError(error.localizedDescription)
-      }
-    }
-  }
-
-  func setSessionName(_ name: String) {
-    client.request(["type": "set_session_name", "name": name]) { [weak self] result in
-      switch result {
-      case .success: self?.loadSessions()
       case .failure(let error): self?.appendSystemError(error.localizedDescription)
       }
     }
@@ -537,31 +545,80 @@ final class AppModel: ObservableObject {
       else { continue }
 
       var title = (header["name"] as? String) ?? (header["sessionName"] as? String) ?? ""
-      if title.isEmpty {
-        for line in lines.dropFirst() {
-          guard let lineData = String(line).data(using: .utf8),
-            let entry = try? JSONSerialization.jsonObject(with: lineData) as? PiRPCClient.JSON,
-            entry["type"] as? String == "message",
-            let message = entry["message"] as? PiRPCClient.JSON,
-            message["role"] as? String == "user"
-          else { continue }
-          title = contentText(message["content"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\n", with: " ")
-          break
-        }
+      var firstUserText: String?
+      for line in lines.dropFirst() {
+        guard let lineData = String(line).data(using: .utf8),
+          let entry = try? JSONSerialization.jsonObject(with: lineData) as? PiRPCClient.JSON,
+          entry["type"] as? String == "message",
+          let message = entry["message"] as? PiRPCClient.JSON,
+          message["role"] as? String == "user"
+        else { continue }
+        firstUserText = contentText(message["content"])
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+          .replacingOccurrences(of: "\n", with: " ")
+        break
       }
+      // 启动新任务时 Pi 可能立即写入会话头和配置记录。没有用户消息的文件
+      // 仍然只是草稿，不应进入会话列表。
+      guard let firstUserText else { continue }
+      if title.isEmpty { title = firstUserText }
       if title.isEmpty { title = "未命名会话" }
       title = String(title.prefix(70))
-      let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+      // Pi may touch a session file while merely opening it. Sort by the latest
+      // actual message instead of filesystem modification time so viewing a
+      // session does not move it to the top of the list.
+      let activityDates = [
+        latestMessageDate(in: lines),
+        latestMessageDate(inTailOf: url),
+        recordDate(header),
+      ].compactMap { $0 }
       result.append(
         SessionItem(
           path: url.path,
           title: title,
-          modifiedAt: values?.contentModificationDate ?? .distantPast
+          modifiedAt: activityDates.max() ?? .distantPast
         ))
     }
     return result.sorted { $0.modifiedAt > $1.modifiedAt }
+  }
+
+  nonisolated private static func latestMessageDate(in lines: [Substring]) -> Date? {
+    for line in lines.reversed() {
+      guard let data = String(line).data(using: .utf8),
+        let record = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
+        record["type"] as? String == "message"
+      else { continue }
+      if let date = recordDate(record) { return date }
+    }
+    return nil
+  }
+
+  nonisolated private static func latestMessageDate(inTailOf url: URL) -> Date? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    guard let size = try? handle.seekToEnd() else { return nil }
+    let tailSize: UInt64 = 1_048_576
+    try? handle.seek(toOffset: size > tailSize ? size - tailSize : 0)
+    guard let data = try? handle.readToEnd(),
+      let text = String(data: data, encoding: .utf8)
+    else { return nil }
+    return latestMessageDate(in: text.split(separator: "\n", omittingEmptySubsequences: true))
+  }
+
+  nonisolated private static func recordDate(_ record: PiRPCClient.JSON) -> Date? {
+    if let timestamp = record["timestamp"] as? String {
+      let formatter = ISO8601DateFormatter()
+      formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      if let date = formatter.date(from: timestamp) { return date }
+      formatter.formatOptions = [.withInternetDateTime]
+      if let date = formatter.date(from: timestamp) { return date }
+    }
+    if let message = record["message"] as? PiRPCClient.JSON,
+      let milliseconds = message["timestamp"] as? NSNumber
+    {
+      return Date(timeIntervalSince1970: milliseconds.doubleValue / 1_000)
+    }
+    return nil
   }
 
   /// RPC 事件种类较多，这里只把会影响原生界面的状态集中映射，避免视图层理解协议细节。

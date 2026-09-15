@@ -15,6 +15,7 @@ final class WorkspaceModel: ObservableObject {
     let model: AppModel
     let requestedSessionPath: String?
     let createdAt: Date
+    let isDraft: Bool
   }
 
   @Published private(set) var tabs: [Tab] = []
@@ -23,11 +24,14 @@ final class WorkspaceModel: ObservableObject {
 
   private static let savedProjectsKey = "workspaceProjectPaths"
   private static let activeProjectKey = "workspaceActiveProjectPath"
+  private static let archivedSessionsKey = "workspaceArchivedSessionPaths"
   private var observations: [UUID: AnyCancellable] = [:]
   private var selectedTabByProject: [String: UUID] = [:]
+  private var archivedSessionPaths: Set<String>
 
   init() {
     let defaults = UserDefaults.standard
+    archivedSessionPaths = Set(defaults.stringArray(forKey: Self.archivedSessionsKey) ?? [])
     let savedPaths = defaults.stringArray(forKey: Self.savedProjectsKey) ?? []
     let fallbackPath = defaults.string(forKey: "lastProjectPath")
     let paths = savedPaths.isEmpty ? fallbackPath.map { [$0] } ?? [] : savedPaths
@@ -37,11 +41,13 @@ final class WorkspaceModel: ObservableObject {
     if let project = projects.first(where: { $0.id == activePath }) ?? projects.first {
       addTab(
         model: AppModel(startupProjectURL: project.url, continueLastSession: true),
-        requestedSessionPath: nil
+        requestedSessionPath: nil,
+        isDraft: false
       )
     } else {
       addTab(
-        model: AppModel(restoreLastProjectOnLaunch: false), requestedSessionPath: nil)
+        model: AppModel(restoreLastProjectOnLaunch: false), requestedSessionPath: nil,
+        isDraft: false)
     }
   }
 
@@ -67,7 +73,7 @@ final class WorkspaceModel: ObservableObject {
 
   func selectProject(_ project: WorkspaceProject) {
     if let tabID = selectedTabByProject[project.id], tabs.contains(where: { $0.id == tabID }) {
-      selectedTabID = tabID
+      selectTab(tabID)
       return
     }
     if let existing = tabs.last(where: {
@@ -76,16 +82,22 @@ final class WorkspaceModel: ObservableObject {
       selectTab(existing.id)
       return
     }
+    discardSelectedDraftIfEmpty()
     addTab(
       model: AppModel(startupProjectURL: project.url, continueLastSession: true),
-      requestedSessionPath: nil
+      requestedSessionPath: nil,
+      isDraft: false
     )
   }
 
   func removeProject(_ project: WorkspaceProject) {
     let matchingTabs = tabs.filter { $0.model.projectURL?.standardizedFileURL.path == project.id }
     for tab in matchingTabs {
-      tab.model.disconnect()
+      if tab.isDraft && !tab.model.hasUserMessage {
+        tab.model.discardEmptyDraft()
+      } else {
+        tab.model.disconnect()
+      }
       observations.removeValue(forKey: tab.id)
     }
     tabs.removeAll { $0.model.projectURL?.standardizedFileURL.path == project.id }
@@ -97,18 +109,22 @@ final class WorkspaceModel: ObservableObject {
       selectProject(next)
     } else {
       addTab(
-        model: AppModel(restoreLastProjectOnLaunch: false), requestedSessionPath: nil)
+        model: AppModel(restoreLastProjectOnLaunch: false), requestedSessionPath: nil,
+        isDraft: false)
     }
   }
 
   func newSession(in projectURL: URL) {
+    discardSelectedDraftIfEmpty()
     addTab(
       model: AppModel(startupProjectURL: projectURL, continueLastSession: false),
-      requestedSessionPath: nil
+      requestedSessionPath: nil,
+      isDraft: true
     )
   }
 
   func openSession(path: String, in projectURL: URL) {
+    if archivedSessionPaths.remove(path) != nil { persistArchivedSessions() }
     if let existing = tabs.first(where: {
       $0.requestedSessionPath == path || $0.model.currentSessionPath == path
     }) {
@@ -116,13 +132,15 @@ final class WorkspaceModel: ObservableObject {
       selectTab(existing.id)
       return
     }
+    discardSelectedDraftIfEmpty()
     addTab(
       model: AppModel(
         startupProjectURL: projectURL,
         continueLastSession: false,
         startupSessionPath: path
       ),
-      requestedSessionPath: path
+      requestedSessionPath: path,
+      isDraft: false
     )
   }
 
@@ -142,7 +160,7 @@ final class WorkspaceModel: ObservableObject {
         merged[session.path] = session
       }
       let path = tab.model.currentSessionPath
-      if !path.isEmpty, merged[path] == nil {
+      if !path.isEmpty, tab.model.hasUserMessage, merged[path] == nil {
         let firstPrompt = tab.model.messages.first(where: { $0.kind == .user })?.text
         let title =
           tab.model.sessionName.isEmpty
@@ -150,7 +168,43 @@ final class WorkspaceModel: ObservableObject {
         merged[path] = SessionItem(path: path, title: title, modifiedAt: tab.createdAt)
       }
     }
-    return merged.values.sorted { $0.modifiedAt > $1.modifiedAt }
+    return merged.values
+      .filter { !archivedSessionPaths.contains($0.path) }
+      .sorted { $0.modifiedAt > $1.modifiedAt }
+  }
+
+  func archiveSession(path: String, in projectURL: URL) {
+    guard model(forSessionPath: path)?.isStreaming != true else { return }
+    archivedSessionPaths.insert(path)
+    persistArchivedSessions()
+
+    let removed = tabs.filter {
+      $0.requestedSessionPath == path || $0.model.currentSessionPath == path
+    }
+    let removedIDs = Set(removed.map(\.id))
+    let removedSelectedTab = selectedTabID.map(removedIDs.contains) ?? false
+    for tab in removed {
+      tab.model.disconnect()
+      observations.removeValue(forKey: tab.id)
+    }
+    tabs.removeAll { removedIDs.contains($0.id) }
+
+    guard removedSelectedTab else {
+      objectWillChange.send()
+      return
+    }
+    let projectPath = projectURL.standardizedFileURL.path
+    if let replacement = tabs.last(where: {
+      $0.model.projectURL?.standardizedFileURL.path == projectPath
+    }) {
+      selectTab(replacement.id)
+    } else {
+      addTab(
+        model: AppModel(startupProjectURL: projectURL, continueLastSession: false),
+        requestedSessionPath: nil,
+        isDraft: true
+      )
+    }
   }
 
   func isSelectedSession(path: String) -> Bool {
@@ -166,13 +220,18 @@ final class WorkspaceModel: ObservableObject {
 
   func disconnectAll() {
     for tab in tabs {
-      tab.model.disconnect()
+      if tab.isDraft && !tab.model.hasUserMessage {
+        tab.model.discardEmptyDraft()
+      } else {
+        tab.model.disconnect()
+      }
     }
   }
 
-  private func addTab(model: AppModel, requestedSessionPath: String?) {
+  private func addTab(model: AppModel, requestedSessionPath: String?, isDraft: Bool) {
     let tab = Tab(
-      id: UUID(), model: model, requestedSessionPath: requestedSessionPath, createdAt: .now)
+      id: UUID(), model: model, requestedSessionPath: requestedSessionPath, createdAt: .now,
+      isDraft: isDraft)
     tabs.append(tab)
     observations[tab.id] = model.objectWillChange.sink { [weak self, weak model] _ in
       guard let self, let model else { return }
@@ -183,11 +242,23 @@ final class WorkspaceModel: ObservableObject {
   }
 
   private func selectTab(_ id: UUID) {
+    if id != selectedTabID { discardSelectedDraftIfEmpty(except: id) }
     selectedTabID = id
     guard let path = tabs.first(where: { $0.id == id })?.model.projectURL?.standardizedFileURL.path
     else { return }
     selectedTabByProject[path] = id
     UserDefaults.standard.set(path, forKey: Self.activeProjectKey)
+  }
+
+  private func discardSelectedDraftIfEmpty(except retainedID: UUID? = nil) {
+    guard let id = selectedTabID, id != retainedID,
+      let tab = tabs.first(where: { $0.id == id }), tab.isDraft,
+      !tab.model.hasUserMessage, !tab.model.isStreaming
+    else { return }
+    tab.model.discardEmptyDraft()
+    observations.removeValue(forKey: id)
+    tabs.removeAll { $0.id == id }
+    selectedTabID = nil
   }
 
   private func synchronizeProject(for model: AppModel) {
@@ -205,6 +276,10 @@ final class WorkspaceModel: ObservableObject {
 
   private func persistProjects() {
     UserDefaults.standard.set(projects.map(\.id), forKey: Self.savedProjectsKey)
+  }
+
+  private func persistArchivedSessions() {
+    UserDefaults.standard.set(Array(archivedSessionPaths), forKey: Self.archivedSessionsKey)
   }
 
   nonisolated private static func validProject(path: String) -> WorkspaceProject? {

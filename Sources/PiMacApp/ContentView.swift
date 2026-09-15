@@ -2,11 +2,64 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private func isWhitespace(in text: NSString, before location: Int) -> Bool {
+  guard location > 0, let scalar = UnicodeScalar(text.character(at: location - 1)) else {
+    return false
+  }
+  return CharacterSet.whitespacesAndNewlines.contains(scalar)
+}
+
 private struct ConversationBottomPreferenceKey: PreferenceKey {
   static var defaultValue: CGFloat = 0
 
   static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
     value = nextValue()
+  }
+}
+
+private struct CompactResetTime: View {
+  let date: Date
+
+  var body: some View {
+    TimelineView(.periodic(from: .now, by: 60)) { context in
+      Text(Self.label(for: date, relativeTo: context.date))
+    }
+  }
+
+  private static func label(for date: Date, relativeTo now: Date) -> String {
+    let minutes = max(0, Int(ceil(date.timeIntervalSince(now) / 60)))
+    if minutes == 0 { return "NOW" }
+
+    let days = minutes / 1_440
+    let hours = minutes % 1_440 / 60
+    let remainingMinutes = minutes % 60
+    if days > 0 { return hours > 0 ? "\(days)D\(hours)H" : "\(days)D" }
+    if hours > 0 { return remainingMinutes > 0 ? "\(hours)H\(remainingMinutes)M" : "\(hours)H" }
+    return "\(remainingMinutes)M"
+  }
+}
+
+private struct SessionRelativeTime: View {
+  let date: Date
+
+  var body: some View {
+    TimelineView(.periodic(from: .now, by: 60)) { context in
+      Text(Self.label(for: date, relativeTo: context.date))
+    }
+  }
+
+  private static func label(for date: Date, relativeTo now: Date) -> String {
+    let interval = date.timeIntervalSince(now)
+    if abs(interval) < 60 {
+      return interval > 0 ? "不到 1 分钟后" : "不到 1 分钟前"
+    }
+
+    // Quantize to whole minutes so the session list never displays or updates by seconds.
+    let wholeMinutes = (interval / 60).rounded(.towardZero)
+    let formatter = RelativeDateTimeFormatter()
+    formatter.locale = .current
+    formatter.unitsStyle = .full
+    return formatter.localizedString(fromTimeInterval: wholeMinutes * 60)
   }
 }
 
@@ -17,18 +70,22 @@ struct ContentView: View {
   @State private var choosingSession = false
   @State private var choosingAttachments = false
   @State private var showingSettings = false
-  @State private var sessionNameDraft = ""
   @State private var diagnosticsExpanded = false
   @State private var composerFocused = false
+  @State private var composerSelection = NSRange(location: 0, length: 0)
   @State private var autoScrollEnabled = true
   @State private var autoScrollScheduled = false
+  @State private var initialSessionScrollPending = true
+  @State private var initialScrollGeneration = 0
+  @State private var visibleSessionCount = 10
+  @State private var hoveredSessionPath: String?
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
 
   var body: some View {
-    NavigationSplitView {
+    HStack(spacing: 0) {
       redesignedSidebar
-        .navigationSplitViewColumnWidth(min: 250, ideal: 292, max: 360)
-    } detail: {
+        .frame(width: 292)
+
       VStack(spacing: 0) {
         conversation
         Divider()
@@ -48,7 +105,7 @@ struct ContentView: View {
       allowedContentTypes: [.item],
       allowsMultipleSelection: true
     ) { result in
-      if case .success(let urls) = result { app.addAttachments(urls) }
+      if case .success(let urls) = result { addAttachmentsAtSelection(urls) }
     }
     .sheet(isPresented: $showingSettings) {
       SettingsView(path: app.piPath) { app.piPath = $0 }
@@ -61,6 +118,9 @@ struct ContentView: View {
       if case .connected = app.connectionState {
         composerFocused = true
       }
+    }
+    .onChange(of: app.projectURL?.standardizedFileURL.path) {
+      visibleSessionCount = 10
     }
   }
 
@@ -180,6 +240,9 @@ struct ContentView: View {
                 ForEach(visibleSessions) { session in
                   redesignedSessionRow(session)
                 }
+                if hasMoreSessions {
+                  loadMoreSessionsButton
+                }
               }
             }
           }
@@ -191,18 +254,6 @@ struct ContentView: View {
       Spacer(minLength: 8)
 
       VStack(alignment: .leading, spacing: 9) {
-        if app.clientConnected {
-          TextField("会话名称", text: $sessionNameDraft)
-            .textFieldStyle(.plain)
-            .font(.caption)
-            .onSubmit {
-              app.sessionName = sessionNameDraft
-              app.setSessionName(sessionNameDraft)
-            }
-            .onAppear { sessionNameDraft = app.sessionName }
-            .onChange(of: app.sessionName) { _, name in sessionNameDraft = name }
-        }
-
         CodexAccountsView().environmentObject(app)
 
         if let stats = app.stats {
@@ -322,34 +373,59 @@ struct ContentView: View {
   private func redesignedSessionRow(_ session: SessionItem) -> some View {
     let selected = workspace.isSelectedSession(path: session.path)
     let running = workspace.model(forSessionPath: session.path)?.isStreaming == true
-    return Button {
-      guard let projectURL = app.projectURL else { return }
-      workspace.openSession(path: session.path, in: projectURL)
-    } label: {
-      HStack(spacing: 9) {
-        Image(systemName: running ? "circle.dotted.circle.fill" : "bubble.left")
-          .foregroundStyle(running ? Color.orange : selected ? Color.accentColor : Color.secondary)
-          .frame(width: 17)
-        VStack(alignment: .leading, spacing: 2) {
-          Text(session.title)
-            .font(.callout)
-            .lineLimit(2)
-            .frame(maxWidth: .infinity, alignment: .leading)
-          Text(session.modifiedAt, style: .relative)
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+    let hovered = hoveredSessionPath == session.path
+    return ZStack(alignment: .trailing) {
+      Button {
+        guard let projectURL = app.projectURL else { return }
+        workspace.openSession(path: session.path, in: projectURL)
+      } label: {
+        HStack(spacing: 9) {
+          Image(systemName: selected ? "bubble.left.fill" : "bubble.left")
+            .foregroundStyle(running ? Color.orange : selected ? Color.accentColor : Color.secondary)
+            .frame(width: 17)
+          VStack(alignment: .leading, spacing: 2) {
+            Text(session.title)
+              .font(.callout)
+              .lineLimit(2)
+              .frame(maxWidth: .infinity, alignment: .leading)
+            SessionRelativeTime(date: session.modifiedAt)
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+          }
         }
-        if running { ProgressView().controlSize(.mini) }
+        .padding(.leading, 9)
+        .padding(.trailing, 38)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
       }
-      .padding(.horizontal, 9)
-      .padding(.vertical, 7)
-      .contentShape(Rectangle())
-      .background(
-        selected ? Color.accentColor.opacity(0.13) : Color.clear,
-        in: RoundedRectangle(cornerRadius: 9)
-      )
+      .buttonStyle(.plain)
+
+      if hovered {
+        Button {
+          guard let projectURL = app.projectURL else { return }
+          workspace.archiveSession(path: session.path, in: projectURL)
+        } label: {
+          Image(systemName: "archivebox")
+            .frame(width: 26, height: 26)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+        .disabled(running)
+        .help(running ? "任务运行时不能归档" : "归档会话")
+        .padding(.trailing, 6)
+        .transition(.opacity)
+      }
     }
-    .buttonStyle(.plain)
+    .background(
+      selected ? Color.accentColor.opacity(0.13) : Color.clear,
+      in: RoundedRectangle(cornerRadius: 9)
+    )
+    .contentShape(Rectangle())
+    .onHover { isHovered in
+      withAnimation(.easeOut(duration: 0.12)) {
+        hoveredSessionPath = isHovered ? session.path : nil
+      }
+    }
   }
 
   private var sidebar: some View {
@@ -378,13 +454,6 @@ struct ContentView: View {
       if case .connected = app.connectionState {
         GroupBox("会话") {
           VStack(alignment: .leading, spacing: 9) {
-            TextField("会话名称", text: $sessionNameDraft)
-              .onSubmit {
-                app.sessionName = sessionNameDraft
-                app.setSessionName(sessionNameDraft)
-              }
-              .onAppear { sessionNameDraft = app.sessionName }
-              .onChange(of: app.sessionName) { _, name in sessionNameDraft = name }
             HStack {
               Button("新会话", systemImage: "plus.bubble") {
                 guard let projectURL = app.projectURL else { return }
@@ -421,18 +490,18 @@ struct ContentView: View {
                           Text(session.title)
                             .lineLimit(2)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                          Text(session.modifiedAt, style: .relative)
+                          SessionRelativeTime(date: session.modifiedAt)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        }
-                        if workspace.model(forSessionPath: session.path)?.isStreaming == true {
-                          ProgressView().controlSize(.mini)
                         }
                       }
                       .contentShape(Rectangle())
                       .padding(.vertical, 3)
                     }
                     .buttonStyle(.plain)
+                  }
+                  if hasMoreSessions {
+                    loadMoreSessionsButton
                   }
                 }
               }
@@ -486,9 +555,30 @@ struct ContentView: View {
     .padding()
   }
 
-  private var visibleSessions: [SessionItem] {
+  private var allSessions: [SessionItem] {
     guard let projectURL = app.projectURL else { return app.sessions }
     return workspace.sessions(in: projectURL)
+  }
+
+  private var visibleSessions: [SessionItem] {
+    Array(allSessions.prefix(visibleSessionCount))
+  }
+
+  private var hasMoreSessions: Bool {
+    visibleSessions.count < allSessions.count
+  }
+
+  private var loadMoreSessionsButton: some View {
+    Button {
+      visibleSessionCount = min(visibleSessionCount + 10, allSessions.count)
+    } label: {
+      Label("载入更多", systemImage: "chevron.down")
+        .font(.caption)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 5)
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(.secondary)
   }
 
   private var conversation: some View {
@@ -534,36 +624,67 @@ struct ContentView: View {
         .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
         .onAppear {
-          // 缓存 transcript 可能早于视图创建完成，不能只依赖 messages 的变化事件。
-          // 等首轮布局完成后直接恢复到底部。
-          DispatchQueue.main.async {
-            proxy.scrollTo("conversation-bottom", anchor: .bottom)
-            autoScrollEnabled = true
-          }
+          // 会话内容通过 RPC 异步到达；保持首次滚动待处理，直到消息完成首轮布局。
+          initialSessionScrollPending = true
+          scheduleInitialSessionScroll(proxy)
         }
         .onPreferenceChange(ConversationBottomPreferenceKey.self) { bottomY in
-          autoScrollEnabled = bottomY <= viewport.size.height + 96
+          let isNearBottom = bottomY <= viewport.size.height + 96
+          if isNearBottom {
+            autoScrollEnabled = true
+          } else if !app.isStreaming && !autoScrollScheduled {
+            // 流式内容增长本身也会把底部标记推出视口，不能把它误判为用户向上滚动。
+            autoScrollEnabled = false
+          }
         }
         .onChange(of: app.messages.count) {
-          scheduleAutoScroll(proxy)
+          if initialSessionScrollPending {
+            scheduleAutoScroll(proxy, force: true)
+            scheduleInitialSessionScroll(proxy)
+          } else {
+            scheduleAutoScroll(proxy)
+          }
         }
         .onChange(of: app.messages.last?.text) {
           scheduleAutoScroll(proxy)
         }
-        .onChange(of: app.isStreaming) {
-          scheduleAutoScroll(proxy)
+        .onChange(of: app.isStreaming) { wasStreaming, isStreaming in
+          scheduleAutoScroll(proxy, force: wasStreaming && !isStreaming && autoScrollEnabled)
+        }
+        .onChange(of: app.currentSessionPath) {
+          initialSessionScrollPending = true
+          scheduleInitialSessionScroll(proxy)
         }
       }
     }
   }
 
-  private func scheduleAutoScroll(_ proxy: ScrollViewProxy) {
-    guard autoScrollEnabled, !autoScrollScheduled else { return }
-    autoScrollScheduled = true
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-      // 调度时已确认用户位于底部；内容增长可能暂时让 marker 越界，不能因此
-      // 取消这次跟随，否则第一段流式文本就会关闭自动滚动。
+  private func scheduleInitialSessionScroll(_ proxy: ScrollViewProxy) {
+    initialScrollGeneration += 1
+    let generation = initialScrollGeneration
+
+    // RPC 返回、VStack 创建子视图以及 Markdown 定高并不在同一轮布局中。
+    // 等布局稳定后再执行最终定位；若期间消息继续到达，旧任务会自动失效。
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+      guard generation == initialScrollGeneration, !app.messages.isEmpty else { return }
       proxy.scrollTo("conversation-bottom", anchor: .bottom)
+      autoScrollEnabled = true
+      initialSessionScrollPending = false
+    }
+  }
+
+  private func scheduleAutoScroll(_ proxy: ScrollViewProxy, force: Bool = false) {
+    guard autoScrollEnabled || force, !autoScrollScheduled else { return }
+    autoScrollScheduled = true
+
+    // Markdown 和工具卡片可能分两轮完成布局。连续校正两次，避免第一次滚动后
+    // 内容高度再次增加，导致流式回复的末尾仍停在视口之外。
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+      proxy.scrollTo("conversation-bottom", anchor: .bottom)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+      proxy.scrollTo("conversation-bottom", anchor: .bottom)
+      autoScrollEnabled = true
       autoScrollScheduled = false
     }
   }
@@ -587,12 +708,14 @@ struct ContentView: View {
       ZStack(alignment: .topLeading) {
         ComposerTextView(
           text: $app.composerText,
+          selection: $composerSelection,
           isFocused: $composerFocused,
-          onSubmit: app.sendPrompt,
-          onPasteFiles: app.addAttachments,
-          onPasteImage: app.addPastedImage
+          onSubmit: sendPromptFollowingOutput,
+          onPasteFiles: registerAttachments,
+          onPasteImage: registerPastedImage
         )
         .frame(minHeight: 72, maxHeight: 150)
+        .clipped()
         if app.composerText.isEmpty {
           Text("给 Pi 发送消息，或拖入图片和文件…")
             .foregroundStyle(.tertiary)
@@ -610,7 +733,7 @@ struct ContentView: View {
                 Image(systemName: attachment.isImage ? "photo" : "doc")
                 Text(attachment.url.lastPathComponent).lineLimit(1)
                 Button {
-                  app.removeAttachment(attachment)
+                  removeAttachment(attachment)
                 } label: {
                   Image(systemName: "xmark.circle.fill")
                 }
@@ -654,7 +777,7 @@ struct ContentView: View {
           .clipShape(Circle())
           .help("停止当前任务")
         } else {
-          Button(action: app.sendPrompt) {
+          Button(action: sendPromptFollowingOutput) {
             Image(systemName: "arrow.up")
               .font(.body.bold())
               .frame(width: 26, height: 26)
@@ -673,10 +796,49 @@ struct ContentView: View {
     .padding(10)
     .background(.quaternary.opacity(0.42), in: RoundedRectangle(cornerRadius: 14))
     .dropDestination(for: URL.self) { urls, _ in
-      app.addAttachments(urls)
+      addAttachmentsAtSelection(urls)
       return !urls.isEmpty
     }
     .padding(12)
+  }
+
+  private func registerAttachments(_ urls: [URL]) -> [String] {
+    app.addAttachments(urls).map(\.composerReference)
+  }
+
+  private func registerPastedImage(_ data: Data, _ mimeType: String) -> [String] {
+    app.addPastedImage(data, mimeType: mimeType).map(\.composerReference)
+  }
+
+  private func addAttachmentsAtSelection(_ urls: [URL]) {
+    insertComposerReferences(registerAttachments(urls))
+  }
+
+  private func insertComposerReferences(_ references: [String]) {
+    guard !references.isEmpty else { return }
+    let source = app.composerText as NSString
+    let location = min(composerSelection.location, source.length)
+    let length = min(composerSelection.length, source.length - location)
+    let range = NSRange(location: location, length: length)
+    let insertion = references.joined(separator: " ")
+    let leadingSpace = location > 0 && !isWhitespace(in: source, before: location) ? " " : ""
+    let trailingSpace = location + length < source.length ? " " : ""
+    let replacement = leadingSpace + insertion + trailingSpace
+    app.composerText = source.replacingCharacters(in: range, with: replacement)
+    composerSelection = NSRange(location: location + replacement.utf16.count, length: 0)
+    composerFocused = true
+  }
+
+  private func removeAttachment(_ attachment: PromptAttachment) {
+    app.removeAttachment(attachment)
+    if let range = app.composerText.range(of: attachment.composerReference) {
+      app.composerText.removeSubrange(range)
+    }
+  }
+
+  private func sendPromptFollowingOutput() {
+    autoScrollEnabled = true
+    app.sendPrompt()
   }
 
   private var modelMenu: some View {
@@ -748,23 +910,38 @@ struct ContentView: View {
 
 private struct ComposerTextView: NSViewRepresentable {
   @Binding var text: String
+  @Binding var selection: NSRange
   @Binding var isFocused: Bool
   let onSubmit: () -> Void
-  let onPasteFiles: ([URL]) -> Void
-  let onPasteImage: (Data, String) -> Void
+  let onPasteFiles: ([URL]) -> [String]
+  let onPasteImage: (Data, String) -> [String]
 
   func makeCoordinator() -> Coordinator {
-    Coordinator(text: $text, isFocused: $isFocused, initialText: text)
+    Coordinator(text: $text, selection: $selection, isFocused: $isFocused, initialText: text)
   }
 
   func makeNSView(context: Context) -> NSScrollView {
-    let scrollView = NSScrollView()
+    let scrollView = BorderlessScrollView()
     scrollView.drawsBackground = false
+    scrollView.backgroundColor = .clear
     scrollView.borderType = .noBorder
+    scrollView.focusRingType = .none
+    scrollView.contentView.drawsBackground = false
+    scrollView.contentView.backgroundColor = .clear
+    scrollView.wantsLayer = true
+    scrollView.layer?.backgroundColor = NSColor.clear.cgColor
+    scrollView.layer?.borderWidth = 0
+    scrollView.layer?.shadowOpacity = 0
+    scrollView.contentView.wantsLayer = true
+    scrollView.contentView.layer?.backgroundColor = NSColor.clear.cgColor
+    scrollView.contentView.layer?.borderWidth = 0
+    scrollView.automaticallyAdjustsContentInsets = false
+    scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
     scrollView.hasVerticalScroller = true
     scrollView.autohidesScrollers = true
 
-    let textView = SubmitTextView()
+    let textView = SubmitTextView(frame: scrollView.contentView.bounds)
     textView.delegate = context.coordinator
     textView.onSubmit = onSubmit
     textView.onPasteFiles = onPasteFiles
@@ -773,9 +950,16 @@ private struct ComposerTextView: NSViewRepresentable {
     textView.isRichText = false
     textView.importsGraphics = false
     textView.drawsBackground = false
+    textView.backgroundColor = .clear
+    textView.focusRingType = .none
     textView.allowsUndo = true
     textView.font = .systemFont(ofSize: NSFont.systemFontSize)
-    textView.textContainerInset = NSSize(width: 5, height: 6)
+    textView.textContainerInset = NSSize(width: 7, height: 8)
+    textView.minSize = NSSize(width: 0, height: 72)
+    textView.maxSize = NSSize(
+      width: CGFloat.greatestFiniteMagnitude,
+      height: CGFloat.greatestFiniteMagnitude
+    )
     textView.isHorizontallyResizable = false
     textView.isVerticallyResizable = true
     textView.autoresizingMask = [.width]
@@ -785,6 +969,8 @@ private struct ComposerTextView: NSViewRepresentable {
       height: CGFloat.greatestFiniteMagnitude
     )
     scrollView.documentView = textView
+    // Setting the document view can cause AppKit to restore its platform-default border.
+    scrollView.borderType = .noBorder
     context.coordinator.textView = textView
     return scrollView
   }
@@ -808,7 +994,8 @@ private struct ComposerTextView: NSViewRepresentable {
         context.coordinator.lastBindingText = text
         if textView.string != text {
           textView.string = text
-          textView.setSelectedRange(NSRange(location: text.utf16.count, length: 0))
+          let location = min(selection.location, text.utf16.count)
+          textView.setSelectedRange(NSRange(location: location, length: 0))
         }
       }
     }
@@ -817,15 +1004,29 @@ private struct ComposerTextView: NSViewRepresentable {
     }
   }
 
+  final class BorderlessScrollView: NSScrollView {
+    override var isOpaque: Bool { false }
+
+    // macOS 27 draws a one-pixel legacy frame even when borderType is .noBorder.
+    // The clip view and scrollers are subviews, so suppressing this view's own
+    // drawing removes that frame without affecting scrolling or text rendering.
+    override func draw(_ dirtyRect: NSRect) {}
+  }
+
   final class Coordinator: NSObject, NSTextViewDelegate {
     @Binding var text: String
+    @Binding var selection: NSRange
     @Binding var isFocused: Bool
     weak var textView: NSTextView?
     var lastBindingText: String
     var pendingLocalTexts: [String] = []
 
-    init(text: Binding<String>, isFocused: Binding<Bool>, initialText: String) {
+    init(
+      text: Binding<String>, selection: Binding<NSRange>, isFocused: Binding<Bool>,
+      initialText: String
+    ) {
       _text = text
+      _selection = selection
       _isFocused = isFocused
       lastBindingText = initialText
     }
@@ -835,6 +1036,11 @@ private struct ComposerTextView: NSViewRepresentable {
       let latestText = textView.string
       if pendingLocalTexts.last != latestText { pendingLocalTexts.append(latestText) }
       text = latestText
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+      guard let textView = notification.object as? NSTextView else { return }
+      selection = textView.selectedRange()
     }
 
     func textDidBeginEditing(_ notification: Notification) {
@@ -848,8 +1054,8 @@ private struct ComposerTextView: NSViewRepresentable {
 
   final class SubmitTextView: NSTextView {
     var onSubmit: (() -> Void)?
-    var onPasteFiles: (([URL]) -> Void)?
-    var onPasteImage: ((Data, String) -> Void)?
+    var onPasteFiles: (([URL]) -> [String])?
+    var onPasteImage: ((Data, String) -> [String])?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
       let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -873,18 +1079,18 @@ private struct ComposerTextView: NSViewRepresentable {
           options: [.urlReadingFileURLsOnly: true]
         ) as? [URL] ?? []
       if !urls.isEmpty {
-        onPasteFiles?(urls)
+        insertAttachmentReferences(onPasteFiles?(urls) ?? [])
         return
       }
       if let png = pasteboard.data(forType: .png) {
-        onPasteImage?(png, "image/png")
+        insertAttachmentReferences(onPasteImage?(png, "image/png") ?? [])
         return
       }
       if let tiff = pasteboard.data(forType: .tiff),
         let representation = NSBitmapImageRep(data: tiff),
         let png = representation.representation(using: .png, properties: [:])
       {
-        onPasteImage?(png, "image/png")
+        insertAttachmentReferences(onPasteImage?(png, "image/png") ?? [])
         return
       }
       if let image = NSImage(pasteboard: pasteboard),
@@ -892,10 +1098,21 @@ private struct ComposerTextView: NSViewRepresentable {
         let representation = NSBitmapImageRep(data: tiff),
         let png = representation.representation(using: .png, properties: [:])
       {
-        onPasteImage?(png, "image/png")
+        insertAttachmentReferences(onPasteImage?(png, "image/png") ?? [])
         return
       }
       super.paste(sender)
+    }
+
+    private func insertAttachmentReferences(_ references: [String]) {
+      guard !references.isEmpty else { return }
+      let insertion = references.joined(separator: " ")
+      let source = string as NSString
+      let range = selectedRange()
+      let leadingSpace =
+        range.location > 0 && !isWhitespace(in: source, before: range.location) ? " " : ""
+      let trailingSpace = range.location + range.length < source.length ? " " : ""
+      insertText(leadingSpace + insertion + trailingSpace, replacementRange: range)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -960,7 +1177,8 @@ private struct ActivityGroupView: View {
   let taskIsRunning: Bool
   @State private var expanded = false
 
-  private var isRunning: Bool { taskIsRunning || entries.contains(where: \.isRunning) }
+  private var hasRunningActivity: Bool { entries.contains(where: \.isRunning) }
+  private var shouldStayExpanded: Bool { taskIsRunning || hasRunningActivity }
   private var toolCount: Int { entries.filter { $0.kind == .tool }.count }
 
   var body: some View {
@@ -973,9 +1191,12 @@ private struct ActivityGroupView: View {
       .padding(.top, 7)
     } label: {
       HStack(spacing: 7) {
-        if isRunning {
+        if hasRunningActivity {
           ProgressView().controlSize(.mini)
           Text("正在处理")
+        } else if taskIsRunning {
+          Image(systemName: "ellipsis")
+          Text("思考过程")
         } else {
           Image(systemName: "checkmark.circle").foregroundStyle(.green)
           Text(activitySummary)
@@ -987,8 +1208,8 @@ private struct ActivityGroupView: View {
     .padding(.horizontal, 12)
     .padding(.vertical, 9)
     .background(Color.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
-    .onAppear { expanded = isRunning }
-    .onChange(of: isRunning) { wasRunning, running in
+    .onAppear { expanded = shouldStayExpanded }
+    .onChange(of: shouldStayExpanded) { wasRunning, running in
       if running { expanded = true }
       if wasRunning && !running { expanded = false }
     }
@@ -1008,7 +1229,6 @@ private struct ActivityEntryView: View {
       HStack(spacing: 6) {
         Image(systemName: activityIcon)
         Text(entry.title).fontWeight(.medium)
-        if entry.isRunning { ProgressView().controlSize(.mini) }
       }
       .font(.caption)
       .foregroundStyle(entry.isError ? Color.red : Color.secondary)
@@ -1127,19 +1347,17 @@ private struct ChatEntryView: View {
     }
   }
 
+  @ViewBuilder
   private var content: some View {
-    Text(attributedText)
-      .font(entry.kind == .tool ? .system(.body, design: .monospaced) : .body)
-      .textSelection(.enabled)
-      .frame(maxWidth: .infinity, alignment: .leading)
-  }
-
-  private var attributedText: AttributedString {
-    let options = AttributedString.MarkdownParsingOptions(
-      interpretedSyntax: .inlineOnlyPreservingWhitespace
-    )
-    return (try? AttributedString(markdown: entry.text, options: options))
-      ?? AttributedString(entry.text)
+    if entry.kind == .tool || entry.kind == .thinking {
+      Text(entry.text)
+        .font(.system(.body, design: entry.kind == .tool ? .monospaced : .default))
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    } else {
+      MarkdownView(entry.text)
+        .font(.body)
+    }
   }
 
   private var summary: String {
@@ -1311,14 +1529,21 @@ private struct CodexAccountsView: View {
         Text("暂无额度数据").font(.caption2).foregroundStyle(.secondary)
       } else {
         ForEach(status.quotas) { quota in
-          HStack(spacing: 5) {
-            Text(geminiWindowLabel(quota.window)).frame(width: 22, alignment: .leading)
+          HStack(spacing: 4) {
+            Text(geminiWindowLabel(quota.window))
+              .frame(width: 20, alignment: .leading)
             ProgressView(value: max(0, min(100, quota.remainingPercent)), total: 100)
               .tint(usageColor(quota.remainingPercent))
+              .frame(minWidth: 24)
+              .layoutPriority(1)
             Text("\(Int(quota.remainingPercent.rounded()))%")
-              .monospacedDigit().frame(width: 31, alignment: .trailing)
+              .monospacedDigit()
+              .frame(width: 30, alignment: .trailing)
             if let resetAt = quota.resetAt {
-              Text(resetAt, style: .relative).frame(width: 47, alignment: .trailing)
+              CompactResetTime(date: resetAt)
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
             }
           }
           .font(.caption2)
@@ -1333,14 +1558,20 @@ private struct CodexAccountsView: View {
   }
 
   private func usageRow(_ window: CodexUsageWindow, label: String) -> some View {
-    HStack(spacing: 5) {
-      Text(label).frame(width: 22, alignment: .leading)
+    HStack(spacing: 4) {
+      Text(label).frame(width: 20, alignment: .leading)
       ProgressView(value: max(0, min(100, window.remainingPercent)), total: 100)
         .tint(usageColor(window.remainingPercent))
+        .frame(minWidth: 24)
+        .layoutPriority(1)
       Text("\(Int(window.remainingPercent.rounded()))%")
-        .monospacedDigit().frame(width: 31, alignment: .trailing)
+        .monospacedDigit()
+        .frame(width: 30, alignment: .trailing)
       if let resetAt = window.resetAt {
-        Text(resetAt, style: .relative).frame(width: 47, alignment: .trailing)
+        CompactResetTime(date: resetAt)
+          .monospacedDigit()
+          .lineLimit(1)
+          .fixedSize(horizontal: true, vertical: false)
       }
     }
     .font(.caption2)
@@ -1348,23 +1579,23 @@ private struct CodexAccountsView: View {
   }
 
   private func windowLabel(_ window: CodexUsageWindow) -> String {
-    guard let seconds = window.windowSeconds else { return "额度" }
-    return seconds <= 21_600 ? "\(Int((seconds / 3_600).rounded()))h" : "7d"
+    guard let seconds = window.windowSeconds else { return "Q" }
+    return seconds <= 21_600 ? "\(Int((seconds / 3_600).rounded()))H" : "7D"
   }
 
   private func geminiWindowLabel(_ window: String?) -> String {
-    guard let window else { return "额度" }
+    guard let window else { return "Q" }
     if window.localizedCaseInsensitiveContains("5h")
       || window.localizedCaseInsensitiveContains("5 hour")
     {
-      return "5h"
+      return "5H"
     }
     if window.localizedCaseInsensitiveContains("7d")
       || window.localizedCaseInsensitiveContains("week")
     {
-      return "7d"
+      return "7D"
     }
-    return "额度"
+    return "Q"
   }
 
   private func usageColor(_ percent: Double) -> Color {

@@ -51,6 +51,16 @@ struct PromptAttachment: Identifiable, Hashable, Sendable {
   let mimeType: String?
 
   var isImage: Bool { mimeType?.hasPrefix("image/") == true }
+
+  var composerReference: String {
+    if isImage {
+      if url.lastPathComponent.hasPrefix("pi-clipboard-") {
+        return "[[粘贴图片 \(id.uuidString.prefix(4).uppercased())]]"
+      }
+      return "[[图片：\(url.lastPathComponent)]]"
+    }
+    return "[[文件：\(url.lastPathComponent)]]"
+  }
 }
 
 struct PiModel: Identifiable, Hashable {
