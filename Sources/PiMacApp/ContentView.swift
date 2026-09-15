@@ -66,6 +66,7 @@ private struct SessionRelativeTime: View {
 struct ContentView: View {
   @EnvironmentObject private var app: AppModel
   @EnvironmentObject private var workspace: WorkspaceModel
+  @EnvironmentObject private var extensionUI: ExtensionUIModel
   @State private var choosingProject = false
   @State private var choosingSession = false
   @State private var choosingAttachments = false
@@ -110,9 +111,9 @@ struct ContentView: View {
     .sheet(isPresented: $showingSettings) {
       SettingsView(path: app.piPath) { app.piPath = $0 }
     }
-    .sheet(item: $app.extensionDialog) { dialog in
+    .sheet(item: $extensionUI.dialog) { dialog in
       ExtensionDialogView(dialog: dialog)
-        .environmentObject(app)
+        .interactiveDismissDisabled()
     }
     .onChange(of: app.connectionState) {
       if case .connected = app.connectionState {
@@ -215,17 +216,10 @@ struct ContentView: View {
           .buttonStyle(.borderedProminent)
           .controlSize(.large)
 
-          HStack {
-            Text("会话").font(.caption.bold()).foregroundStyle(.secondary)
-            Spacer()
-            Button {
-              choosingSession = true
-            } label: {
-              Image(systemName: "folder.badge.plus")
-            }
-            .buttonStyle(.plain)
-            .help("打开 Session 文件")
-          }
+          Text("会话")
+            .font(.caption.bold())
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
           if visibleSessions.isEmpty {
             ContentUnavailableView(
@@ -1393,6 +1387,7 @@ private struct ChatEntryView: View {
 
 private struct CodexAccountsView: View {
   @EnvironmentObject private var app: AppModel
+  @EnvironmentObject private var extensionUI: ExtensionUIModel
   @State private var isExpanded = false
 
   var body: some View {
@@ -1425,7 +1420,7 @@ private struct CodexAccountsView: View {
 
         if isExpanded {
           expandedAccounts
-          if let updatedAt = app.codexAccountsUpdatedAt {
+          if let updatedAt = extensionUI.codexAccountsUpdatedAt {
             Text("更新于 \(updatedAt, style: .relative)")
               .font(.caption2)
               .foregroundStyle(.tertiary)
@@ -1440,15 +1435,15 @@ private struct CodexAccountsView: View {
 
   @ViewBuilder
   private var expandedAccounts: some View {
-    if app.codexAccounts.isEmpty && app.geminiUsage == nil {
+    if extensionUI.codexAccounts.isEmpty && extensionUI.geminiUsage == nil {
       emptyStatus
     } else {
       ScrollView {
         LazyVStack(spacing: 7) {
-          ForEach(app.codexAccounts) { account in
+          ForEach(extensionUI.codexAccounts) { account in
             accountRow(account)
           }
-          if let gemini = app.geminiUsage, gemini.isConfigured {
+          if let gemini = extensionUI.geminiUsage, gemini.isConfigured {
             geminiRow(gemini)
           }
         }
@@ -1459,9 +1454,9 @@ private struct CodexAccountsView: View {
 
   @ViewBuilder
   private var currentAccount: some View {
-    if let gemini = app.geminiUsage, gemini.isConfigured, gemini.isActive {
+    if let gemini = extensionUI.geminiUsage, gemini.isConfigured, gemini.isActive {
       geminiRow(gemini)
-    } else if let account = app.codexAccounts.first(where: \.isActive) {
+    } else if let account = extensionUI.codexAccounts.first(where: \.isActive) {
       accountRow(account)
     } else {
       emptyStatus
@@ -1469,7 +1464,7 @@ private struct CodexAccountsView: View {
   }
 
   private var emptyStatus: some View {
-    Text(app.extensionStatuses["codex-accounts"] ?? "等待扩展提供账户信息…")
+    Text(extensionUI.statuses["codex-accounts"] ?? "等待扩展提供账户信息…")
       .font(.caption2)
       .foregroundStyle(.secondary)
       .lineLimit(5)
@@ -1665,7 +1660,7 @@ private struct SettingsView: View {
 }
 
 private struct ExtensionDialogView: View {
-  @EnvironmentObject private var app: AppModel
+  @EnvironmentObject private var extensionUI: ExtensionUIModel
   let dialog: ExtensionDialog
   @State private var text = ""
 
@@ -1675,14 +1670,15 @@ private struct ExtensionDialogView: View {
       switch dialog.kind {
       case .select(let options):
         ForEach(options, id: \.self) { option in
-          Button(option) { app.answerDialog(value: option) }
+          Button(option) { extensionUI.answerDialog(value: option) }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
       case .confirm(let message):
         Text(message)
         HStack {
-          Button("取消") { app.answerDialog(confirmed: false) }
-          Button("确认") { app.answerDialog(confirmed: true) }.buttonStyle(.borderedProminent)
+          Button("取消") { extensionUI.answerDialog(confirmed: false) }
+          Button("确认") { extensionUI.answerDialog(confirmed: true) }
+            .buttonStyle(.borderedProminent)
         }
       case .input(_, let placeholder, let multiline):
         if multiline {
@@ -1691,8 +1687,9 @@ private struct ExtensionDialogView: View {
           TextField(placeholder, text: $text).textFieldStyle(.roundedBorder)
         }
         HStack {
-          Button("取消") { app.answerDialog(cancelled: true) }
-          Button("提交") { app.answerDialog(value: text) }.buttonStyle(.borderedProminent)
+          Button("取消") { extensionUI.answerDialog(cancelled: true) }
+          Button("提交") { extensionUI.answerDialog(value: text) }
+            .buttonStyle(.borderedProminent)
         }
       }
     }

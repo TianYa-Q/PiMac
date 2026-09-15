@@ -20,13 +20,10 @@ final class AppModel: ObservableObject {
   @Published var stats: SessionStats?
   @Published var composerText = ""
   @Published var attachments: [PromptAttachment] = []
-  @Published var extensionDialog: ExtensionDialog?
   @Published var statusText = ""
-  @Published var extensionStatuses: [String: String] = [:]
-  @Published var codexAccounts: [CodexAccountStatus] = []
-  @Published var geminiUsage: GeminiUsageStatus?
-  @Published var codexAccountsUpdatedAt: Date?
   @Published var diagnosticText = ""
+
+  weak var extensionUI: ExtensionUIModel?
 
   private static let lastProjectPathKey = "lastProjectPath"
 
@@ -146,6 +143,7 @@ final class AppModel: ObservableObject {
   }
 
   func disconnect() {
+    extensionUI?.removeRequests(from: self)
     connectionState = .disconnected
     isStreaming = false
     isLoadingConfiguration = false
@@ -365,14 +363,23 @@ final class AppModel: ObservableObject {
     }
   }
 
-  func answerDialog(value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false) {
-    guard let dialog = extensionDialog else { return }
-    var response: PiRPCClient.JSON = ["type": "extension_ui_response", "id": dialog.id]
+  func sendExtensionResponse(
+    id: String,
+    value: String? = nil,
+    confirmed: Bool? = nil,
+    cancelled: Bool = false
+  ) {
+    var response: PiRPCClient.JSON = ["type": "extension_ui_response", "id": id]
     if cancelled { response["cancelled"] = true }
     if let value { response["value"] = value }
     if let confirmed { response["confirmed"] = confirmed }
     client.sendExtensionResponse(response)
-    extensionDialog = nil
+  }
+
+  func appendExtensionNotification(_ text: String) {
+    messages.append(
+      ChatEntry(id: UUID().uuidString, kind: .system, title: "通知", text: text)
+    )
   }
 
   private func restoreLastProject() {
@@ -650,7 +657,7 @@ final class AppModel: ObservableObject {
     case "extension_error":
       appendSystemError(event["error"] as? String ?? "扩展执行失败")
     case "extension_ui_request":
-      handleExtensionUI(event)
+      extensionUI?.handle(event, from: self)
     default:
       break
     }
@@ -724,123 +731,6 @@ final class AppModel: ObservableObject {
       messages[index].isRunning = false
       messages[index].isError = event["isError"] as? Bool ?? false
     }
-  }
-
-  private func handleExtensionUI(_ event: PiRPCClient.JSON) {
-    guard let method = event["method"] as? String,
-      let id = event["id"] as? String
-    else { return }
-    let title = event["title"] as? String ?? "Pi 扩展"
-    switch method {
-    case "select":
-      extensionDialog = ExtensionDialog(
-        id: id, title: title, kind: .select(options: event["options"] as? [String] ?? []))
-    case "confirm":
-      extensionDialog = ExtensionDialog(
-        id: id, title: title, kind: .confirm(message: event["message"] as? String ?? ""))
-    case "input", "editor":
-      extensionDialog = ExtensionDialog(
-        id: id,
-        title: title,
-        kind: .input(
-          initialText: event["prefill"] as? String ?? "",
-          placeholder: event["placeholder"] as? String ?? "",
-          multiline: method == "editor"
-        )
-      )
-    case "notify":
-      messages.append(
-        ChatEntry(
-          id: UUID().uuidString, kind: .system, title: "通知", text: event["message"] as? String ?? ""
-        ))
-    case "setTitle":
-      NSApp.mainWindow?.title = event["title"] as? String ?? "Pi Mac"
-    case "set_editor_text":
-      composerText = event["text"] as? String ?? ""
-    case "setStatus":
-      let key = event["statusKey"] as? String ?? "extension"
-      let rawText = event["statusText"] as? String ?? ""
-      if key == "codex-accounts-gui" {
-        updateCodexAccounts(from: rawText)
-        return
-      }
-      let text = Self.removingANSIEscapes(rawText)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      if !text.isEmpty {
-        extensionStatuses[key] = text
-      } else if key != "codex-accounts" {
-        // 多账户扩展的最后一次额度信息需要常驻；其他临时扩展状态仍可主动清除。
-        extensionStatuses.removeValue(forKey: key)
-      }
-    default:
-      break
-    }
-  }
-
-  private func updateCodexAccounts(from text: String) {
-    guard !text.isEmpty,
-      let data = text.data(using: .utf8),
-      let payload = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
-      payload["version"] as? Int == 1,
-      let rawAccounts = payload["accounts"] as? [PiRPCClient.JSON]
-    else {
-      codexAccounts = []
-      geminiUsage = nil
-      codexAccountsUpdatedAt = nil
-      return
-    }
-    let active = payload["activeAccount"] as? String
-    let defaultAccount = payload["defaultAccount"] as? String
-    codexAccounts = rawAccounts.compactMap { raw in
-      guard let name = raw["name"] as? String else { return nil }
-      return CodexAccountStatus(
-        name: name,
-        isActive: name == active,
-        isDefault: name == defaultAccount,
-        isHidden: raw["hidden"] as? Bool ?? false,
-        primary: Self.codexWindow(from: raw["primary"]),
-        secondary: Self.codexWindow(from: raw["secondary"]),
-        error: raw["error"] as? String
-      )
-    }.sorted {
-      if $0.isActive != $1.isActive { return $0.isActive }
-      return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-    }
-    if let rawGemini = payload["gemini"] as? PiRPCClient.JSON {
-      let kind = rawGemini["kind"] as? String
-      let quotas = (rawGemini["quotas"] as? [PiRPCClient.JSON] ?? []).compactMap {
-        raw -> GeminiQuota? in
-        guard let remaining = raw["remainingPercent"] as? Double else { return nil }
-        return GeminiQuota(
-          remainingPercent: remaining,
-          resetAt: (raw["resetAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1_000) },
-          window: raw["window"] as? String
-        )
-      }
-      geminiUsage = GeminiUsageStatus(
-        isConfigured: kind != "unconfigured",
-        isActive: rawGemini["isActive"] as? Bool ?? false,
-        quotas: quotas,
-        error: rawGemini["error"] as? String
-      )
-    } else {
-      geminiUsage = nil
-    }
-    if let milliseconds = payload["updatedAt"] as? Double {
-      codexAccountsUpdatedAt = Date(timeIntervalSince1970: milliseconds / 1_000)
-    }
-  }
-
-  nonisolated private static func codexWindow(from value: Any?) -> CodexUsageWindow? {
-    guard let raw = value as? PiRPCClient.JSON,
-      let remaining = raw["remainingPercent"] as? Double
-    else { return nil }
-    let resetAt = (raw["resetAt"] as? Double).map(Date.init(timeIntervalSince1970:))
-    return CodexUsageWindow(
-      remainingPercent: remaining,
-      resetAt: resetAt,
-      windowSeconds: raw["windowSeconds"] as? Double
-    )
   }
 
   private func append(_ text: String, to id: String) {
@@ -938,14 +828,6 @@ final class AppModel: ObservableObject {
     var displayText = content
     displayText.removeSubrange(start.lowerBound..<end.upperBound)
     return (displayText.trimmingCharacters(in: .whitespacesAndNewlines), attachments)
-  }
-
-  nonisolated private static func removingANSIEscapes(_ text: String) -> String {
-    // 扩展沿用 TUI 的彩色状态文本；原生界面只保留其中的可读内容。
-    let pattern = "\u{001B}\\[[0-?]*[ -/]*[@-~]"
-    guard let expression = try? NSRegularExpression(pattern: pattern) else { return text }
-    let range = NSRange(text.startIndex..<text.endIndex, in: text)
-    return expression.stringByReplacingMatches(in: text, range: range, withTemplate: "")
   }
 
   nonisolated private static func contentText(_ content: Any?) -> String {

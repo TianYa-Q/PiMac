@@ -21,6 +21,7 @@ final class WorkspaceModel: ObservableObject {
   @Published private(set) var tabs: [Tab] = []
   @Published private(set) var projects: [WorkspaceProject] = []
   @Published var selectedTabID: UUID?
+  let extensionUI = ExtensionUIModel()
 
   private static let savedProjectsKey = "workspaceProjectPaths"
   private static let activeProjectKey = "workspaceActiveProjectPath"
@@ -229,6 +230,7 @@ final class WorkspaceModel: ObservableObject {
   }
 
   private func addTab(model: AppModel, requestedSessionPath: String?, isDraft: Bool) {
+    model.extensionUI = extensionUI
     let tab = Tab(
       id: UUID(), model: model, requestedSessionPath: requestedSessionPath, createdAt: .now,
       isDraft: isDraft)
