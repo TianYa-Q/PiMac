@@ -439,7 +439,8 @@ struct ContentView: View {
           text: $app.composerText,
           isFocused: $composerFocused,
           onSubmit: app.sendPrompt,
-          onPasteFiles: app.addAttachments
+          onPasteFiles: app.addAttachments,
+          onPasteImage: app.addPastedImage
         )
         .frame(minHeight: 72, maxHeight: 150)
         if app.composerText.isEmpty {
@@ -600,6 +601,7 @@ private struct ComposerTextView: NSViewRepresentable {
   @Binding var isFocused: Bool
   let onSubmit: () -> Void
   let onPasteFiles: ([URL]) -> Void
+  let onPasteImage: (Data, String) -> Void
 
   func makeCoordinator() -> Coordinator {
     Coordinator(text: $text, isFocused: $isFocused, initialText: text)
@@ -616,6 +618,7 @@ private struct ComposerTextView: NSViewRepresentable {
     textView.delegate = context.coordinator
     textView.onSubmit = onSubmit
     textView.onPasteFiles = onPasteFiles
+    textView.onPasteImage = onPasteImage
     textView.string = text
     textView.isRichText = false
     textView.importsGraphics = false
@@ -640,6 +643,7 @@ private struct ComposerTextView: NSViewRepresentable {
     guard let textView = scrollView.documentView as? SubmitTextView else { return }
     textView.onSubmit = onSubmit
     textView.onPasteFiles = onPasteFiles
+    textView.onPasteImage = onPasteImage
     // AppModel 的流式事件会频繁触发 SwiftUI 更新。只有 Binding 确实发生了外部
     // 变化（例如发送后清空）才回写 NSTextView，避免旧的 View 快照覆盖刚输入的字符。
     if text != context.coordinator.lastBindingText {
@@ -695,18 +699,31 @@ private struct ComposerTextView: NSViewRepresentable {
   final class SubmitTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onPasteFiles: (([URL]) -> Void)?
+    var onPasteImage: ((Data, String) -> Void)?
 
     override func paste(_ sender: Any?) {
+      let pasteboard = NSPasteboard.general
       let urls =
-        NSPasteboard.general.readObjects(
+        pasteboard.readObjects(
           forClasses: [NSURL.self],
           options: [.urlReadingFileURLsOnly: true]
         ) as? [URL] ?? []
       if !urls.isEmpty {
         onPasteFiles?(urls)
-      } else {
-        super.paste(sender)
+        return
       }
+      if let png = pasteboard.data(forType: .png) {
+        onPasteImage?(png, "image/png")
+        return
+      }
+      if let tiff = pasteboard.data(forType: .tiff),
+        let representation = NSBitmapImageRep(data: tiff),
+        let png = representation.representation(using: .png, properties: [:])
+      {
+        onPasteImage?(png, "image/png")
+        return
+      }
+      super.paste(sender)
     }
 
     override func keyDown(with event: NSEvent) {

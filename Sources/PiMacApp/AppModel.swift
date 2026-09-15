@@ -153,6 +153,20 @@ final class AppModel: ObservableObject {
     client.stop()
   }
 
+  func addPastedImage(_ data: Data, mimeType: String) {
+    let fileExtension = UTType(mimeType: mimeType)?.preferredFilenameExtension ?? "png"
+    let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("PiMac/PastedAttachments", isDirectory: true)
+    let url = directory.appendingPathComponent("pasted-\(UUID().uuidString).\(fileExtension)")
+    do {
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try data.write(to: url, options: .atomic)
+      addAttachments([url])
+    } catch {
+      appendSystemError("无法保存剪贴板图片：\(error.localizedDescription)")
+    }
+  }
+
   func addAttachments(_ urls: [URL]) {
     let existing = Set(attachments.map { $0.url.standardizedFileURL })
     let additions =
