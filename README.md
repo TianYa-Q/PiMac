@@ -4,7 +4,7 @@
 
 ## 已实现
 
-- 选择任意项目目录并启动 Pi
+- 在同一窗口添加和切换多个项目，分别保留各项目的会话与后台任务
 - 流式显示回答、思考过程和工具调用
 - 发送消息、重新编辑历史提问、工作中插入指令、停止任务
 - 拖放、选择或粘贴图片和文件；使用原生附件卡片展示，并通过 RPC 发送图片内容
@@ -27,7 +27,7 @@
 2. `/opt/homebrew/bin/pi`
 3. `/usr/local/bin/pi`
 
-也可以在应用的“设置”中修改。程序通过登录 shell 启动 Pi，因此 GUI 环境下仍能找到 Node/pnpm。最后使用的项目目录会保存在 macOS `UserDefaults` 中，下次启动自动重新连接；对话由 Pi 持久化在 `~/.pi/agent/sessions/`。
+也可以在应用的“设置”中修改。程序通过登录 shell 启动 Pi，因此 GUI 环境下仍能找到 Node/pnpm。项目列表和最后使用的项目会保存在 macOS `UserDefaults` 中，下次启动自动恢复；对话由 Pi 持久化在 `~/.pi/agent/sessions/`。
 
 ## 开发运行
 
@@ -57,6 +57,10 @@ open "dist/Pi Mac.app"
 ```
 
 脚本会生成 ad-hoc 签名的 `dist/Pi Mac.app`。如需分发给其他 Mac，需要使用 Apple Developer 证书签名并公证。
+
+## License
+
+[MIT](LICENSE)
 
 ## 测试
 

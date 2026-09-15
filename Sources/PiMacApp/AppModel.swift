@@ -46,7 +46,8 @@ final class AppModel: ObservableObject {
   init(
     startupProjectURL: URL? = nil,
     continueLastSession: Bool = true,
-    startupSessionPath: String? = nil
+    startupSessionPath: String? = nil,
+    restoreLastProjectOnLaunch: Bool = true
   ) {
     client.onEvent = { [weak self] event in self?.handle(event) }
     client.onErrorOutput = { [weak self] line in
@@ -84,7 +85,7 @@ final class AppModel: ObservableObject {
             sessionPath: nil
           )
         }
-      } else {
+      } else if restoreLastProjectOnLaunch {
         self?.restoreLastProject()
       }
     }

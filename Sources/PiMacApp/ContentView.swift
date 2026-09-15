@@ -98,29 +98,32 @@ struct ContentView: View {
           .help("设置")
         }
 
-        HStack(spacing: 9) {
-          Image(systemName: "folder.fill")
-            .foregroundStyle(.secondary)
-          VStack(alignment: .leading, spacing: 1) {
-            Text(app.projectURL?.lastPathComponent ?? "选择工作目录")
-              .font(.caption.bold())
-              .lineLimit(1)
-            Text(app.projectURL?.deletingLastPathComponent().path ?? "尚未连接项目")
-              .font(.caption2)
-              .foregroundStyle(.secondary)
-              .lineLimit(1)
-          }
+        HStack {
+          Text("项目").font(.caption.bold()).foregroundStyle(.secondary)
           Spacer()
           Button {
             choosingProject = true
           } label: {
-            Image(systemName: "ellipsis")
+            Image(systemName: "plus")
           }
           .buttonStyle(.plain)
+          .help("添加项目")
         }
-        .padding(9)
-        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-        .help(app.projectURL?.path ?? "选择工作目录")
+
+        if workspace.projects.isEmpty {
+          Button("添加项目…", systemImage: "folder.badge.plus") { choosingProject = true }
+            .buttonStyle(.bordered)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+          ScrollView {
+            LazyVStack(spacing: 3) {
+              ForEach(workspace.projects) { project in
+                projectRow(project)
+              }
+            }
+          }
+          .frame(maxHeight: 128)
+        }
 
         if case .connected = app.connectionState {
           Button {
@@ -218,6 +221,42 @@ struct ContentView: View {
       .background(.ultraThinMaterial)
     }
     .background(Color(nsColor: .controlBackgroundColor).opacity(0.52))
+  }
+
+  private func projectRow(_ project: WorkspaceProject) -> some View {
+    let selected = workspace.selectedProject?.id == project.id
+    return Button {
+      workspace.selectProject(project)
+    } label: {
+      HStack(spacing: 8) {
+        Image(systemName: selected ? "folder.fill" : "folder")
+          .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+        VStack(alignment: .leading, spacing: 1) {
+          Text(project.name).font(.callout).lineLimit(1)
+          Text(project.url.deletingLastPathComponent().path)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        Spacer()
+        if selected {
+          Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+        }
+      }
+      .padding(.horizontal, 9)
+      .padding(.vertical, 6)
+      .contentShape(Rectangle())
+      .background(
+        selected ? Color.accentColor.opacity(0.11) : Color.clear,
+        in: RoundedRectangle(cornerRadius: 8)
+      )
+    }
+    .buttonStyle(.plain)
+    .contextMenu {
+      Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([project.url]) }
+      Divider()
+      Button("从列表移除", role: .destructive) { workspace.removeProject(project) }
+    }
   }
 
   private func redesignedSessionRow(_ session: SessionItem) -> some View {
