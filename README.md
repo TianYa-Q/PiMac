@@ -20,13 +20,19 @@
 - 新建、命名和打开持久化会话，重启后自动恢复最近会话
 - 查看上下文压缩、Token、费用和上下文占用统计
 - 支持 Pi 扩展提供的选择、确认、输入和编辑对话框
+- 配合 [account-usage](https://github.com/TianYa-Q/account-usage) 管理 Codex 多账户并显示 Codex/Gemini 额度
 - 直接复用 `~/.pi/agent` 中已有的登录、模型、Skills、扩展与配置
 
 ## 下载与安装
 
 1. 从 [GitHub Releases](https://github.com/TianYa-Q/PiMac/releases/latest) 下载最新的 `Pi-Mac-vX.Y.Z.zip`。
 2. 解压后，将 **Pi Mac.app** 移入“应用程序”目录。
-3. 确保已经安装并登录 Pi，然后启动 Pi Mac。
+3. 确保已经安装并登录 Pi。
+4. 如需账户管理与额度显示，安装 `account-usage` 扩展，然后启动 Pi Mac：
+
+   ```bash
+   pi install git:github.com/TianYa-Q/account-usage@v1.0.0
+   ```
 
 > 当前 Release 使用 ad-hoc 签名，尚未经过 Apple 公证。macOS 首次拦截时，请在 Finder 中右键应用并选择“打开”，或前往“系统设置 → 隐私与安全性”确认打开。
 

@@ -127,7 +127,7 @@ final class ExtensionUIModel: ObservableObject {
   private func updateStatus(_ event: PiRPCClient.JSON) {
     let key = event["statusKey"] as? String ?? "extension"
     let rawText = event["statusText"] as? String ?? ""
-    if key == "codex-accounts-gui" {
+    if key == "account-usage-gui" {
       updateCodexAccounts(from: rawText)
       return
     }
@@ -136,7 +136,7 @@ final class ExtensionUIModel: ObservableObject {
       .trimmingCharacters(in: .whitespacesAndNewlines)
     if !text.isEmpty {
       if statuses[key] != text { statuses[key] = text }
-    } else if key != "codex-accounts", statuses[key] != nil {
+    } else if key != "account-usage", statuses[key] != nil {
       // Keep the latest multi-account quota summary; transient statuses may clear themselves.
       statuses.removeValue(forKey: key)
     }

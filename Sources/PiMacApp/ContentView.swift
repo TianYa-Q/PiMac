@@ -1464,7 +1464,7 @@ private struct CodexAccountsView: View {
   }
 
   private var emptyStatus: some View {
-    Text(extensionUI.statuses["codex-accounts"] ?? "等待扩展提供账户信息…")
+    Text(extensionUI.statuses["account-usage"] ?? "等待扩展提供账户信息…")
       .font(.caption2)
       .foregroundStyle(.secondary)
       .lineLimit(5)
