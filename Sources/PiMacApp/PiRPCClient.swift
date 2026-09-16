@@ -153,7 +153,12 @@ final class PiRPCClient {
     let id = event["id"] as? String
     if type == "response" {
       onLog?("← response/\(event["command"] as? String ?? "unknown") [\(id ?? "无 ID")]")
-    } else if type != "message_update" && type != "tool_execution_update" {
+    } else if type != "message_update" && type != "tool_execution_update"
+      && !(type == "extension_ui_request" && event["method"] as? String == "setStatus")
+    {
+      // Extensions use setStatus as a lightweight state stream. Quota countdowns in
+      // particular can emit it periodically from every RPC process; it is not a dialog or
+      // proof that a provider request was made, so do not flood the diagnostic log with it.
       onLog?("← \(type)")
     }
 

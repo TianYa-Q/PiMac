@@ -246,8 +246,8 @@ final class WorkspaceModel: ObservableObject {
   private func selectTab(_ id: UUID) {
     if id != selectedTabID { discardSelectedDraftIfEmpty(except: id) }
     selectedTabID = id
-    guard let path = tabs.first(where: { $0.id == id })?.model.projectURL?.standardizedFileURL.path
-    else { return }
+    guard let selected = tabs.first(where: { $0.id == id }) else { return }
+    guard let path = selected.model.projectURL?.standardizedFileURL.path else { return }
     selectedTabByProject[path] = id
     UserDefaults.standard.set(path, forKey: Self.activeProjectKey)
   }

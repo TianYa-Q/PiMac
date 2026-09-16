@@ -71,7 +71,7 @@ struct ContentView: View {
   @State private var choosingSession = false
   @State private var choosingAttachments = false
   @State private var showingSettings = false
-  @State private var diagnosticsExpanded = false
+  @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
   @State private var composerSelection = NSRange(location: 0, length: 0)
   @State private var autoScrollEnabled = true
@@ -111,6 +111,9 @@ struct ContentView: View {
     .sheet(isPresented: $showingSettings) {
       SettingsView(path: app.piPath) { app.piPath = $0 }
     }
+    .sheet(item: $previewedAttachment) { attachment in
+      ImageAttachmentPreview(attachment: attachment)
+    }
     .sheet(item: $extensionUI.dialog) { dialog in
       ExtensionDialogView(dialog: dialog)
         .interactiveDismissDisabled()
@@ -127,10 +130,10 @@ struct ContentView: View {
 
   private var redesignedSidebar: some View {
     VStack(spacing: 0) {
-      VStack(alignment: .leading, spacing: 12) {
-        HStack(spacing: 10) {
+      VStack(alignment: .leading, spacing: 7) {
+        HStack(spacing: 9) {
           ZStack {
-            RoundedRectangle(cornerRadius: 9)
+            RoundedRectangle(cornerRadius: 8)
               .fill(
                 LinearGradient(
                   colors: [.accentColor, .purple],
@@ -140,10 +143,10 @@ struct ContentView: View {
             Image(systemName: "apple.terminal.fill")
               .foregroundStyle(.white)
           }
-          .frame(width: 34, height: 34)
-          VStack(alignment: .leading, spacing: 1) {
+          .frame(width: 30, height: 30)
+          HStack(spacing: 7) {
             Text("Pi Mac").font(.headline)
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
               Circle().fill(app.connectionState.color).frame(width: 6, height: 6)
               Text(app.connectionState.label).lineLimit(1)
             }
@@ -243,43 +246,12 @@ struct ContentView: View {
         }
       }
       .padding(.horizontal, 12)
-      .padding(.top, 12)
+      .padding(.top, 8)
 
       Spacer(minLength: 8)
 
       VStack(alignment: .leading, spacing: 9) {
         CodexAccountsView().environmentObject(app)
-
-        if let stats = app.stats {
-          HStack {
-            Label(stats.totalTokens.formatted(), systemImage: "text.word.spacing")
-            Spacer()
-            if let context = stats.contextPercent { Text("上下文 \(Int(context))%") }
-            Text(stats.cost, format: .currency(code: "USD"))
-          }
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-        }
-
-        HStack {
-          Button("压缩", systemImage: "arrow.down.right.and.arrow.up.left", action: app.compact)
-          Spacer()
-          if !app.diagnosticText.isEmpty {
-            Button("诊断") { diagnosticsExpanded.toggle() }
-          }
-        }
-        .buttonStyle(.plain)
-        .font(.caption)
-
-        if diagnosticsExpanded {
-          ScrollView {
-            Text(app.diagnosticText)
-              .font(.caption2.monospaced())
-              .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
-          }
-          .frame(maxHeight: 100)
-        }
       }
       .padding(12)
       .background(.ultraThinMaterial)
@@ -507,27 +479,6 @@ struct ContentView: View {
         }
       }
 
-      if !app.diagnosticText.isEmpty {
-        DisclosureGroup("诊断日志", isExpanded: $diagnosticsExpanded) {
-          VStack(alignment: .leading, spacing: 6) {
-            ScrollView {
-              Text(app.diagnosticText)
-                .font(.caption2.monospaced())
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxHeight: 150)
-            Button("复制日志") {
-              NSPasteboard.general.clearContents()
-              NSPasteboard.general.setString(app.diagnosticText, forType: .string)
-            }
-            .font(.caption)
-          }
-          .padding(.top, 5)
-        }
-        .font(.caption)
-      }
-
       Spacer()
 
       CodexAccountsView()
@@ -721,22 +672,9 @@ struct ContentView: View {
 
       if !app.attachments.isEmpty {
         ScrollView(.horizontal, showsIndicators: false) {
-          HStack(spacing: 6) {
+          HStack(spacing: 7) {
             ForEach(app.attachments) { attachment in
-              HStack(spacing: 5) {
-                Image(systemName: attachment.isImage ? "photo" : "doc")
-                Text(attachment.url.lastPathComponent).lineLimit(1)
-                Button {
-                  removeAttachment(attachment)
-                } label: {
-                  Image(systemName: "xmark.circle.fill")
-                }
-                .buttonStyle(.plain)
-              }
-              .font(.caption2)
-              .padding(.horizontal, 7)
-              .padding(.vertical, 4)
-              .background(Color.secondary.opacity(0.10), in: Capsule())
+              composerAttachment(attachment)
             }
           }
         }
@@ -752,6 +690,7 @@ struct ContentView: View {
         .help("添加图片或文件")
         modelMenu
         thinkingMenu
+        sessionControls
         Spacer()
         if !app.statusText.isEmpty {
           ProgressView().controlSize(.small)
@@ -794,6 +733,51 @@ struct ContentView: View {
       return !urls.isEmpty
     }
     .padding(12)
+  }
+
+  @ViewBuilder
+  private func composerAttachment(_ attachment: PromptAttachment) -> some View {
+    if attachment.isImage, let image = NSImage(contentsOf: attachment.url) {
+      ZStack(alignment: .topTrailing) {
+        Button {
+          previewedAttachment = attachment
+        } label: {
+          Image(nsImage: image)
+            .resizable()
+            .scaledToFill()
+            .frame(width: 62, height: 48)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .help("点击预览 \(attachment.url.lastPathComponent)")
+
+        Button {
+          removeAttachment(attachment)
+        } label: {
+          Image(systemName: "xmark.circle.fill")
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(.white, .black.opacity(0.65))
+        }
+        .buttonStyle(.plain)
+        .padding(3)
+      }
+    } else {
+      HStack(spacing: 5) {
+        Image(systemName: "doc")
+        Text(attachment.url.lastPathComponent).lineLimit(1)
+        Button {
+          removeAttachment(attachment)
+        } label: {
+          Image(systemName: "xmark.circle.fill")
+        }
+        .buttonStyle(.plain)
+      }
+      .font(.caption2)
+      .padding(.horizontal, 7)
+      .padding(.vertical, 4)
+      .background(Color.secondary.opacity(0.10), in: Capsule())
+    }
   }
 
   private func registerAttachments(_ urls: [URL]) -> [String] {
@@ -860,6 +844,32 @@ struct ContentView: View {
     .menuStyle(.borderlessButton)
     .fixedSize()
     .disabled(app.isStreaming || app.models.isEmpty)
+  }
+
+  private var sessionControls: some View {
+    HStack(spacing: 7) {
+      Button(action: app.compact) {
+        HStack(spacing: 4) {
+          Image(systemName: "arrow.down.right.and.arrow.up.left")
+          Text("压缩")
+        }
+        .font(.body)
+      }
+      .buttonStyle(.plain)
+      .help("压缩上下文")
+
+      if let stats = app.stats {
+        Divider().frame(height: 14)
+        HStack(spacing: 7) {
+          Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文 --")
+          Text("\(stats.totalTokens.formatted()) tokens")
+          Text(stats.cost, format: .currency(code: "USD"))
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      }
+    }
+    .fixedSize()
   }
 
   private var thinkingMenu: some View {
@@ -1217,26 +1227,46 @@ private struct ActivityGroupView: View {
 
 private struct ActivityEntryView: View {
   let entry: ChatEntry
+  @State private var expanded = false
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 5) {
-      HStack(spacing: 6) {
-        Image(systemName: activityIcon)
-        Text(entry.title).fontWeight(.medium)
-      }
-      .font(.caption)
-      .foregroundStyle(entry.isError ? Color.red : Color.secondary)
-
-      if let diff = entry.diff, !diff.isEmpty {
-        GitDiffView(diff: diff)
-      } else if !entry.text.isEmpty {
-        Text(entry.text)
-          .font(.system(.caption, design: entry.kind == .tool ? .monospaced : .default))
-          .textSelection(.enabled)
-          .frame(maxWidth: .infinity, alignment: .leading)
+    Group {
+      if entry.kind == .tool {
+        DisclosureGroup(isExpanded: $expanded) {
+          activityContent.padding(.top, 5)
+        } label: {
+          activityHeader
+        }
+      } else {
+        VStack(alignment: .leading, spacing: 5) {
+          activityHeader
+          activityContent
+        }
       }
     }
     .padding(.leading, 4)
+  }
+
+  private var activityHeader: some View {
+    HStack(spacing: 6) {
+      Image(systemName: activityIcon)
+      Text(entry.title).fontWeight(.medium)
+      if entry.isRunning { ProgressView().controlSize(.mini) }
+    }
+    .font(.caption)
+    .foregroundStyle(entry.isError ? Color.red : Color.secondary)
+  }
+
+  @ViewBuilder
+  private var activityContent: some View {
+    if let diff = entry.diff, !diff.isEmpty {
+      GitDiffView(diff: diff)
+    } else if !entry.text.isEmpty {
+      Text(entry.text)
+        .font(.system(.caption, design: entry.kind == .tool ? .monospaced : .default))
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
   }
 
   private var activityIcon: String {
@@ -1602,24 +1632,31 @@ private struct CodexAccountsView: View {
 
 private struct MessageAttachmentsView: View {
   let attachments: [PromptAttachment]
+  @State private var previewedAttachment: PromptAttachment?
 
   var body: some View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
         ForEach(attachments) { attachment in
           if attachment.isImage, let image = NSImage(contentsOf: attachment.url) {
-            VStack(alignment: .leading, spacing: 4) {
-              Image(nsImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(width: 118, height: 82)
-                .clipped()
-                .clipShape(RoundedRectangle(cornerRadius: 7))
-              Text(attachment.url.lastPathComponent)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            Button {
+              previewedAttachment = attachment
+            } label: {
+              VStack(alignment: .leading, spacing: 4) {
+                Image(nsImage: image)
+                  .resizable()
+                  .scaledToFill()
+                  .frame(width: 118, height: 82)
+                  .clipped()
+                  .clipShape(RoundedRectangle(cornerRadius: 7))
+                Text(attachment.url.lastPathComponent)
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+                  .lineLimit(1)
+              }
             }
+            .buttonStyle(.plain)
+            .help("点击预览 \(attachment.url.lastPathComponent)")
           } else {
             Label(attachment.url.lastPathComponent, systemImage: "doc.fill")
               .font(.caption)
@@ -1629,6 +1666,43 @@ private struct MessageAttachmentsView: View {
         }
       }
     }
+    .sheet(item: $previewedAttachment) { attachment in
+      ImageAttachmentPreview(attachment: attachment)
+    }
+  }
+}
+
+private struct ImageAttachmentPreview: View {
+  @Environment(\.dismiss) private var dismiss
+  let attachment: PromptAttachment
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack {
+        Text(attachment.url.lastPathComponent)
+          .font(.headline)
+          .lineLimit(1)
+        Spacer()
+        Button("关闭") { dismiss() }
+          .keyboardShortcut(.cancelAction)
+      }
+      .padding(12)
+
+      Divider()
+
+      if let image = NSImage(contentsOf: attachment.url) {
+        Image(nsImage: image)
+          .resizable()
+          .scaledToFit()
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .padding(16)
+          .background(Color(nsColor: .windowBackgroundColor))
+      } else {
+        ContentUnavailableView("无法预览图片", systemImage: "photo.badge.exclamationmark")
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      }
+    }
+    .frame(minWidth: 640, idealWidth: 900, minHeight: 480, idealHeight: 680)
   }
 }
 

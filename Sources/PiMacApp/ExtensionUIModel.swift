@@ -20,6 +20,12 @@ final class ExtensionUIModel: ObservableObject {
     let source: AppModel
   }
 
+  private struct AccountSnapshot {
+    let accounts: [CodexAccountStatus]
+    let gemini: GeminiUsageStatus?
+    let updatedAt: Date?
+  }
+
   private var presentedDialog: PendingDialog?
   private var queuedDialogs: [PendingDialog] = []
 
@@ -153,7 +159,9 @@ final class ExtensionUIModel: ObservableObject {
     let updatedAt = (payload["updatedAt"] as? Double).map {
       Date(timeIntervalSince1970: $0 / 1_000)
     }
-    // A late event from a newly opened/background session must not replace newer global data.
+    // Every session runs its own extension process, but quota state is global. A process that
+    // started later can still finish an older request, so never replace the shared snapshot
+    // with older data.
     if let updatedAt, let current = codexAccountsUpdatedAt, updatedAt < current { return }
 
     let active = payload["activeAccount"] as? String
@@ -198,11 +206,19 @@ final class ExtensionUIModel: ObservableObject {
       gemini = nil
     }
 
-    // Avoid invalidating every view when identical status is emitted by several sessions.
-    if codexAccounts != accounts { codexAccounts = accounts }
-    if geminiUsage != gemini { geminiUsage = gemini }
-    if let updatedAt, codexAccountsUpdatedAt != updatedAt {
-      codexAccountsUpdatedAt = updatedAt
+    apply(
+      AccountSnapshot(
+        accounts: accounts,
+        gemini: gemini,
+        updatedAt: updatedAt ?? codexAccountsUpdatedAt
+      ))
+  }
+
+  private func apply(_ snapshot: AccountSnapshot) {
+    if codexAccounts != snapshot.accounts { codexAccounts = snapshot.accounts }
+    if geminiUsage != snapshot.gemini { geminiUsage = snapshot.gemini }
+    if codexAccountsUpdatedAt != snapshot.updatedAt {
+      codexAccountsUpdatedAt = snapshot.updatedAt
     }
   }
 
