@@ -17,6 +17,64 @@ private struct ConversationBottomPreferenceKey: PreferenceKey {
   }
 }
 
+private enum ConversationScrollMode {
+  case pinnedToBottom
+  case manual
+}
+
+/// SwiftUI does not expose scroll phases on macOS 14. Observe AppKit's live-scroll
+/// notifications so content growth is never mistaken for a user's scroll gesture.
+private struct ConversationScrollObserver: NSViewRepresentable {
+  let onUserScroll: () -> Void
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator(onUserScroll: onUserScroll)
+  }
+
+  func makeNSView(context: Context) -> NSView {
+    let view = NSView(frame: .zero)
+    DispatchQueue.main.async { context.coordinator.attach(to: view.enclosingScrollView) }
+    return view
+  }
+
+  func updateNSView(_ view: NSView, context: Context) {
+    context.coordinator.onUserScroll = onUserScroll
+    DispatchQueue.main.async { context.coordinator.attach(to: view.enclosingScrollView) }
+  }
+
+  final class Coordinator {
+    var onUserScroll: () -> Void
+    private weak var scrollView: NSScrollView?
+    private var observers: [NSObjectProtocol] = []
+
+    init(onUserScroll: @escaping () -> Void) {
+      self.onUserScroll = onUserScroll
+    }
+
+    deinit {
+      observers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    func attach(to scrollView: NSScrollView?) {
+      guard let scrollView, self.scrollView !== scrollView else { return }
+      observers.forEach(NotificationCenter.default.removeObserver)
+      observers.removeAll()
+      self.scrollView = scrollView
+
+      for name in [NSScrollView.willStartLiveScrollNotification,
+                   NSScrollView.didLiveScrollNotification] {
+        observers.append(NotificationCenter.default.addObserver(
+          forName: name,
+          object: scrollView,
+          queue: .main
+        ) { [weak self] _ in
+          self?.onUserScroll()
+        })
+      }
+    }
+  }
+}
+
 private struct CompactResetTime: View {
   let date: Date
 
@@ -74,8 +132,9 @@ struct ContentView: View {
   @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
   @State private var composerSelection = NSRange(location: 0, length: 0)
-  @State private var autoScrollEnabled = true
+  @State private var conversationScrollMode: ConversationScrollMode = .pinnedToBottom
   @State private var autoScrollScheduled = false
+  @State private var autoScrollGeneration = 0
   @State private var initialSessionScrollPending = true
   @State private var initialScrollGeneration = 0
   @State private var visibleSessionCount = 10
@@ -208,7 +267,7 @@ struct ContentView: View {
           }
         }
 
-        if case .connected = app.connectionState {
+        if app.projectURL != nil {
           Button {
             guard let projectURL = app.projectURL else { return }
             workspace.newSession(in: projectURL)
@@ -218,13 +277,25 @@ struct ContentView: View {
           }
           .buttonStyle(.borderedProminent)
           .controlSize(.large)
+          .disabled(!app.clientConnectedForCommands)
 
           Text("会话")
             .font(.caption.bold())
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-          if visibleSessions.isEmpty {
+          if visibleSessions.isEmpty, let projectURL = app.projectURL,
+            workspace.isLoadingSessions(in: projectURL)
+          {
+            HStack(spacing: 8) {
+              ProgressView().controlSize(.small)
+              Text("正在读取会话…")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+          } else if visibleSessions.isEmpty {
             ContentUnavailableView(
               "暂无会话",
               systemImage: "bubble.left",
@@ -338,7 +409,7 @@ struct ContentView: View {
 
   private func redesignedSessionRow(_ session: SessionItem) -> some View {
     let selected = workspace.isSelectedSession(path: session.path)
-    let running = workspace.model(forSessionPath: session.path)?.isStreaming == true
+    let running = workspace.model(forSessionPath: session.path)?.isBusy == true
     let hovered = hoveredSessionPath == session.path
     return ZStack(alignment: .trailing) {
       Button {
@@ -429,6 +500,7 @@ struct ContentView: View {
               Button("打开…", systemImage: "folder") { choosingSession = true }
             }
             Button("压缩上下文", systemImage: "arrow.down.right.and.arrow.up.left", action: app.compact)
+              .disabled(app.isBusy)
 
             Divider()
             Text("历史会话").font(.caption.bold()).foregroundStyle(.secondary)
@@ -488,6 +560,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 4) {
           Text("\(stats.totalTokens.formatted()) tokens")
           Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文统计等待更新")
+            .foregroundStyle(contextUsageColor(stats.contextPercent))
           Text(stats.cost, format: .currency(code: "USD"))
         }
         .font(.caption)
@@ -565,6 +638,10 @@ struct ContentView: View {
               }
           }
           .padding(20)
+          .background {
+            ConversationScrollObserver(onUserScroll: enterManualScrollMode)
+              .frame(width: 0, height: 0)
+          }
         }
         .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
@@ -574,13 +651,12 @@ struct ContentView: View {
           scheduleInitialSessionScroll(proxy)
         }
         .onPreferenceChange(ConversationBottomPreferenceKey.self) { bottomY in
-          let isNearBottom = bottomY <= viewport.size.height + 96
-          if isNearBottom {
-            autoScrollEnabled = true
-          } else if !app.isStreaming && !autoScrollScheduled {
-            // 流式内容增长本身也会把底部标记推出视口，不能把它误判为用户向上滚动。
-            autoScrollEnabled = false
+          if bottomY <= viewport.size.height + 96 {
+            // 手动滚回底部后，重新进入固定底部模式。
+            conversationScrollMode = .pinnedToBottom
           }
+          // 底部离开视口也可能只是流式内容变高。只有 AppKit 观察到用户
+          // 实际滚动时，才切换为手动位置模式。
         }
         .onChange(of: app.messages.count) {
           if initialSessionScrollPending {
@@ -594,7 +670,10 @@ struct ContentView: View {
           scheduleAutoScroll(proxy)
         }
         .onChange(of: app.isStreaming) { wasStreaming, isStreaming in
-          scheduleAutoScroll(proxy, force: wasStreaming && !isStreaming && autoScrollEnabled)
+          scheduleAutoScroll(
+            proxy,
+            force: wasStreaming && !isStreaming && conversationScrollMode == .pinnedToBottom
+          )
         }
         .onChange(of: app.currentSessionPath) {
           initialSessionScrollPending = true
@@ -613,25 +692,41 @@ struct ContentView: View {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
       guard generation == initialScrollGeneration, !app.messages.isEmpty else { return }
       proxy.scrollTo("conversation-bottom", anchor: .bottom)
-      autoScrollEnabled = true
+      conversationScrollMode = .pinnedToBottom
       initialSessionScrollPending = false
     }
   }
 
   private func scheduleAutoScroll(_ proxy: ScrollViewProxy, force: Bool = false) {
-    guard autoScrollEnabled || force, !autoScrollScheduled else { return }
+    if force { conversationScrollMode = .pinnedToBottom }
+    guard conversationScrollMode == .pinnedToBottom, !autoScrollScheduled else { return }
     autoScrollScheduled = true
+    autoScrollGeneration += 1
+    let generation = autoScrollGeneration
 
     // Markdown 和工具卡片可能分两轮完成布局。连续校正两次，避免第一次滚动后
     // 内容高度再次增加，导致流式回复的末尾仍停在视口之外。
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+      guard generation == autoScrollGeneration,
+            conversationScrollMode == .pinnedToBottom else { return }
       proxy.scrollTo("conversation-bottom", anchor: .bottom)
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+      guard generation == autoScrollGeneration,
+            conversationScrollMode == .pinnedToBottom else { return }
       proxy.scrollTo("conversation-bottom", anchor: .bottom)
-      autoScrollEnabled = true
       autoScrollScheduled = false
     }
+  }
+
+  private func enterManualScrollMode() {
+    conversationScrollMode = .manual
+    autoScrollGeneration += 1
+    autoScrollScheduled = false
+
+    // 用户操作优先于会话打开后的延迟定位。
+    initialScrollGeneration += 1
+    initialSessionScrollPending = false
   }
 
   private var conversationTurns: [ConversationTurn] {
@@ -650,12 +745,42 @@ struct ContentView: View {
 
   private var composer: some View {
     VStack(spacing: 8) {
+      if !app.queuedPrompts.isEmpty {
+        VStack(spacing: 5) {
+          ForEach(app.queuedPrompts) { prompt in
+            HStack(spacing: 7) {
+              Text(prompt.delivery.label)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(prompt.delivery == .steer ? .orange : .blue)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(.quaternary, in: Capsule())
+              Text(prompt.text.replacingOccurrences(of: "\n", with: " "))
+                .font(.caption)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+              Button {
+                app.removeQueuedPrompt(id: prompt.id)
+              } label: {
+                Image(systemName: "trash")
+              }
+              .buttonStyle(.plain)
+              .foregroundStyle(.secondary)
+              .help("删除这条尚未发送的消息")
+            }
+          }
+        }
+        .padding(7)
+        .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+      }
+
       ZStack(alignment: .topLeading) {
         ComposerTextView(
           text: $app.composerText,
           selection: $composerSelection,
           isFocused: $composerFocused,
-          onSubmit: sendPromptFollowingOutput,
+          onSubmit: { sendPromptFollowingOutput(delivery: .steer) },
+          onFollowUp: { sendPromptFollowingOutput(delivery: .followUp) },
           onPasteFiles: registerAttachments,
           onPasteImage: registerPastedImage
         )
@@ -699,18 +824,37 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
             .lineLimit(1)
         }
+        let promptIsEmpty =
+          app.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          && app.attachments.isEmpty
         if app.isStreaming {
-          Button(action: app.abort) {
-            Image(systemName: "stop.fill")
-              .font(.caption.bold())
-              .frame(width: 26, height: 26)
+          Button {
+            sendPromptFollowingOutput(delivery: .steer)
+          } label: {
+            Label("工具后", systemImage: "arrow.turn.down.right")
+              .font(.caption)
           }
           .buttonStyle(.borderedProminent)
-          .tint(.red)
-          .clipShape(Circle())
-          .help("停止当前任务")
+          .disabled(promptIsEmpty || !app.clientConnected)
+          .help("当前工具调用阶段结束后插入（Return）")
+
+          Button {
+            sendPromptFollowingOutput(delivery: .followUp)
+          } label: {
+            Label("完成后", systemImage: "clock")
+              .font(.caption)
+          }
+          .buttonStyle(.bordered)
+          .disabled(promptIsEmpty || !app.clientConnected)
+          .help("当前任务全部完成后继续（⌥ Return）")
+
+          stopButton
+        } else if app.isCompacting {
+          stopButton
         } else {
-          Button(action: sendPromptFollowingOutput) {
+          Button {
+            sendPromptFollowingOutput(delivery: .steer)
+          } label: {
             Image(systemName: "arrow.up")
               .font(.body.bold())
               .frame(width: 26, height: 26)
@@ -718,10 +862,7 @@ struct ContentView: View {
           .buttonStyle(.borderedProminent)
           .clipShape(Circle())
           .keyboardShortcut(.return, modifiers: .command)
-          .disabled(
-            (app.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-              && app.attachments.isEmpty) || !app.clientConnected
-          )
+          .disabled(promptIsEmpty || !app.clientConnected)
           .help("发送（Enter）")
         }
       }
@@ -814,9 +955,22 @@ struct ContentView: View {
     }
   }
 
-  private func sendPromptFollowingOutput() {
-    autoScrollEnabled = true
-    app.sendPrompt()
+  private var stopButton: some View {
+    Button(action: app.abort) {
+      Image(systemName: "stop.fill")
+        .font(.caption.bold())
+        .frame(width: 26, height: 26)
+    }
+    .buttonStyle(.borderedProminent)
+    .tint(.red)
+    .clipShape(Circle())
+    .help(app.isCompacting ? "停止压缩" : "停止当前任务")
+  }
+
+  private func sendPromptFollowingOutput(delivery: QueuedPromptDelivery) {
+    // 发送消息明确恢复固定底部模式；随后的用户滚动仍可立即切回手动模式。
+    conversationScrollMode = .pinnedToBottom
+    app.sendPrompt(delivery: delivery)
   }
 
   private var modelMenu: some View {
@@ -843,7 +997,7 @@ struct ContentView: View {
     }
     .menuStyle(.borderlessButton)
     .fixedSize()
-    .disabled(app.isStreaming || app.models.isEmpty)
+    .disabled(app.isBusy || app.models.isEmpty)
   }
 
   private var sessionControls: some View {
@@ -856,12 +1010,14 @@ struct ContentView: View {
         .font(.body)
       }
       .buttonStyle(.plain)
+      .disabled(app.isBusy)
       .help("压缩上下文")
 
       if let stats = app.stats {
         Divider().frame(height: 14)
         HStack(spacing: 7) {
           Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文 --")
+            .foregroundStyle(contextUsageColor(stats.contextPercent))
           Text("\(stats.totalTokens.formatted()) tokens")
           Text(stats.cost, format: .currency(code: "USD"))
         }
@@ -870,6 +1026,13 @@ struct ContentView: View {
       }
     }
     .fixedSize()
+  }
+
+  private func contextUsageColor(_ percent: Double?) -> Color {
+    guard let percent else { return .secondary }
+    if percent > 60 { return .red }
+    if percent > 40 { return .orange }
+    return .secondary
   }
 
   private var thinkingMenu: some View {
@@ -895,7 +1058,7 @@ struct ContentView: View {
     }
     .menuStyle(.borderlessButton)
     .fixedSize()
-    .disabled(app.isStreaming)
+    .disabled(app.isBusy)
   }
 
   private func thinkingLabel(_ level: String) -> String {
@@ -917,6 +1080,7 @@ private struct ComposerTextView: NSViewRepresentable {
   @Binding var selection: NSRange
   @Binding var isFocused: Bool
   let onSubmit: () -> Void
+  let onFollowUp: () -> Void
   let onPasteFiles: ([URL]) -> [String]
   let onPasteImage: (Data, String) -> [String]
 
@@ -948,6 +1112,7 @@ private struct ComposerTextView: NSViewRepresentable {
     let textView = SubmitTextView(frame: scrollView.contentView.bounds)
     textView.delegate = context.coordinator
     textView.onSubmit = onSubmit
+    textView.onFollowUp = onFollowUp
     textView.onPasteFiles = onPasteFiles
     textView.onPasteImage = onPasteImage
     textView.string = text
@@ -982,6 +1147,7 @@ private struct ComposerTextView: NSViewRepresentable {
   func updateNSView(_ scrollView: NSScrollView, context: Context) {
     guard let textView = scrollView.documentView as? SubmitTextView else { return }
     textView.onSubmit = onSubmit
+    textView.onFollowUp = onFollowUp
     textView.onPasteFiles = onPasteFiles
     textView.onPasteImage = onPasteImage
     // AppModel 的流式事件会频繁触发 SwiftUI 更新。只有 Binding 确实发生了外部
@@ -1058,6 +1224,7 @@ private struct ComposerTextView: NSViewRepresentable {
 
   final class SubmitTextView: NSTextView {
     var onSubmit: (() -> Void)?
+    var onFollowUp: (() -> Void)?
     var onPasteFiles: (([URL]) -> [String])?
     var onPasteImage: ((Data, String) -> [String])?
 
@@ -1133,10 +1300,17 @@ private struct ComposerTextView: NSViewRepresentable {
       }
       let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
       if modifiers.contains(.shift) {
-        insertNewlineIgnoringFieldEditor(nil)
+        // 交给 NSTextView 处理，确保输入法也能看到完整的 Shift+Enter 组合。
+        // 直接插入换行会绕过 NSTextInputContext，使部分输入法把 Shift 松开
+        // 误判为单独按下 Shift，进而切换中英文。
+        super.keyDown(with: event)
         return
       }
-      onSubmit?()
+      if modifiers.contains(.option) {
+        onFollowUp?()
+      } else {
+        onSubmit?()
+      }
     }
   }
 }
@@ -1184,6 +1358,9 @@ private struct ActivityGroupView: View {
   private var hasRunningActivity: Bool { entries.contains(where: \.isRunning) }
   private var shouldStayExpanded: Bool { taskIsRunning || hasRunningActivity }
   private var toolCount: Int { entries.filter { $0.kind == .tool }.count }
+  private var failedToolCount: Int {
+    entries.filter { $0.kind == .tool && $0.isError }.count
+  }
 
   var body: some View {
     DisclosureGroup(isExpanded: $expanded) {
@@ -1204,6 +1381,10 @@ private struct ActivityGroupView: View {
         } else {
           Image(systemName: "checkmark.circle").foregroundStyle(.green)
           Text(activitySummary)
+          if failedToolCount > 0 {
+            Text("· \(failedToolCount) 次失败")
+              .foregroundStyle(.red)
+          }
         }
       }
       .font(.caption)
@@ -1433,12 +1614,12 @@ private struct CodexAccountsView: View {
             Image(systemName: "arrow.clockwise")
           }
           .buttonStyle(.plain)
-          .disabled(app.isStreaming)
           .help("刷新额度")
+          .disabled(app.isBusy)
           Button("管理") { app.openCodexAccountManager() }
             .buttonStyle(.plain)
             .font(.caption)
-            .disabled(app.isStreaming)
+            .disabled(app.isBusy)
           Button {
             withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
           } label: {
@@ -1519,7 +1700,7 @@ private struct CodexAccountsView: View {
           Button("切换") { app.switchCodexAccount(to: account.name) }
             .buttonStyle(.borderless)
             .font(.caption2)
-            .disabled(app.isStreaming)
+            .disabled(app.isBusy)
         }
       }
       if let error = account.error {

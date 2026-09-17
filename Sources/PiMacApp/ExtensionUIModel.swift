@@ -2,11 +2,10 @@ import AppKit
 import Combine
 import Foundation
 
-/// Application-wide state for Pi extension UI.
+/// Application-wide coordinator for Pi extension UI.
 ///
-/// Every open session owns an RPC process, so the same extension can emit UI events from
-/// several sessions. Keeping those events here prevents status/account data and dialogs from
-/// being fragmented across session tabs.
+/// Dialogs from every live RPC process are queued here, while session-specific status such as
+/// the active Codex account is displayed only for the currently selected session.
 @MainActor
 final class ExtensionUIModel: ObservableObject {
   @Published var dialog: ExtensionDialog?
@@ -28,6 +27,19 @@ final class ExtensionUIModel: ObservableObject {
 
   private var presentedDialog: PendingDialog?
   private var queuedDialogs: [PendingDialog] = []
+  private weak var selectedSource: AppModel?
+  private var accountSnapshots: [ObjectIdentifier: AccountSnapshot] = [:]
+
+  func selectSource(_ source: AppModel?) {
+    selectedSource = source
+    guard let source,
+      let snapshot = accountSnapshots[ObjectIdentifier(source)]
+    else {
+      apply(AccountSnapshot(accounts: [], gemini: nil, updatedAt: nil))
+      return
+    }
+    apply(snapshot)
+  }
 
   func handle(_ event: PiRPCClient.JSON, from source: AppModel) {
     guard let method = event["method"] as? String,
@@ -74,10 +86,14 @@ final class ExtensionUIModel: ObservableObject {
     case "set_editor_text":
       source.composerText = event["text"] as? String ?? ""
     case "setStatus":
-      updateStatus(event)
+      updateStatus(event, from: source)
     default:
       break
     }
+  }
+
+  func hasPendingRequests(from source: AppModel) -> Bool {
+    (presentedDialog?.source === source) || queuedDialogs.contains { $0.source === source }
   }
 
   func answerDialog(value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false) {
@@ -94,6 +110,9 @@ final class ExtensionUIModel: ObservableObject {
   }
 
   func removeRequests(from source: AppModel) {
+    accountSnapshots.removeValue(forKey: ObjectIdentifier(source))
+    if selectedSource === source { selectSource(nil) }
+
     let removed = queuedDialogs.filter { $0.source === source }
     queuedDialogs.removeAll { $0.source === source }
     for pending in removed {
@@ -130,11 +149,11 @@ final class ExtensionUIModel: ObservableObject {
     dialog = next.dialog
   }
 
-  private func updateStatus(_ event: PiRPCClient.JSON) {
+  private func updateStatus(_ event: PiRPCClient.JSON, from source: AppModel) {
     let key = event["statusKey"] as? String ?? "extension"
     let rawText = event["statusText"] as? String ?? ""
     if key == "account-usage-gui" {
-      updateCodexAccounts(from: rawText)
+      updateCodexAccounts(from: rawText, source: source)
       return
     }
 
@@ -148,7 +167,7 @@ final class ExtensionUIModel: ObservableObject {
     }
   }
 
-  private func updateCodexAccounts(from text: String) {
+  private func updateCodexAccounts(from text: String, source: AppModel) {
     guard !text.isEmpty,
       let data = text.data(using: .utf8),
       let payload = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
@@ -159,10 +178,15 @@ final class ExtensionUIModel: ObservableObject {
     let updatedAt = (payload["updatedAt"] as? Double).map {
       Date(timeIntervalSince1970: $0 / 1_000)
     }
-    // Every session runs its own extension process, but quota state is global. A process that
-    // started later can still finish an older request, so never replace the shared snapshot
-    // with older data.
-    if let updatedAt, let current = codexAccountsUpdatedAt, updatedAt < current { return }
+    let sourceID = ObjectIdentifier(source)
+    // Ignore stale results from this process, but never compare timestamps across sessions:
+    // each session has a different active account and background sessions must not overwrite
+    // the account marker shown for the selected session.
+    if let updatedAt, let current = accountSnapshots[sourceID]?.updatedAt,
+      updatedAt < current
+    {
+      return
+    }
 
     let active = payload["activeAccount"] as? String
     let defaultAccount = payload["defaultAccount"] as? String
@@ -206,12 +230,14 @@ final class ExtensionUIModel: ObservableObject {
       gemini = nil
     }
 
-    apply(
-      AccountSnapshot(
-        accounts: accounts,
-        gemini: gemini,
-        updatedAt: updatedAt ?? codexAccountsUpdatedAt
-      ))
+    let snapshot = AccountSnapshot(
+      accounts: accounts,
+      gemini: gemini,
+      updatedAt: updatedAt ?? accountSnapshots[sourceID]?.updatedAt
+    )
+    accountSnapshots[sourceID] = snapshot
+    if selectedSource == nil { selectedSource = source }
+    if selectedSource === source { apply(snapshot) }
   }
 
   private func apply(_ snapshot: AccountSnapshot) {

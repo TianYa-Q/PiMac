@@ -270,59 +270,52 @@ struct MarkdownView: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 10) {
-      ForEach(Array(document.blocks.enumerated()), id: \.offset) { _, block in
-        blockView(block)
-      }
-    }
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .textSelection(.enabled)
+    // Keep the complete message in one Text view. SwiftUI selections cannot cross
+    // sibling Text views, which previously made dragging stop at each Markdown
+    // block (and at every list/table row).
+    selectableText
+      .fixedSize(horizontal: false, vertical: true)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .textSelection(.enabled)
   }
 
-  @ViewBuilder
-  private func blockView(_ block: MarkdownBlock) -> some View {
+  private var selectableText: Text {
+    document.blocks.enumerated().reduce(Text("")) { result, element in
+      let separator = element.offset == 0 ? Text("") : Text("\n\n")
+      return result + separator + blockText(element.element)
+    }
+  }
+
+  private func blockText(_ block: MarkdownBlock) -> Text {
     switch block {
     case .paragraph(let text):
-      inlineText(text)
-        .fixedSize(horizontal: false, vertical: true)
+      return inlineText(text)
     case .heading(let level, let text):
-      inlineText(text)
-        .font(headingFont(level))
-        .padding(.top, level <= 2 ? 4 : 1)
+      return inlineText(text).font(headingFont(level))
     case .code(let language, let text):
-      VStack(alignment: .leading, spacing: 4) {
-        if let language { Text(language).font(.caption2).foregroundStyle(.secondary) }
-        ScrollView(.horizontal) {
-          Text(text.isEmpty ? " " : text)
-            .font(.system(.body, design: .monospaced))
-            .textSelection(.enabled)
-            .padding(9)
-        }
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .background(Color(nsColor: .textBackgroundColor).opacity(0.55), in: RoundedRectangle(cornerRadius: 6))
-      .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.14)))
+      let label = language.map {
+        Text("\($0)\n").font(.caption2).foregroundColor(.secondary)
+      } ?? Text("")
+      return label + Text(text.isEmpty ? " " : text)
+        .font(.system(.body, design: .monospaced))
     case .quote(let text):
-      HStack(alignment: .top, spacing: 9) {
-        Rectangle().fill(Color.accentColor.opacity(0.55)).frame(width: 3)
-        MarkdownView(text).foregroundStyle(.secondary)
-      }
+      let quoted = text.replacingOccurrences(of: "\n", with: "\n▎ ")
+      return Text("▎ ").foregroundColor(.accentColor)
+        + inlineText(quoted).foregroundColor(.secondary)
     case .list(let ordered, let start, let items):
-      VStack(alignment: .leading, spacing: 5) {
-        ForEach(Array(items.enumerated()), id: \.offset) { offset, item in
-          HStack(alignment: .firstTextBaseline, spacing: 7) {
-            Text(ordered ? "\(start + offset)." : listMarker(item))
-              .foregroundStyle(.secondary)
-              .frame(minWidth: 16, alignment: .trailing)
-            inlineText(listText(item)).fixedSize(horizontal: false, vertical: true)
-          }
-        }
+      return items.enumerated().reduce(Text("")) { result, element in
+        let separator = element.offset == 0 ? Text("") : Text("\n")
+        let markerText = listMarker(element.element)
+        let marker = ordered ? "\(start + element.offset). " : "\(markerText) "
+        return result + separator + Text(marker).foregroundColor(.secondary)
+          + inlineText(listText(element.element))
       }
-      .padding(.leading, 4)
-    case .table(let headers, let rows, let alignments):
-      tableView(headers: headers, rows: rows, alignments: alignments)
+    case .table(let headers, let rows, _):
+      let lines = ([headers] + rows).map { $0.joined(separator: " | ") }
+      return Text(lines.joined(separator: "\n"))
+        .font(.system(.body, design: .monospaced))
     case .divider:
-      Divider().padding(.vertical, 2)
+      return Text("────────────────────────").foregroundColor(.secondary)
     }
   }
 
@@ -352,43 +345,5 @@ struct MarkdownView: View {
       return String(text.dropFirst(4))
     }
     return text
-  }
-
-  private func alignment(_ value: MarkdownAlignment) -> Alignment {
-    switch value {
-    case .leading: .leading
-    case .center: .center
-    case .trailing: .trailing
-    }
-  }
-
-  private func tableView(headers: [String], rows: [[String]], alignments: [MarkdownAlignment]) -> some View {
-    ScrollView(.horizontal) {
-      Grid(horizontalSpacing: 0, verticalSpacing: 0) {
-        GridRow {
-          ForEach(headers.indices, id: \.self) { column in
-            inlineText(headers[column])
-              .fontWeight(.semibold)
-              .padding(.horizontal, 9).padding(.vertical, 7)
-              .frame(minWidth: 90, maxWidth: 300, alignment: alignment(alignments[column]))
-          }
-        }
-        .background(Color.secondary.opacity(0.12))
-        ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, row in
-          Divider().gridCellUnsizedAxes(.horizontal)
-          GridRow {
-            ForEach(row.indices, id: \.self) { column in
-              inlineText(row[column])
-                .padding(.horizontal, 9).padding(.vertical, 7)
-                .frame(minWidth: 90, maxWidth: 300, alignment: alignment(alignments[column]))
-            }
-          }
-          .background(rowIndex.isMultiple(of: 2) ? Color.clear : Color.secondary.opacity(0.035))
-        }
-      }
-    }
-    .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
-    .clipShape(RoundedRectangle(cornerRadius: 6))
-    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.18)))
   }
 }

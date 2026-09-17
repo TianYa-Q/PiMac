@@ -6,27 +6,28 @@ import Testing
 @MainActor
 struct ExtensionUIModelTests {
   @Test
-  func accountStatusIsGlobalAndSurvivesSessionSelection() throws {
+  func accountStatusFollowsSelectedSession() throws {
     let ui = ExtensionUIModel()
     let first = AppModel(restoreLastProjectOnLaunch: false)
     let second = AppModel(restoreLastProjectOnLaunch: false)
 
+    ui.selectSource(first)
     ui.handle(try statusEvent(activeAccount: "X", updatedAt: 1_000), from: first)
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "X")
 
-    // Creating another task does not clear the application-wide snapshot.
+    // A background session keeps its own snapshot and cannot replace the selected session.
+    ui.handle(try statusEvent(activeAccount: "Y", updatedAt: 3_000), from: second)
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "X")
 
-    // Any session can publish a newer global snapshot.
-    ui.handle(try statusEvent(activeAccount: "Y", updatedAt: 3_000), from: second)
+    ui.selectSource(second)
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "Y")
 
-    // Late results from another process must not roll global quota state back.
-    ui.handle(try statusEvent(activeAccount: "X", updatedAt: 2_000), from: first)
+    // Even a newer update from another process must not change the selected account marker.
+    ui.handle(try statusEvent(activeAccount: "X", updatedAt: 4_000), from: first)
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "Y")
 
     ui.removeRequests(from: second)
-    #expect(ui.codexAccounts.first(where: \.isActive)?.name == "Y")
+    #expect(ui.codexAccounts.isEmpty)
   }
 
   private func statusEvent(activeAccount: String, updatedAt: Double) throws -> PiRPCClient.JSON {

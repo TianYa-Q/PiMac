@@ -45,6 +45,26 @@ struct ChatEntry: Identifiable, Sendable {
   var attachments: [PromptAttachment] = []
 }
 
+enum QueuedPromptDelivery: String, Sendable {
+  case steer
+  case followUp
+
+  var label: String {
+    switch self {
+    case .steer: "工具调用后"
+    case .followUp: "任务完成后"
+    }
+  }
+}
+
+struct QueuedPrompt: Identifiable, Sendable {
+  let id: UUID
+  let text: String
+  let rpcText: String
+  let delivery: QueuedPromptDelivery
+  let attachments: [PromptAttachment]
+}
+
 struct PromptAttachment: Identifiable, Hashable, Sendable {
   let id = UUID()
   let url: URL
@@ -110,7 +130,7 @@ struct CodexAccountStatus: Identifiable, Hashable {
   var id: String { name }
 }
 
-struct SessionItem: Identifiable, Hashable, Sendable {
+struct SessionItem: Codable, Identifiable, Hashable, Sendable {
   let path: String
   let title: String
   let modifiedAt: Date

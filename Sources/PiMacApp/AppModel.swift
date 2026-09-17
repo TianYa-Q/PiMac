@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import Foundation
 import UniformTypeIdentifiers
 
@@ -13,6 +14,7 @@ final class AppModel: ObservableObject {
   @Published var thinkingLevels = ["off"]
   @Published var selectedThinkingLevel = "off"
   @Published var isStreaming = false
+  @Published var isCompacting = false
   @Published var isLoadingConfiguration = false
   @Published var sessionName = ""
   @Published var sessions: [SessionItem] = []
@@ -20,6 +22,7 @@ final class AppModel: ObservableObject {
   @Published var stats: SessionStats?
   @Published var composerText = ""
   @Published var attachments: [PromptAttachment] = []
+  @Published var queuedPrompts: [QueuedPrompt] = []
   @Published var statusText = ""
   @Published var diagnosticText = ""
 
@@ -31,6 +34,10 @@ final class AppModel: ObservableObject {
   private var activeAssistantId: String?
   private var activeThinkingId: String?
   private var sessionLoadGeneration = UUID()
+  private var isRewritingQueue = false
+  private var submittingQueuedPrompts: [UUID: Int] = [:]
+  private var queueSnapshotGeneration = 0
+  private var latestQueueSnapshot: (steering: [String], followUp: [String])?
 
   var piPath: String {
     get { UserDefaults.standard.string(forKey: "piPath") ?? Self.suggestedPiPath() }
@@ -56,6 +63,7 @@ final class AppModel: ObservableObject {
     client.onTermination = { [weak self] code in
       guard let self else { return }
       self.isStreaming = false
+      self.isCompacting = false
       if case .disconnected = self.connectionState { return }
       self.connectionState = .failed("Pi 进程退出，状态码 \(code)")
     }
@@ -95,7 +103,8 @@ final class AppModel: ObservableObject {
   private func connect(
     to projectURL: URL,
     continueLastSession: Bool,
-    sessionPath: String?
+    sessionPath: String?,
+    preservingState: Bool = false
   ) {
     guard FileManager.default.fileExists(atPath: projectURL.path) else {
       connectionState = .failed("项目目录不存在")
@@ -107,8 +116,14 @@ final class AppModel: ObservableObject {
     }
 
     connectionState = .connecting
-    messages.removeAll()
-    diagnosticText = ""
+    if !preservingState {
+      messages.removeAll()
+      queuedPrompts.removeAll()
+      submittingQueuedPrompts.removeAll()
+      queueSnapshotGeneration = 0
+      latestQueueSnapshot = nil
+      diagnosticText = ""
+    }
     self.projectURL = projectURL
     do {
       try client.start(
@@ -142,11 +157,44 @@ final class AppModel: ObservableObject {
     }
   }
 
+  var isProcessRunning: Bool { client.isRunning }
+  var isBusy: Bool { isStreaming || isCompacting }
+
+  var hasUnsubmittedInput: Bool {
+    !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+  }
+
+  /// Stop an idle RPC process without discarding the session's transcript, composer draft,
+  /// attachments, or extension snapshot. Selecting the session starts a replacement process.
+  func suspendProcess() {
+    guard !isBusy, queuedPrompts.isEmpty, client.isRunning else { return }
+    connectionState = .disconnected
+    isLoadingConfiguration = false
+    statusText = ""
+    client.stop()
+  }
+
+  func resumeProcess(sessionPath: String?, continueLastSession: Bool) {
+    guard !client.isRunning, let projectURL else { return }
+    let targetPath = sessionPath ?? (currentSessionPath.isEmpty ? nil : currentSessionPath)
+    connect(
+      to: projectURL,
+      continueLastSession: targetPath == nil ? continueLastSession : false,
+      sessionPath: targetPath,
+      preservingState: true
+    )
+  }
+
   func disconnect() {
     extensionUI?.removeRequests(from: self)
     connectionState = .disconnected
     isStreaming = false
+    isCompacting = false
     isLoadingConfiguration = false
+    queuedPrompts = []
+    submittingQueuedPrompts.removeAll()
+    queueSnapshotGeneration = 0
+    latestQueueSnapshot = nil
     sessions = []
     currentSessionPath = ""
     client.stop()
@@ -159,7 +207,7 @@ final class AppModel: ObservableObject {
   /// 新建任务在用户首次发送消息前只是草稿。离开草稿时停止进程并清理 Pi
   /// 可能提前创建的仅含会话头、模型配置等信息的 JSONL 文件。
   func discardEmptyDraft() {
-    guard !hasUserMessage, !isStreaming else { return }
+    guard !hasUserMessage, !isBusy else { return }
     let path = currentSessionPath
     disconnect()
     guard !path.isEmpty else { return }
@@ -207,32 +255,169 @@ final class AppModel: ObservableObject {
     composerText = text
   }
 
-  func sendPrompt() {
+  func sendPrompt(delivery: QueuedPromptDelivery = .steer) {
+    guard !isCompacting else {
+      statusText = "上下文压缩完成后才能发送消息"
+      return
+    }
     let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty || !attachments.isEmpty, client.isRunning else { return }
     let sentAttachments = attachments
     composerText = ""
     attachments = []
     let displayText = text.isEmpty ? "请查看附件。" : text
+    let rpcText = Self.rpcText(for: displayText, attachments: sentAttachments)
+
+    if isStreaming {
+      let queued = QueuedPrompt(
+        id: UUID(),
+        text: displayText,
+        rpcText: rpcText,
+        delivery: delivery,
+        attachments: sentAttachments
+      )
+      queuedPrompts.append(queued)
+      let submittedAtGeneration = queueSnapshotGeneration
+      submittingQueuedPrompts[queued.id] = submittedAtGeneration
+      sendQueuedPrompt(queued) { [weak self] result in
+        guard let self else { return }
+        self.submittingQueuedPrompts.removeValue(forKey: queued.id)
+        switch result {
+        case .success:
+          if self.queueSnapshotGeneration > submittedAtGeneration,
+            let snapshot = self.latestQueueSnapshot
+          {
+            self.reconcileQueue(steering: snapshot.steering, followUp: snapshot.followUp)
+          }
+        case .failure(let error):
+          self.queuedPrompts.removeAll { $0.id == queued.id }
+          if self.composerText.isEmpty { self.composerText = queued.text }
+          self.attachments.append(contentsOf: queued.attachments)
+          self.appendSystemError(error.localizedDescription)
+        }
+      }
+      return
+    }
+
     messages.append(
       ChatEntry(
         id: UUID().uuidString,
         kind: .user,
-        title: isStreaming ? "你 · 已插入" : "你",
+        title: "你",
         text: displayText,
         attachments: sentAttachments
       ))
-
-    let filePaths = sentAttachments.filter { !$0.isImage }.map(\.url.path)
-    var rpcText = displayText
-    if !filePaths.isEmpty {
-      rpcText +=
-        "\n\n<pi-mac-attached-files>\n"
-        + filePaths.joined(separator: "\n")
-        + "\n</pi-mac-attached-files>"
+    client.request(Self.promptCommand(message: rpcText, attachments: sentAttachments)) {
+      [weak self] result in
+      if case .failure(let error) = result {
+        self?.appendSystemError(error.localizedDescription)
+      }
     }
-    var command: PiRPCClient.JSON = ["type": "prompt", "message": rpcText]
-    let images: [PiRPCClient.JSON] = sentAttachments.compactMap { attachment in
+  }
+
+  func removeQueuedPrompt(id: UUID) {
+    guard let target = queuedPrompts.first(where: { $0.id == id }),
+      !isRewritingQueue, submittingQueuedPrompts[id] == nil
+    else { return }
+    isRewritingQueue = true
+    client.request(["type": "clear_queue"]) { [weak self] result in
+      guard let self else { return }
+      guard case .success(let response) = result,
+        let data = response["data"] as? PiRPCClient.JSON
+      else {
+        self.isRewritingQueue = false
+        if case .failure(let error) = result { self.appendSystemError(error.localizedDescription) }
+        return
+      }
+
+      var steering = (data["steering"] as? [String]) ?? []
+      var followUp = (data["followUp"] as? [String]) ?? []
+      var stillQueued: [QueuedPrompt] = []
+      for prompt in self.queuedPrompts {
+        var values = prompt.delivery == .steer ? steering : followUp
+        guard let index = values.firstIndex(of: prompt.rpcText) else {
+          // It left Pi's queue before clear_queue ran, so it has already been consumed
+          // and can no longer be deleted.
+          self.appendConsumedPrompt(prompt)
+          continue
+        }
+        values.remove(at: index)
+        if prompt.delivery == .steer { steering = values } else { followUp = values }
+        if prompt.id != target.id { stillQueued.append(prompt) }
+      }
+
+      self.queuedPrompts = stillQueued
+      guard !stillQueued.isEmpty else {
+        self.isRewritingQueue = false
+        self.latestQueueSnapshot = (steering, followUp)
+        return
+      }
+
+      var remaining = stillQueued.count
+      for prompt in stillQueued {
+        self.sendQueuedPrompt(prompt) { [weak self] requeueResult in
+          guard let self else { return }
+          if case .failure(let error) = requeueResult {
+            self.queuedPrompts.removeAll { $0.id == prompt.id }
+            self.appendSystemError("重新排队失败：\(error.localizedDescription)")
+          }
+          remaining -= 1
+          if remaining == 0 {
+            self.isRewritingQueue = false
+            if let snapshot = self.latestQueueSnapshot {
+              self.reconcileQueue(steering: snapshot.steering, followUp: snapshot.followUp)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  func abort() {
+    isRewritingQueue = true
+    client.request(["type": "clear_queue"]) { [weak self] result in
+      guard let self else { return }
+      if case .success(let response) = result,
+        let data = response["data"] as? PiRPCClient.JSON
+      {
+        let queued =
+          ((data["steering"] as? [String]) ?? []) + ((data["followUp"] as? [String]) ?? [])
+        if !queued.isEmpty { self.composerText = queued.joined(separator: "\n") }
+        self.attachments.append(contentsOf: self.queuedPrompts.flatMap(\.attachments))
+      }
+      self.queuedPrompts = []
+      self.submittingQueuedPrompts.removeAll()
+      self.latestQueueSnapshot = ([], [])
+      self.isRewritingQueue = false
+      self.client.request(["type": "abort"])
+    }
+  }
+
+  private func sendQueuedPrompt(
+    _ prompt: QueuedPrompt,
+    completion: ((Result<PiRPCClient.JSON, Error>) -> Void)? = nil
+  ) {
+    var command = Self.promptCommand(message: prompt.rpcText, attachments: prompt.attachments)
+    command["streamingBehavior"] = prompt.delivery.rawValue
+    client.request(command, completion: completion)
+  }
+
+  nonisolated private static func rpcText(
+    for displayText: String, attachments: [PromptAttachment]
+  ) -> String {
+    let filePaths = attachments.filter { !$0.isImage }.map(\.url.path)
+    guard !filePaths.isEmpty else { return displayText }
+    return displayText
+      + "\n\n<pi-mac-attached-files>\n"
+      + filePaths.joined(separator: "\n")
+      + "\n</pi-mac-attached-files>"
+  }
+
+  nonisolated private static func promptCommand(
+    message: String, attachments: [PromptAttachment]
+  ) -> PiRPCClient.JSON {
+    var command: PiRPCClient.JSON = ["type": "prompt", "message": message]
+    let images: [PiRPCClient.JSON] = attachments.compactMap { attachment in
       guard attachment.isImage,
         let mimeType = attachment.mimeType,
         let data = try? Data(contentsOf: attachment.url),
@@ -241,29 +426,7 @@ final class AppModel: ObservableObject {
       return ["type": "image", "data": data.base64EncodedString(), "mimeType": mimeType]
     }
     if !images.isEmpty { command["images"] = images }
-    if isStreaming {
-      command["streamingBehavior"] = "steer"
-    }
-    client.request(command) { [weak self] result in
-      if case .failure(let error) = result {
-        self?.appendSystemError(error.localizedDescription)
-      }
-    }
-  }
-
-  func abort() {
-    client.request(["type": "clear_queue"]) { [weak self] result in
-      if case .success(let response) = result,
-        let data = response["data"] as? PiRPCClient.JSON
-      {
-        let queued =
-          ((data["steering"] as? [String]) ?? []) + ((data["followUp"] as? [String]) ?? [])
-        if !queued.isEmpty {
-          self?.composerText = queued.joined(separator: "\n")
-        }
-      }
-      self?.client.request(["type": "abort"])
-    }
+    return command
   }
 
   func newSession() {
@@ -275,6 +438,10 @@ final class AppModel: ObservableObject {
         let cancelled = (response["data"] as? PiRPCClient.JSON)?["cancelled"] as? Bool ?? false
         if !cancelled {
           self.messages.removeAll()
+          self.queuedPrompts.removeAll()
+          self.submittingQueuedPrompts.removeAll()
+          self.queueSnapshotGeneration = 0
+          self.latestQueueSnapshot = nil
           self.sessionName = ""
           self.stats = nil
           self.refreshAll()
@@ -284,7 +451,7 @@ final class AppModel: ObservableObject {
   }
 
   func switchSession(path: String) {
-    guard !isStreaming else {
+    guard !isBusy else {
       statusText = "当前任务进行中，暂时不能切换会话"
       return
     }
@@ -323,7 +490,7 @@ final class AppModel: ObservableObject {
   }
 
   func switchCodexAccount(to accountName: String) {
-    guard !isStreaming else {
+    guard !isBusy else {
       statusText = "当前任务完成后才能切换 Codex 账户"
       return
     }
@@ -353,12 +520,18 @@ final class AppModel: ObservableObject {
   }
 
   func compact() {
+    guard !isBusy else { return }
+    isCompacting = true
     statusText = "正在压缩上下文…"
     client.request(["type": "compact"]) { [weak self] result in
-      self?.statusText = ""
+      guard let self else { return }
+      self.isCompacting = false
+      self.statusText = ""
       switch result {
-      case .success: self?.loadStats()
-      case .failure(let error): self?.appendSystemError(error.localizedDescription)
+      case .success:
+        self.loadStats()
+        self.refreshSessionMetadata()
+      case .failure(let error): self.appendSystemError(error.localizedDescription)
       }
     }
   }
@@ -416,6 +589,7 @@ final class AppModel: ObservableObject {
       else { return }
       self?.selectedThinkingLevel = data["thinkingLevel"] as? String ?? "off"
       self?.isStreaming = data["isStreaming"] as? Bool ?? false
+      self?.isCompacting = data["isCompacting"] as? Bool ?? false
       self?.sessionName = data["sessionName"] as? String ?? ""
       self?.currentSessionPath = data["sessionFile"] as? String ?? ""
       if let model = data["model"] as? PiRPCClient.JSON,
@@ -524,7 +698,7 @@ final class AppModel: ObservableObject {
     }
   }
 
-  nonisolated private static func discoverSessions(for projectPath: String) -> [SessionItem] {
+  nonisolated static func discoverSessions(for projectPath: String) -> [SessionItem] {
     let root = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".pi/agent/sessions", isDirectory: true)
     guard
@@ -644,6 +818,12 @@ final class AppModel: ObservableObject {
       statusText = ""
       loadStats()
       refreshSessionMetadata()
+    case "queue_update":
+      let steering = event["steering"] as? [String] ?? []
+      let followUp = event["followUp"] as? [String] ?? []
+      queueSnapshotGeneration += 1
+      latestQueueSnapshot = (steering, followUp)
+      if !isRewritingQueue { reconcileQueue(steering: steering, followUp: followUp) }
     case "message_update":
       handleMessageUpdate(event)
     case "message_end":
@@ -651,7 +831,13 @@ final class AppModel: ObservableObject {
     case "tool_execution_start", "tool_execution_update", "tool_execution_end":
       handleToolEvent(event, type: type)
     case "compaction_start":
+      isCompacting = true
       statusText = "正在压缩上下文…"
+    case "compaction_end":
+      isCompacting = false
+      statusText = ""
+      loadStats()
+      refreshSessionMetadata()
     case "auto_retry_start":
       statusText = "请求失败，Pi 正在自动重试…"
     case "extension_error":
@@ -661,6 +847,56 @@ final class AppModel: ObservableObject {
     default:
       break
     }
+  }
+
+  private func reconcileQueue(steering: [String], followUp: [String]) {
+    var remainingSteering = steering
+    var remainingFollowUp = followUp
+    var pending: [QueuedPrompt] = []
+
+    for prompt in queuedPrompts {
+      guard submittingQueuedPrompts[prompt.id] == nil else {
+        pending.append(prompt)
+        continue
+      }
+      var values = prompt.delivery == .steer ? remainingSteering : remainingFollowUp
+      if let index = values.firstIndex(of: prompt.rpcText) {
+        values.remove(at: index)
+        if prompt.delivery == .steer {
+          remainingSteering = values
+        } else {
+          remainingFollowUp = values
+        }
+        pending.append(prompt)
+      } else {
+        appendConsumedPrompt(prompt)
+      }
+    }
+
+    // Usually all queued messages originate in this window. Keeping protocol-side
+    // messages visible also handles queues created by an extension or another RPC action.
+    pending.append(
+      contentsOf: remainingSteering.map {
+        QueuedPrompt(id: UUID(), text: $0, rpcText: $0, delivery: .steer, attachments: [])
+      }
+    )
+    pending.append(
+      contentsOf: remainingFollowUp.map {
+        QueuedPrompt(id: UUID(), text: $0, rpcText: $0, delivery: .followUp, attachments: [])
+      }
+    )
+    queuedPrompts = pending
+  }
+
+  private func appendConsumedPrompt(_ prompt: QueuedPrompt) {
+    messages.append(
+      ChatEntry(
+        id: UUID().uuidString,
+        kind: .user,
+        title: "你",
+        text: prompt.text,
+        attachments: prompt.attachments
+      ))
   }
 
   private func handleMessageUpdate(_ event: PiRPCClient.JSON) {
@@ -771,17 +1007,18 @@ final class AppModel: ObservableObject {
     }
   }
 
-  nonisolated private static func chatEntry(from message: PiRPCClient.JSON) -> ChatEntry? {
+  nonisolated static func chatEntry(from message: PiRPCClient.JSON) -> ChatEntry? {
     guard let role = message["role"] as? String else { return nil }
     switch role {
     case "user":
-      let parsed = parseUserContent(contentText(message["content"]))
+      let content = message["content"]
+      let parsed = parseUserContent(contentText(content))
       return ChatEntry(
         id: UUID().uuidString,
         kind: .user,
         title: "你",
         text: parsed.text,
-        attachments: parsed.attachments
+        attachments: parsed.attachments + restoreImageAttachments(from: content)
       )
     case "assistant":
       let text = contentText(message["content"])
@@ -840,6 +1077,45 @@ final class AppModel: ObservableObject {
       default: return nil
       }
     }.joined(separator: "\n")
+  }
+
+  /// Pi 会把用户图片以 Base64 内容块保存在会话 JSONL 中。恢复会话时将内容块
+  /// 落盘到稳定目录；以内容摘要命名可以让多次刷新复用同一个文件。
+  nonisolated private static func restoreImageAttachments(from content: Any?) -> [PromptAttachment]
+  {
+    guard let blocks = content as? [PiRPCClient.JSON] else { return [] }
+    let fileManager = FileManager.default
+    guard
+      let applicationSupport = fileManager.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask
+      ).first
+    else { return [] }
+    let directory = applicationSupport.appendingPathComponent(
+      "PiMac/Attachments", isDirectory: true)
+
+    return blocks.compactMap { block in
+      guard block["type"] as? String == "image",
+        let mimeType = block["mimeType"] as? String,
+        mimeType.hasPrefix("image/"),
+        let encoded = block["data"] as? String,
+        encoded.utf8.count <= 28 * 1_024 * 1_024,
+        let data = Data(base64Encoded: encoded, options: .ignoreUnknownCharacters),
+        data.count <= 20 * 1_024 * 1_024
+      else { return nil }
+
+      let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+      let fileExtension = UTType(mimeType: mimeType)?.preferredFilenameExtension ?? "img"
+      let url = directory.appendingPathComponent("pi-session-\(digest).\(fileExtension)")
+      do {
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        if !fileManager.fileExists(atPath: url.path) {
+          try data.write(to: url, options: .atomic)
+        }
+        return PromptAttachment(url: url, mimeType: mimeType)
+      } catch {
+        return nil
+      }
+    }
   }
 
   private static func resultText(_ result: PiRPCClient.JSON) -> String {
