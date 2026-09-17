@@ -41,6 +41,7 @@ struct ChatEntry: Identifiable, Sendable {
   var isRunning = false
   var isError = false
   var toolName: String? = nil
+  var toolInput: String? = nil
   var diff: String? = nil
   var attachments: [PromptAttachment] = []
 }
@@ -63,6 +64,7 @@ struct QueuedPrompt: Identifiable, Sendable {
   let rpcText: String
   let delivery: QueuedPromptDelivery
   let attachments: [PromptAttachment]
+  var waitsForCompaction = false
 }
 
 struct PromptAttachment: Identifiable, Hashable, Sendable {

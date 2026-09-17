@@ -36,6 +36,8 @@ final class AppModel: ObservableObject {
   private var sessionLoadGeneration = UUID()
   private var isRewritingQueue = false
   private var submittingQueuedPrompts: [UUID: Int] = [:]
+  private var consumedPromptsAwaitingDisplay: [QueuedPrompt] = []
+  private var pendingAssistantError: String?
   private var queueSnapshotGeneration = 0
   private var latestQueueSnapshot: (steering: [String], followUp: [String])?
 
@@ -120,6 +122,8 @@ final class AppModel: ObservableObject {
       messages.removeAll()
       queuedPrompts.removeAll()
       submittingQueuedPrompts.removeAll()
+      consumedPromptsAwaitingDisplay.removeAll()
+      pendingAssistantError = nil
       queueSnapshotGeneration = 0
       latestQueueSnapshot = nil
       diagnosticText = ""
@@ -193,6 +197,8 @@ final class AppModel: ObservableObject {
     isLoadingConfiguration = false
     queuedPrompts = []
     submittingQueuedPrompts.removeAll()
+    consumedPromptsAwaitingDisplay.removeAll()
+    pendingAssistantError = nil
     queueSnapshotGeneration = 0
     latestQueueSnapshot = nil
     sessions = []
@@ -256,10 +262,6 @@ final class AppModel: ObservableObject {
   }
 
   func sendPrompt(delivery: QueuedPromptDelivery = .steer) {
-    guard !isCompacting else {
-      statusText = "上下文压缩完成后才能发送消息"
-      return
-    }
     let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty || !attachments.isEmpty, client.isRunning else { return }
     let sentAttachments = attachments
@@ -268,57 +270,75 @@ final class AppModel: ObservableObject {
     let displayText = text.isEmpty ? "请查看附件。" : text
     let rpcText = Self.rpcText(for: displayText, attachments: sentAttachments)
 
+    if isCompacting {
+      queuedPrompts.append(
+        QueuedPrompt(
+          id: UUID(),
+          text: displayText,
+          rpcText: rpcText,
+          delivery: delivery,
+          attachments: sentAttachments,
+          waitsForCompaction: true
+        ))
+      return
+    }
+
     if isStreaming {
-      let queued = QueuedPrompt(
+      submitQueuedPrompt(
+        QueuedPrompt(
+          id: UUID(),
+          text: displayText,
+          rpcText: rpcText,
+          delivery: delivery,
+          attachments: sentAttachments
+        ))
+      return
+    }
+
+    submitImmediatePrompt(
+      QueuedPrompt(
         id: UUID(),
         text: displayText,
         rpcText: rpcText,
         delivery: delivery,
         attachments: sentAttachments
-      )
-      queuedPrompts.append(queued)
-      let submittedAtGeneration = queueSnapshotGeneration
-      submittingQueuedPrompts[queued.id] = submittedAtGeneration
-      sendQueuedPrompt(queued) { [weak self] result in
-        guard let self else { return }
-        self.submittingQueuedPrompts.removeValue(forKey: queued.id)
-        switch result {
-        case .success:
-          if self.queueSnapshotGeneration > submittedAtGeneration,
-            let snapshot = self.latestQueueSnapshot
-          {
-            self.reconcileQueue(steering: snapshot.steering, followUp: snapshot.followUp)
-          }
-        case .failure(let error):
-          self.queuedPrompts.removeAll { $0.id == queued.id }
-          if self.composerText.isEmpty { self.composerText = queued.text }
-          self.attachments.append(contentsOf: queued.attachments)
-          self.appendSystemError(error.localizedDescription)
-        }
-      }
-      return
-    }
-
-    messages.append(
-      ChatEntry(
-        id: UUID().uuidString,
-        kind: .user,
-        title: "你",
-        text: displayText,
-        attachments: sentAttachments
       ))
-    client.request(Self.promptCommand(message: rpcText, attachments: sentAttachments)) {
-      [weak self] result in
-      if case .failure(let error) = result {
-        self?.appendSystemError(error.localizedDescription)
-      }
-    }
   }
 
   func removeQueuedPrompt(id: UUID) {
+    dequeuePrompt(id: id)
+  }
+
+  func editQueuedPrompt(id: UUID) {
+    dequeuePrompt(id: id) { [weak self] prompt in
+      guard let self else { return }
+      if self.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        self.composerText = prompt.text
+      } else {
+        // Do not silently discard a draft that was started after this prompt was queued.
+        self.composerText = prompt.text + "\n\n" + self.composerText
+      }
+      let attachedURLs = Set(self.attachments.map { $0.url.standardizedFileURL })
+      self.attachments.insert(
+        contentsOf: prompt.attachments.filter {
+          !attachedURLs.contains($0.url.standardizedFileURL)
+        },
+        at: 0
+      )
+    }
+  }
+
+  private func dequeuePrompt(
+    id: UUID, onRemoved: ((QueuedPrompt) -> Void)? = nil
+  ) {
     guard let target = queuedPrompts.first(where: { $0.id == id }),
       !isRewritingQueue, submittingQueuedPrompts[id] == nil
     else { return }
+    if target.waitsForCompaction {
+      queuedPrompts.removeAll { $0.id == id }
+      onRemoved?(target)
+      return
+    }
     isRewritingQueue = true
     client.request(["type": "clear_queue"]) { [weak self] result in
       guard let self else { return }
@@ -333,28 +353,39 @@ final class AppModel: ObservableObject {
       var steering = (data["steering"] as? [String]) ?? []
       var followUp = (data["followUp"] as? [String]) ?? []
       var stillQueued: [QueuedPrompt] = []
+      var removedTarget: QueuedPrompt?
       for prompt in self.queuedPrompts {
+        if prompt.waitsForCompaction {
+          stillQueued.append(prompt)
+          continue
+        }
         var values = prompt.delivery == .steer ? steering : followUp
         guard let index = values.firstIndex(of: prompt.rpcText) else {
-          // It left Pi's queue before clear_queue ran, so it has already been consumed
-          // and can no longer be deleted.
-          self.appendConsumedPrompt(prompt)
+          // It left Pi's queue before clear_queue ran and can no longer be changed.
+          // Defer its chat row until Pi starts producing the response to it.
+          self.consumedPromptsAwaitingDisplay.append(prompt)
           continue
         }
         values.remove(at: index)
         if prompt.delivery == .steer { steering = values } else { followUp = values }
-        if prompt.id != target.id { stillQueued.append(prompt) }
+        if prompt.id == target.id {
+          removedTarget = prompt
+        } else {
+          stillQueued.append(prompt)
+        }
       }
 
       self.queuedPrompts = stillQueued
-      guard !stillQueued.isEmpty else {
+      if let removedTarget { onRemoved?(removedTarget) }
+      let remotePrompts = stillQueued.filter { !$0.waitsForCompaction }
+      guard !remotePrompts.isEmpty else {
         self.isRewritingQueue = false
         self.latestQueueSnapshot = (steering, followUp)
         return
       }
 
-      var remaining = stillQueued.count
-      for prompt in stillQueued {
+      var remaining = remotePrompts.count
+      for prompt in remotePrompts {
         self.sendQueuedPrompt(prompt) { [weak self] requeueResult in
           guard let self else { return }
           if case .failure(let error) = requeueResult {
@@ -382,7 +413,9 @@ final class AppModel: ObservableObject {
       {
         let queued =
           ((data["steering"] as? [String]) ?? []) + ((data["followUp"] as? [String]) ?? [])
-        if !queued.isEmpty { self.composerText = queued.joined(separator: "\n") }
+        let deferred = self.queuedPrompts.filter(\.waitsForCompaction).map(\.text)
+        let restored = queued + deferred
+        if !restored.isEmpty { self.composerText = restored.joined(separator: "\n") }
         self.attachments.append(contentsOf: self.queuedPrompts.flatMap(\.attachments))
       }
       self.queuedPrompts = []
@@ -393,6 +426,59 @@ final class AppModel: ObservableObject {
     }
   }
 
+  private func submitImmediatePrompt(
+    _ prompt: QueuedPrompt,
+    completion: ((Bool) -> Void)? = nil
+  ) {
+    messages.append(
+      ChatEntry(
+        id: UUID().uuidString,
+        kind: .user,
+        title: "你",
+        text: prompt.text,
+        attachments: prompt.attachments
+      ))
+    client.request(Self.promptCommand(message: prompt.rpcText, attachments: prompt.attachments)) {
+      [weak self] result in
+      switch result {
+      case .success:
+        completion?(true)
+      case .failure(let error):
+        self?.appendSystemError(error.localizedDescription)
+        completion?(false)
+      }
+    }
+  }
+
+  private func submitQueuedPrompt(_ prompt: QueuedPrompt) {
+    var submitted = prompt
+    submitted.waitsForCompaction = false
+    if let index = queuedPrompts.firstIndex(where: { $0.id == submitted.id }) {
+      queuedPrompts[index] = submitted
+    } else {
+      queuedPrompts.append(submitted)
+    }
+    let submittedAtGeneration = queueSnapshotGeneration
+    submittingQueuedPrompts[submitted.id] = submittedAtGeneration
+    sendQueuedPrompt(submitted) { [weak self] result in
+      guard let self else { return }
+      self.submittingQueuedPrompts.removeValue(forKey: submitted.id)
+      switch result {
+      case .success:
+        if self.queueSnapshotGeneration > submittedAtGeneration,
+          let snapshot = self.latestQueueSnapshot
+        {
+          self.reconcileQueue(steering: snapshot.steering, followUp: snapshot.followUp)
+        }
+      case .failure(let error):
+        self.queuedPrompts.removeAll { $0.id == submitted.id }
+        if self.composerText.isEmpty { self.composerText = submitted.text }
+        self.attachments.append(contentsOf: submitted.attachments)
+        self.appendSystemError(error.localizedDescription)
+      }
+    }
+  }
+
   private func sendQueuedPrompt(
     _ prompt: QueuedPrompt,
     completion: ((Result<PiRPCClient.JSON, Error>) -> Void)? = nil
@@ -400,6 +486,31 @@ final class AppModel: ObservableObject {
     var command = Self.promptCommand(message: prompt.rpcText, attachments: prompt.attachments)
     command["streamingBehavior"] = prompt.delivery.rawValue
     client.request(command, completion: completion)
+  }
+
+  private func flushCompactionQueue(willRetry: Bool) {
+    let deferred = queuedPrompts.filter(\.waitsForCompaction)
+    guard !deferred.isEmpty else { return }
+
+    if willRetry || isStreaming {
+      for prompt in deferred { submitQueuedPrompt(prompt) }
+      return
+    }
+
+    let first = deferred[0]
+    queuedPrompts.removeAll { $0.id == first.id }
+    submitImmediatePrompt(first) { [weak self] accepted in
+      guard let self else { return }
+      if accepted {
+        for prompt in deferred.dropFirst() { self.submitQueuedPrompt(prompt) }
+      } else {
+        self.queuedPrompts.removeAll { deferred.dropFirst().map(\.id).contains($0.id) }
+        if self.composerText.isEmpty {
+          self.composerText = deferred.map(\.text).joined(separator: "\n\n")
+        }
+        self.attachments.append(contentsOf: deferred.flatMap(\.attachments))
+      }
+    }
   }
 
   nonisolated private static func rpcText(
@@ -440,6 +551,8 @@ final class AppModel: ObservableObject {
           self.messages.removeAll()
           self.queuedPrompts.removeAll()
           self.submittingQueuedPrompts.removeAll()
+          self.consumedPromptsAwaitingDisplay.removeAll()
+          self.pendingAssistantError = nil
           self.queueSnapshotGeneration = 0
           self.latestQueueSnapshot = nil
           self.sessionName = ""
@@ -607,7 +720,7 @@ final class AppModel: ObservableObject {
         let data = response["data"] as? PiRPCClient.JSON,
         let rawMessages = data["messages"] as? [PiRPCClient.JSON]
       else { return }
-      self?.messages = rawMessages.compactMap(Self.chatEntry(from:))
+      self?.messages = Self.chatEntries(from: rawMessages)
     }
   }
 
@@ -811,7 +924,11 @@ final class AppModel: ObservableObject {
       // 全新会话的 JSONL 路径通常在第一次请求开始时才创建。
       // 立即同步状态，确保工作区能把这个 RPC 进程与历史会话稳定关联。
       refreshSessionMetadata()
+    case "agent_end":
+      if event["willRetry"] as? Bool != true { flushPendingAssistantError() }
     case "agent_settled":
+      flushConsumedPromptsIntoTranscript()
+      flushPendingAssistantError()
       isStreaming = false
       activeAssistantId = nil
       activeThinkingId = nil
@@ -838,8 +955,19 @@ final class AppModel: ObservableObject {
       statusText = ""
       loadStats()
       refreshSessionMetadata()
+      flushCompactionQueue(willRetry: event["willRetry"] as? Bool ?? false)
     case "auto_retry_start":
       statusText = "请求失败，Pi 正在自动重试…"
+    case "auto_retry_end":
+      // Intermediate provider failures are part of one retry cycle, not separate chat
+      // errors. Only expose the final failure if Pi exhausts all attempts.
+      if event["success"] as? Bool == true {
+        pendingAssistantError = nil
+      } else if pendingAssistantError != nil {
+        pendingAssistantError = event["finalError"] as? String ?? pendingAssistantError
+        flushPendingAssistantError()
+      }
+      if statusText == "请求失败，Pi 正在自动重试…" { statusText = "" }
     case "extension_error":
       appendSystemError(event["error"] as? String ?? "扩展执行失败")
     case "extension_ui_request":
@@ -855,11 +983,27 @@ final class AppModel: ObservableObject {
     var pending: [QueuedPrompt] = []
 
     for prompt in queuedPrompts {
-      guard submittingQueuedPrompts[prompt.id] == nil else {
+      guard !prompt.waitsForCompaction else {
         pending.append(prompt)
         continue
       }
+
       var values = prompt.delivery == .steer ? remainingSteering : remainingFollowUp
+      if submittingQueuedPrompts[prompt.id] != nil {
+        // queue_update can arrive before the prompt request's response. The snapshot may
+        // already contain this local prompt, so claim its remote entry now; otherwise it
+        // would be added below as a second prompt and later mistaken for a consumed one.
+        if let index = values.firstIndex(of: prompt.rpcText) {
+          values.remove(at: index)
+          if prompt.delivery == .steer {
+            remainingSteering = values
+          } else {
+            remainingFollowUp = values
+          }
+        }
+        pending.append(prompt)
+        continue
+      }
       if let index = values.firstIndex(of: prompt.rpcText) {
         values.remove(at: index)
         if prompt.delivery == .steer {
@@ -869,7 +1013,9 @@ final class AppModel: ObservableObject {
         }
         pending.append(prompt)
       } else {
-        appendConsumedPrompt(prompt)
+        // queue_update means Pi has now consumed the prompt. Keep the current assistant
+        // turn visually intact and add the user row when the resulting output begins.
+        consumedPromptsAwaitingDisplay.append(prompt)
       }
     }
 
@@ -888,21 +1034,26 @@ final class AppModel: ObservableObject {
     queuedPrompts = pending
   }
 
-  private func appendConsumedPrompt(_ prompt: QueuedPrompt) {
-    messages.append(
-      ChatEntry(
-        id: UUID().uuidString,
-        kind: .user,
-        title: "你",
-        text: prompt.text,
-        attachments: prompt.attachments
-      ))
+  private func flushConsumedPromptsIntoTranscript() {
+    guard !consumedPromptsAwaitingDisplay.isEmpty else { return }
+    for prompt in consumedPromptsAwaitingDisplay {
+      messages.append(
+        ChatEntry(
+          id: UUID().uuidString,
+          kind: .user,
+          title: "你",
+          text: prompt.text,
+          attachments: prompt.attachments
+        ))
+    }
+    consumedPromptsAwaitingDisplay.removeAll()
   }
 
   private func handleMessageUpdate(_ event: PiRPCClient.JSON) {
     guard let deltaEvent = event["assistantMessageEvent"] as? PiRPCClient.JSON,
       let type = deltaEvent["type"] as? String
     else { return }
+    flushConsumedPromptsIntoTranscript()
     if type == "text_delta", let delta = deltaEvent["delta"] as? String {
       let id = activeAssistantId ?? UUID().uuidString
       if activeAssistantId == nil {
@@ -926,6 +1077,12 @@ final class AppModel: ObservableObject {
       message["role"] as? String == "assistant"
     else { return }
     let exactText = Self.contentText(message["content"])
+    let errorText = Self.assistantErrorText(message)
+    if activeAssistantId == nil, activeThinkingId == nil,
+      !exactText.isEmpty || errorText != nil
+    {
+      flushConsumedPromptsIntoTranscript()
+    }
     if let id = activeAssistantId, let index = messages.firstIndex(where: { $0.id == id }) {
       if !exactText.isEmpty { messages[index].text = exactText }
       messages[index].isRunning = false
@@ -936,6 +1093,10 @@ final class AppModel: ObservableObject {
     if let id = activeThinkingId, let index = messages.firstIndex(where: { $0.id == id }) {
       messages[index].isRunning = false
     }
+    // Pi emits message_end before agent_end announces whether a transient provider
+    // error will be retried. Defer the error so successful retries do not leave rows such
+    // as "terminated" in the transcript.
+    pendingAssistantError = errorText
     activeAssistantId = nil
     activeThinkingId = nil
   }
@@ -944,6 +1105,7 @@ final class AppModel: ObservableObject {
     guard let id = event["toolCallId"] as? String else { return }
     let name = event["toolName"] as? String ?? "tool"
     if type == "tool_execution_start" {
+      flushConsumedPromptsIntoTranscript()
       messages.append(
         ChatEntry(
           id: id,
@@ -951,14 +1113,23 @@ final class AppModel: ObservableObject {
           title: "工具 · \(name)",
           text: Self.prettyJSON(event["args"]),
           isRunning: true,
-          toolName: name
+          toolName: name,
+          toolInput: Self.toolInputText(toolName: name, args: event["args"])
         ))
       return
     }
     guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
     let resultKey = type == "tool_execution_update" ? "partialResult" : "result"
     if let result = event[resultKey] as? PiRPCClient.JSON {
-      messages[index].text = Self.resultText(result)
+      let text = Self.resultText(
+        result,
+        toolName: name,
+        preferCompleteOutput: type == "tool_execution_end"
+      )
+      // bash emits an initial progress result with an empty content array. Keep the
+      // command arguments visible until actual output arrives instead of replacing
+      // them with the protocol envelope.
+      if !text.isEmpty { messages[index].text = text }
       if let details = result["details"] as? PiRPCClient.JSON {
         messages[index].diff = details["diff"] as? String ?? details["patch"] as? String
       }
@@ -979,6 +1150,12 @@ final class AppModel: ObservableObject {
       ChatEntry(id: UUID().uuidString, kind: .system, title: "错误", text: text, isError: true))
   }
 
+  private func flushPendingAssistantError() {
+    guard let error = pendingAssistantError else { return }
+    pendingAssistantError = nil
+    appendSystemError(error)
+  }
+
   /// 同时写入终端和界面日志；仅保留最近 300 行，防止长期会话无限占用内存。
   private func appendDiagnostic(_ text: String) {
     let timestamp = Date.now.formatted(date: .omitted, time: .standard)
@@ -997,14 +1174,59 @@ final class AppModel: ObservableObject {
     guard let data = FileManager.default.contents(atPath: path),
       let text = String(data: data, encoding: .utf8)
     else { return [] }
-    return text.split(separator: "\n").compactMap { line in
+    let messages = text.split(separator: "\n").compactMap { line -> PiRPCClient.JSON? in
       guard let data = String(line).data(using: .utf8),
         let record = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
-        record["type"] as? String == "message",
-        let message = record["message"] as? PiRPCClient.JSON
+        record["type"] as? String == "message"
       else { return nil }
-      return chatEntry(from: message)
+      return record["message"] as? PiRPCClient.JSON
     }
+    return chatEntries(from: messages)
+  }
+
+  nonisolated static func chatEntries(
+    from messages: [PiRPCClient.JSON]
+  ) -> [ChatEntry] {
+    var toolInputs: [String: String] = [:]
+    var entries: [ChatEntry] = []
+
+    for (messageIndex, message) in messages.enumerated() {
+      let hidesRetriedError =
+        isAssistantError(message)
+        && hasLaterAssistant(beforeNextUserAfter: messageIndex, in: messages)
+
+      if message["role"] as? String == "assistant",
+        let blocks = message["content"] as? [PiRPCClient.JSON]
+      {
+        for block in blocks where block["type"] as? String == "toolCall" {
+          guard let id = block["id"] as? String,
+            let name = block["name"] as? String,
+            let input = toolInputText(toolName: name, args: block["arguments"])
+          else { continue }
+          toolInputs[id] = input
+        }
+      }
+
+      guard var entry = chatEntry(from: message) else { continue }
+      if hidesRetriedError, entry.kind == .system, entry.isError { continue }
+      if entry.kind == .tool, entry.toolInput == nil {
+        entry.toolInput = toolInputs[entry.id]
+      }
+      entries.append(entry)
+      if !hidesRetriedError, message["role"] as? String == "assistant",
+        entry.kind == .assistant, let errorText = assistantErrorText(message)
+      {
+        entries.append(
+          ChatEntry(
+            id: UUID().uuidString,
+            kind: .system,
+            title: "错误",
+            text: errorText,
+            isError: true
+          ))
+      }
+    }
+    return entries
   }
 
   nonisolated static func chatEntry(from message: PiRPCClient.JSON) -> ChatEntry? {
@@ -1022,14 +1244,29 @@ final class AppModel: ObservableObject {
       )
     case "assistant":
       let text = contentText(message["content"])
-      return text.isEmpty
-        ? nil : ChatEntry(id: UUID().uuidString, kind: .assistant, title: "Pi", text: text)
+      if !text.isEmpty {
+        return ChatEntry(id: UUID().uuidString, kind: .assistant, title: "Pi", text: text)
+      }
+      if let errorText = assistantErrorText(message) {
+        return ChatEntry(
+          id: UUID().uuidString,
+          kind: .system,
+          title: "错误",
+          text: errorText,
+          isError: true
+        )
+      }
+      return nil
     case "toolResult":
       return ChatEntry(
         id: message["toolCallId"] as? String ?? UUID().uuidString,
         kind: .tool,
         title: "工具 · \(message["toolName"] as? String ?? "tool")",
-        text: contentText(message["content"]),
+        text: resultText(
+          message,
+          toolName: message["toolName"] as? String,
+          preferCompleteOutput: true
+        ),
         isError: message["isError"] as? Bool ?? false,
         toolName: message["toolName"] as? String,
         diff: (message["details"] as? PiRPCClient.JSON)?["diff"] as? String
@@ -1037,10 +1274,43 @@ final class AppModel: ObservableObject {
       )
     case "bashExecution":
       return ChatEntry(
-        id: UUID().uuidString, kind: .tool, title: "命令", text: message["output"] as? String ?? "")
+        id: UUID().uuidString,
+        kind: .tool,
+        title: "命令",
+        text: message["output"] as? String ?? "",
+        toolName: "bash",
+        toolInput: (message["command"] as? String).map { "$ \($0)" }
+      )
     default:
       return nil
     }
+  }
+
+  nonisolated private static func isAssistantError(_ message: PiRPCClient.JSON) -> Bool {
+    message["role"] as? String == "assistant" && message["stopReason"] as? String == "error"
+  }
+
+  nonisolated private static func hasLaterAssistant(
+    beforeNextUserAfter index: Int, in messages: [PiRPCClient.JSON]
+  ) -> Bool {
+    guard index + 1 < messages.count else { return false }
+    for message in messages[(index + 1)...] {
+      switch message["role"] as? String {
+      case "user": return false
+      case "assistant": return true
+      default: continue
+      }
+    }
+    return false
+  }
+
+  nonisolated private static func assistantErrorText(
+    _ message: PiRPCClient.JSON
+  ) -> String? {
+    guard message["stopReason"] as? String == "error" else { return nil }
+    let detail = (message["errorMessage"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return detail?.isEmpty == false ? detail : "模型调用失败，未生成回复。"
   }
 
   nonisolated private static func parseUserContent(
@@ -1118,12 +1388,68 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private static func resultText(_ result: PiRPCClient.JSON) -> String {
-    let text = contentText(result["content"])
-    return text.isEmpty ? prettyJSON(result) : text
+  nonisolated static func toolInputText(toolName: String, args: Any?) -> String? {
+    guard let args = args as? PiRPCClient.JSON else { return nil }
+    switch toolName {
+    case "bash":
+      guard let command = args["command"] as? String, !command.isEmpty else { return nil }
+      return "$ \(command)"
+    case "read":
+      guard let path = args["path"] as? String, !path.isEmpty else { return nil }
+      let offset = (args["offset"] as? NSNumber)?.intValue
+      let limit = (args["limit"] as? NSNumber)?.intValue
+      guard offset != nil || limit != nil else { return path }
+      let firstLine = offset ?? 1
+      if let limit { return "\(path):\(firstLine)-\(firstLine + max(limit - 1, 0))" }
+      return "\(path):\(firstLine)"
+    case "edit", "write":
+      return args["path"] as? String
+    case "fetch_content":
+      if let url = args["url"] as? String { return url }
+      if let urls = args["urls"] as? [String] { return urls.joined(separator: "\n") }
+      return nil
+    case "web_search":
+      if let query = args["query"] as? String { return query }
+      if let queries = args["queries"] as? [String] { return queries.joined(separator: " · ") }
+      return nil
+    case "source_check":
+      return args["claim"] as? String
+    case "generate_image":
+      return args["prompt"] as? String
+    default:
+      return args["path"] as? String
+    }
   }
 
-  private static func prettyJSON(_ value: Any?) -> String {
+  nonisolated private static func resultText(
+    _ result: PiRPCClient.JSON,
+    toolName: String? = nil,
+    preferCompleteOutput: Bool = false
+  ) -> String {
+    let text = contentText(result["content"])
+
+    // Pi intentionally truncates the final bash result to its context limit and
+    // stores the complete output in a temporary file. Replacing the live preview
+    // with that final result made long commands appear to contain only a tiny tail
+    // (and a single very long line could appear to contain no output at all).
+    if preferCompleteOutput, toolName == "bash",
+      let details = result["details"] as? PiRPCClient.JSON,
+      let truncation = details["truncation"] as? PiRPCClient.JSON,
+      truncation["truncated"] as? Bool == true,
+      let path = details["fullOutputPath"] as? String,
+      let data = FileManager.default.contents(atPath: path), !data.isEmpty
+    {
+      return String(decoding: data, as: UTF8.self)
+    }
+
+    // An empty content array is a normal initial streaming update, not a useful
+    // result to render. Results without a content field may still be structured
+    // custom-tool values, for which the JSON fallback remains useful.
+    if result["content"] != nil { return text }
+    return prettyJSON(result)
+  }
+
+  nonisolated private static func prettyJSON(_ value: Any?) -> String {
     guard let value, JSONSerialization.isValidJSONObject(value),
       let data = try? JSONSerialization.data(
         withJSONObject: value, options: [.prettyPrinted, .sortedKeys])

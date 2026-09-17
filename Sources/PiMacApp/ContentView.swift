@@ -61,15 +61,18 @@ private struct ConversationScrollObserver: NSViewRepresentable {
       observers.removeAll()
       self.scrollView = scrollView
 
-      for name in [NSScrollView.willStartLiveScrollNotification,
-                   NSScrollView.didLiveScrollNotification] {
-        observers.append(NotificationCenter.default.addObserver(
-          forName: name,
-          object: scrollView,
-          queue: .main
-        ) { [weak self] _ in
-          self?.onUserScroll()
-        })
+      for name in [
+        NSScrollView.willStartLiveScrollNotification,
+        NSScrollView.didLiveScrollNotification,
+      ] {
+        observers.append(
+          NotificationCenter.default.addObserver(
+            forName: name,
+            object: scrollView,
+            queue: .main
+          ) { [weak self] _ in
+            self?.onUserScroll()
+          })
       }
     }
   }
@@ -191,18 +194,6 @@ struct ContentView: View {
     VStack(spacing: 0) {
       VStack(alignment: .leading, spacing: 7) {
         HStack(spacing: 9) {
-          ZStack {
-            RoundedRectangle(cornerRadius: 8)
-              .fill(
-                LinearGradient(
-                  colors: [.accentColor, .purple],
-                  startPoint: .topLeading,
-                  endPoint: .bottomTrailing
-                ))
-            Image(systemName: "apple.terminal.fill")
-              .foregroundStyle(.white)
-          }
-          .frame(width: 30, height: 30)
           HStack(spacing: 7) {
             Text("Pi Mac").font(.headline)
             HStack(spacing: 4) {
@@ -418,7 +409,9 @@ struct ContentView: View {
       } label: {
         HStack(spacing: 9) {
           Image(systemName: selected ? "bubble.left.fill" : "bubble.left")
-            .foregroundStyle(running ? Color.orange : selected ? Color.accentColor : Color.secondary)
+            .foregroundStyle(
+              running ? Color.orange : selected ? Color.accentColor : Color.secondary
+            )
             .frame(width: 17)
           VStack(alignment: .leading, spacing: 2) {
             Text(session.title)
@@ -708,12 +701,14 @@ struct ContentView: View {
     // 内容高度再次增加，导致流式回复的末尾仍停在视口之外。
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
       guard generation == autoScrollGeneration,
-            conversationScrollMode == .pinnedToBottom else { return }
+        conversationScrollMode == .pinnedToBottom
+      else { return }
       proxy.scrollTo("conversation-bottom", anchor: .bottom)
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
       guard generation == autoScrollGeneration,
-            conversationScrollMode == .pinnedToBottom else { return }
+        conversationScrollMode == .pinnedToBottom
+      else { return }
       proxy.scrollTo("conversation-bottom", anchor: .bottom)
       autoScrollScheduled = false
     }
@@ -748,26 +743,7 @@ struct ContentView: View {
       if !app.queuedPrompts.isEmpty {
         VStack(spacing: 5) {
           ForEach(app.queuedPrompts) { prompt in
-            HStack(spacing: 7) {
-              Text(prompt.delivery.label)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(prompt.delivery == .steer ? .orange : .blue)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(.quaternary, in: Capsule())
-              Text(prompt.text.replacingOccurrences(of: "\n", with: " "))
-                .font(.caption)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-              Button {
-                app.removeQueuedPrompt(id: prompt.id)
-              } label: {
-                Image(systemName: "trash")
-              }
-              .buttonStyle(.plain)
-              .foregroundStyle(.secondary)
-              .help("删除这条尚未发送的消息")
-            }
+            queuedPromptRow(prompt)
           }
         }
         .padding(7)
@@ -850,6 +826,16 @@ struct ContentView: View {
 
           stopButton
         } else if app.isCompacting {
+          Button {
+            sendPromptFollowingOutput(delivery: .steer)
+          } label: {
+            Label("压缩后", systemImage: "clock")
+              .font(.caption)
+          }
+          .buttonStyle(.bordered)
+          .disabled(promptIsEmpty || !app.clientConnected)
+          .help("上下文压缩完成后发送（Return）")
+
           stopButton
         } else {
           Button {
@@ -874,6 +860,47 @@ struct ContentView: View {
       return !urls.isEmpty
     }
     .padding(12)
+  }
+
+  private func queuedPromptRow(_ prompt: QueuedPrompt) -> some View {
+    HStack(spacing: 7) {
+      Group {
+        if prompt.waitsForCompaction {
+          Text("压缩完成后").foregroundStyle(.secondary)
+        } else if prompt.delivery == .steer {
+          Text(prompt.delivery.label).foregroundStyle(.orange)
+        } else {
+          Text(prompt.delivery.label).foregroundStyle(.blue)
+        }
+      }
+      .font(.caption2.weight(.medium))
+      .padding(.horizontal, 6)
+      .padding(.vertical, 2)
+      .background(.quaternary, in: Capsule())
+
+      Text(prompt.text.replacingOccurrences(of: "\n", with: " "))
+        .font(.caption)
+        .lineLimit(1)
+        .frame(maxWidth: .infinity, alignment: .leading)
+      Button {
+        app.editQueuedPrompt(id: prompt.id)
+        composerFocused = true
+      } label: {
+        Image(systemName: "pencil")
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+      .help("重新编辑这条尚未发送的消息")
+
+      Button {
+        app.removeQueuedPrompt(id: prompt.id)
+      } label: {
+        Image(systemName: "trash")
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+      .help("删除这条尚未发送的消息")
+    }
   }
 
   @ViewBuilder
@@ -1363,36 +1390,55 @@ private struct ActivityGroupView: View {
   }
 
   var body: some View {
-    DisclosureGroup(isExpanded: $expanded) {
-      VStack(alignment: .leading, spacing: 8) {
-        ForEach(entries) { entry in
-          ActivityEntryView(entry: entry)
-        }
-      }
-      .padding(.top, 7)
-    } label: {
-      HStack(spacing: 7) {
-        if hasRunningActivity {
-          ProgressView().controlSize(.mini)
-          Text("正在处理")
-        } else if taskIsRunning {
-          Image(systemName: "ellipsis")
-          Text("思考过程")
-        } else {
-          Image(systemName: "checkmark.circle").foregroundStyle(.green)
+    VStack(alignment: .leading, spacing: 0) {
+      Button {
+        withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() }
+      } label: {
+        HStack(spacing: 9) {
+          Image(systemName: expanded ? "chevron.down" : "chevron.right")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .frame(width: 10)
+          activityStatusIcon
           Text(activitySummary)
+            .font(.caption.weight(.medium))
           if failedToolCount > 0 {
-            Text("· \(failedToolCount) 次失败")
+            Text("\(failedToolCount) 失败")
+              .font(.caption2.weight(.semibold))
               .foregroundStyle(.red)
+              .padding(.horizontal, 6)
+              .padding(.vertical, 2)
+              .background(Color.red.opacity(0.10), in: Capsule())
+          }
+          Spacer()
+          if toolCount > 0 {
+            Text("\(toolCount) 个工具")
+              .font(.caption2)
+              .foregroundStyle(.tertiary)
+          }
+        }
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+
+      if expanded {
+        Divider()
+          .opacity(0.55)
+          .padding(.vertical, 9)
+        VStack(alignment: .leading, spacing: 9) {
+          ForEach(entries) { entry in
+            ActivityEntryView(entry: entry, keepToolExpanded: shouldStayExpanded)
           }
         }
       }
-      .font(.caption)
-      .foregroundStyle(.secondary)
     }
     .padding(.horizontal, 12)
-    .padding(.vertical, 9)
-    .background(Color.secondary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
+    .padding(.vertical, 10)
+    .background(Color.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+    .overlay {
+      RoundedRectangle(cornerRadius: 12)
+        .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+    }
     .onAppear { expanded = shouldStayExpanded }
     .onChange(of: shouldStayExpanded) { wasRunning, running in
       if running { expanded = true }
@@ -1400,53 +1446,184 @@ private struct ActivityGroupView: View {
     }
   }
 
+  @ViewBuilder
+  private var activityStatusIcon: some View {
+    if hasRunningActivity {
+      ProgressView().controlSize(.mini)
+    } else if taskIsRunning {
+      Image(systemName: "ellipsis.circle")
+        .foregroundStyle(.orange)
+    } else {
+      Image(systemName: "checkmark.circle.fill")
+        .foregroundStyle(failedToolCount > 0 ? Color.orange : Color.green)
+    }
+  }
+
   private var activitySummary: String {
+    if hasRunningActivity { return "正在处理" }
+    if taskIsRunning { return "思考过程" }
     if toolCount == 0 { return "已完成思考" }
-    return "已完成 · \(toolCount) 次工具调用"
+    return "已完成"
   }
 }
 
 private struct ActivityEntryView: View {
   let entry: ChatEntry
+  let keepToolExpanded: Bool
   @State private var expanded = false
 
   var body: some View {
     Group {
       if entry.kind == .tool {
-        DisclosureGroup(isExpanded: $expanded) {
-          activityContent.padding(.top, 5)
-        } label: {
-          activityHeader
+        VStack(alignment: .leading, spacing: 7) {
+          Button {
+            guard hasVisibleDetails else { return }
+            withAnimation(.easeInOut(duration: 0.14)) { expanded.toggle() }
+          } label: {
+            HStack(alignment: .top, spacing: 9) {
+              toolIcon
+              VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                  Text(toolTitle).font(.caption.weight(.semibold))
+                  if entry.isRunning { ProgressView().controlSize(.mini) }
+                  if entry.isError {
+                    Text("失败")
+                      .font(.caption2.weight(.semibold))
+                      .foregroundStyle(.red)
+                  }
+                }
+                if let toolInput = entry.toolInput, !toolInput.isEmpty {
+                  Text(toolInput)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.primary.opacity(0.88))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+              }
+              Spacer(minLength: 8)
+              if hasVisibleDetails {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                  .font(.caption2.weight(.semibold))
+                  .foregroundStyle(.tertiary)
+                  .padding(.top, 2)
+              }
+            }
+            .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+
+          if expanded && hasVisibleDetails {
+            activityContent
+              .padding(.leading, 31)
+          }
         }
+        .padding(9)
+        .background(toolBackground, in: RoundedRectangle(cornerRadius: 9))
       } else {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 6) {
           activityHeader
           activityContent
         }
+        .padding(.horizontal, 5)
       }
     }
-    .padding(.leading, 4)
+    .onAppear {
+      if entry.kind == .tool {
+        expanded = keepToolExpanded && entry.toolName != "bash" && entry.toolName != "read"
+      }
+    }
+    .onChange(of: keepToolExpanded) { _, keepExpanded in
+      guard entry.kind == .tool else { return }
+      // bash output is secondary to the command and starts collapsed. Other tool
+      // details stay visible while streaming; all nested disclosures reset when
+      // the outer activity group folds after the turn settles.
+      expanded = keepExpanded && entry.toolName != "bash" && entry.toolName != "read"
+    }
   }
 
   private var activityHeader: some View {
-    HStack(spacing: 6) {
+    HStack(spacing: 7) {
       Image(systemName: activityIcon)
-      Text(entry.title).fontWeight(.medium)
+        .foregroundStyle(.secondary)
+      Text(entry.title).font(.caption.weight(.medium))
       if entry.isRunning { ProgressView().controlSize(.mini) }
     }
-    .font(.caption)
     .foregroundStyle(entry.isError ? Color.red : Color.secondary)
+  }
+
+  private var toolIcon: some View {
+    Image(systemName: activityIcon)
+      .font(.caption.weight(.semibold))
+      .foregroundStyle(entry.isError ? Color.red : toolColor)
+      .frame(width: 22, height: 22)
+      .background(
+        (entry.isError ? Color.red : toolColor).opacity(0.11),
+        in: RoundedRectangle(cornerRadius: 6)
+      )
+  }
+
+  private var toolBackground: Color {
+    entry.isError ? Color.red.opacity(0.035) : Color.secondary.opacity(0.035)
+  }
+
+  private var toolColor: Color {
+    switch entry.toolName {
+    case "bash": .blue
+    case "read": .teal
+    case "edit", "write": .orange
+    case "web_search", "fetch_content", "source_check": .purple
+    default: .secondary
+    }
+  }
+
+  private var toolTitle: String {
+    switch entry.toolName {
+    case "bash": "运行命令"
+    case "read": "读取文件"
+    case "edit": "编辑文件"
+    case "write": "写入文件"
+    case "web_search": "搜索网页"
+    case "fetch_content": "读取网页"
+    case "source_check": "核查来源"
+    case "generate_image": "生成图片"
+    case let name?: name
+    case nil: entry.title
+    }
+  }
+
+  private var hasVisibleDetails: Bool {
+    guard entry.toolName != "read" else { return false }
+    return entry.diff?.isEmpty == false || !entry.text.isEmpty
   }
 
   @ViewBuilder
   private var activityContent: some View {
     if let diff = entry.diff, !diff.isEmpty {
       GitDiffView(diff: diff)
-    } else if !entry.text.isEmpty {
+    } else if !entry.text.isEmpty, entry.kind != .tool {
       Text(entry.text)
-        .font(.system(.caption, design: entry.kind == .tool ? .monospaced : .default))
+        .font(.caption)
+        .foregroundStyle(.secondary)
         .textSelection(.enabled)
+        .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
+    } else if !entry.text.isEmpty {
+      ScrollView([.horizontal, .vertical]) {
+        Text(entry.text)
+          .font(.system(.caption, design: .monospaced))
+          .textSelection(.enabled)
+          .fixedSize(horizontal: true, vertical: true)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(9)
+      }
+      .frame(maxHeight: 300)
+      .background(Color(nsColor: .textBackgroundColor).opacity(0.46))
+      .clipShape(RoundedRectangle(cornerRadius: 7))
+      .overlay {
+        RoundedRectangle(cornerRadius: 7)
+          .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+      }
     }
   }
 
