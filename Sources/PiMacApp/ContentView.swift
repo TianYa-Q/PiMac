@@ -638,6 +638,9 @@ struct ContentView: View {
         }
         .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
+        // 让长会话在首帧布局时就以底部为基准，避免先显示靠上的位置，
+        // 再等待延迟校正滚到底部。后续显式滚动仍用于 Markdown 高度变化。
+        .defaultScrollAnchor(.bottom)
         .onAppear {
           // 会话内容通过 RPC 异步到达；保持首次滚动待处理，直到消息完成首轮布局。
           initialSessionScrollPending = true
@@ -1402,20 +1405,24 @@ private struct ActivityGroupView: View {
           activityStatusIcon
           Text(activitySummary)
             .font(.caption.weight(.medium))
-          if failedToolCount > 0 {
-            Text("\(failedToolCount) 失败")
-              .font(.caption2.weight(.semibold))
-              .foregroundStyle(.red)
-              .padding(.horizontal, 6)
-              .padding(.vertical, 2)
-              .background(Color.red.opacity(0.10), in: Capsule())
+          if toolCount > 0 {
+            HStack(spacing: 4) {
+              Text("\(toolCount) 次调用")
+                .foregroundStyle(.secondary)
+              Text("·")
+                .foregroundStyle(.tertiary)
+              Text("\(failedToolCount) 失败")
+                .foregroundStyle(failedToolCount > 0 ? Color.red : Color.secondary)
+            }
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+              (failedToolCount > 0 ? Color.red : Color.secondary).opacity(0.10),
+              in: Capsule()
+            )
           }
           Spacer()
-          if toolCount > 0 {
-            Text("\(toolCount) 个工具")
-              .font(.caption2)
-              .foregroundStyle(.tertiary)
-          }
         }
         .contentShape(Rectangle())
       }

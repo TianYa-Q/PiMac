@@ -12,32 +12,53 @@ struct ExtensionUIModelTests {
     let second = AppModel(restoreLastProjectOnLaunch: false)
 
     ui.selectSource(first)
-    ui.handle(try statusEvent(activeAccount: "X", updatedAt: 1_000), from: first)
+    ui.handle(
+      try statusEvent(activeAccount: "X", updatedAt: 1_000, remainingPercent: 10),
+      from: first
+    )
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "X")
 
-    // A background session keeps its own snapshot and cannot replace the selected session.
-    ui.handle(try statusEvent(activeAccount: "Y", updatedAt: 3_000), from: second)
+    // A background session may update the one shared quota snapshot, but cannot replace the
+    // account selected by the foreground session.
+    ui.handle(
+      try statusEvent(activeAccount: "Y", updatedAt: 3_000, remainingPercent: 30),
+      from: second
+    )
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "X")
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 30)
 
     ui.selectSource(second)
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "Y")
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 30)
 
-    // Even a newer update from another process must not change the selected account marker.
-    ui.handle(try statusEvent(activeAccount: "X", updatedAt: 4_000), from: first)
+    // Even a newer update from another process must not change the selected account marker,
+    // while its quota data remains globally authoritative.
+    ui.handle(
+      try statusEvent(activeAccount: "X", updatedAt: 4_000, remainingPercent: 40),
+      from: first
+    )
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "Y")
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 40)
 
     ui.removeRequests(from: second)
-    #expect(ui.codexAccounts.isEmpty)
+    #expect(!ui.codexAccounts.isEmpty)
+    #expect(ui.codexAccounts.allSatisfy { !$0.isActive })
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 40)
   }
 
-  private func statusEvent(activeAccount: String, updatedAt: Double) throws -> PiRPCClient.JSON {
+  private func statusEvent(
+    activeAccount: String, updatedAt: Double, remainingPercent: Double
+  ) throws -> PiRPCClient.JSON {
     let status: PiRPCClient.JSON = [
       "version": 1,
       "activeAccount": activeAccount,
       "defaultAccount": "X",
       "updatedAt": updatedAt,
       "accounts": [
-        ["name": "X"],
+        [
+          "name": "X",
+          "primary": ["remainingPercent": remainingPercent],
+        ],
         ["name": "Y"],
       ],
     ]

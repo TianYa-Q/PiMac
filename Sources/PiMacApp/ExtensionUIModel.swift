@@ -4,8 +4,8 @@ import Foundation
 
 /// Application-wide coordinator for Pi extension UI.
 ///
-/// Dialogs from every live RPC process are queued here, while session-specific status such as
-/// the active Codex account is displayed only for the currently selected session.
+/// Dialogs from every live RPC process are queued here. Account selection is session-specific,
+/// while quota data has one application-wide source of truth shared by every session.
 @MainActor
 final class ExtensionUIModel: ObservableObject {
   @Published var dialog: ExtensionDialog?
@@ -19,26 +19,27 @@ final class ExtensionUIModel: ObservableObject {
     let source: AppModel
   }
 
-  private struct AccountSnapshot {
+  private struct UsageSnapshot {
     let accounts: [CodexAccountStatus]
     let gemini: GeminiUsageStatus?
+    let updatedAt: Date?
+  }
+
+  private struct SessionAccountSelection {
+    let activeAccount: String?
+    let geminiIsActive: Bool
     let updatedAt: Date?
   }
 
   private var presentedDialog: PendingDialog?
   private var queuedDialogs: [PendingDialog] = []
   private weak var selectedSource: AppModel?
-  private var accountSnapshots: [ObjectIdentifier: AccountSnapshot] = [:]
+  private var usageSnapshot = UsageSnapshot(accounts: [], gemini: nil, updatedAt: nil)
+  private var sessionAccountSelections: [ObjectIdentifier: SessionAccountSelection] = [:]
 
   func selectSource(_ source: AppModel?) {
     selectedSource = source
-    guard let source,
-      let snapshot = accountSnapshots[ObjectIdentifier(source)]
-    else {
-      apply(AccountSnapshot(accounts: [], gemini: nil, updatedAt: nil))
-      return
-    }
-    apply(snapshot)
+    applyUsageForSelectedSource()
   }
 
   func handle(_ event: PiRPCClient.JSON, from source: AppModel) {
@@ -110,7 +111,7 @@ final class ExtensionUIModel: ObservableObject {
   }
 
   func removeRequests(from source: AppModel) {
-    accountSnapshots.removeValue(forKey: ObjectIdentifier(source))
+    sessionAccountSelections.removeValue(forKey: ObjectIdentifier(source))
     if selectedSource === source { selectSource(nil) }
 
     let removed = queuedDialogs.filter { $0.source === source }
@@ -179,15 +180,6 @@ final class ExtensionUIModel: ObservableObject {
       Date(timeIntervalSince1970: $0 / 1_000)
     }
     let sourceID = ObjectIdentifier(source)
-    // Ignore stale results from this process, but never compare timestamps across sessions:
-    // each session has a different active account and background sessions must not overwrite
-    // the account marker shown for the selected session.
-    if let updatedAt, let current = accountSnapshots[sourceID]?.updatedAt,
-      updatedAt < current
-    {
-      return
-    }
-
     let active = payload["activeAccount"] as? String
     let defaultAccount = payload["defaultAccount"] as? String
     let accounts = rawAccounts.compactMap { raw -> CodexAccountStatus? in
@@ -202,8 +194,7 @@ final class ExtensionUIModel: ObservableObject {
         error: raw["error"] as? String
       )
     }.sorted {
-      if $0.isActive != $1.isActive { return $0.isActive }
-      return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+      $0.name.localizedStandardCompare($1.name) == .orderedAscending
     }
 
     let gemini: GeminiUsageStatus?
@@ -230,21 +221,70 @@ final class ExtensionUIModel: ObservableObject {
       gemini = nil
     }
 
-    let snapshot = AccountSnapshot(
-      accounts: accounts,
-      gemini: gemini,
-      updatedAt: updatedAt ?? accountSnapshots[sourceID]?.updatedAt
-    )
-    accountSnapshots[sourceID] = snapshot
+    // Only account selection belongs to a session. Ignore an older selection update from the
+    // same process, but allow another process to have an independently selected account.
+    let previousSelection = sessionAccountSelections[sourceID]
+    let selectionIsCurrent =
+      updatedAt.map { incoming in
+        previousSelection?.updatedAt.map { incoming >= $0 } ?? true
+      } ?? true
+    if selectionIsCurrent {
+      sessionAccountSelections[sourceID] = SessionAccountSelection(
+        activeAccount: active,
+        geminiIsActive: gemini?.isActive ?? false,
+        updatedAt: updatedAt ?? previousSelection?.updatedAt
+      )
+    }
+
+    // Quotas, reset times, visibility, and errors are application-wide. Whichever process has
+    // the newest payload updates the single shared snapshot; changing sessions never swaps it.
+    let usageIsCurrent =
+      updatedAt.map { incoming in
+        usageSnapshot.updatedAt.map { incoming >= $0 } ?? true
+      } ?? true
+    if usageIsCurrent {
+      usageSnapshot = UsageSnapshot(
+        accounts: accounts,
+        gemini: gemini,
+        updatedAt: updatedAt ?? usageSnapshot.updatedAt
+      )
+    }
+
     if selectedSource == nil { selectedSource = source }
-    if selectedSource === source { apply(snapshot) }
+    applyUsageForSelectedSource()
   }
 
-  private func apply(_ snapshot: AccountSnapshot) {
-    if codexAccounts != snapshot.accounts { codexAccounts = snapshot.accounts }
-    if geminiUsage != snapshot.gemini { geminiUsage = snapshot.gemini }
-    if codexAccountsUpdatedAt != snapshot.updatedAt {
-      codexAccountsUpdatedAt = snapshot.updatedAt
+  private func applyUsageForSelectedSource() {
+    let selection = selectedSource.flatMap {
+      sessionAccountSelections[ObjectIdentifier($0)]
+    }
+    let accounts = usageSnapshot.accounts.map { account in
+      CodexAccountStatus(
+        name: account.name,
+        isActive: account.name == selection?.activeAccount,
+        isDefault: account.isDefault,
+        isHidden: account.isHidden,
+        primary: account.primary,
+        secondary: account.secondary,
+        error: account.error
+      )
+    }.sorted {
+      if $0.isActive != $1.isActive { return $0.isActive }
+      return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+    }
+    let gemini = usageSnapshot.gemini.map {
+      GeminiUsageStatus(
+        isConfigured: $0.isConfigured,
+        isActive: selection?.geminiIsActive ?? false,
+        quotas: $0.quotas,
+        error: $0.error
+      )
+    }
+
+    if codexAccounts != accounts { codexAccounts = accounts }
+    if geminiUsage != gemini { geminiUsage = gemini }
+    if codexAccountsUpdatedAt != usageSnapshot.updatedAt {
+      codexAccountsUpdatedAt = usageSnapshot.updatedAt
     }
   }
 
