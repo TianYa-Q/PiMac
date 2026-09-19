@@ -55,6 +55,11 @@ final class AppModel: ObservableObject {
     startupSessionPath: String? = nil,
     restoreLastProjectOnLaunch: Bool = true
   ) {
+    // The workspace already knows the target project when constructing a tab. Publish it
+    // synchronously so persistent chrome (project/session sidebar) never observes a temporary
+    // nil project while the RPC connection is deferred to the next main-actor turn.
+    projectURL = startupProjectURL?.standardizedFileURL
+
     client.onEvent = { [weak self] event in self?.handle(event) }
     client.onErrorOutput = { [weak self] line in
       self?.appendDiagnostic("stderr: \(line)")

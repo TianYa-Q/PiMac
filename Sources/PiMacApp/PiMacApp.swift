@@ -60,10 +60,9 @@ private struct WorkspaceView: View {
 
   var body: some View {
     if let tab = workspace.tabs.first(where: { $0.id == workspace.selectedTabID }) {
-      ContentView()
+      ContentView(tabID: tab.id)
         .environmentObject(tab.model)
         .environmentObject(workspace.extensionUI)
-        .id(tab.id)
     } else {
       ProgressView()
     }

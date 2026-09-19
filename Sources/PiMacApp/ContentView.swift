@@ -22,6 +22,11 @@ private enum ConversationScrollMode {
   case manual
 }
 
+private enum ConversationLayout {
+  static let contentInset: CGFloat = 20
+  static let bottomAnchorID = "conversation-bottom"
+}
+
 /// SwiftUI does not expose scroll phases on macOS 14. Observe AppKit's live-scroll
 /// notifications so content growth is never mistaken for a user's scroll gesture.
 private struct ConversationScrollObserver: NSViewRepresentable {
@@ -60,6 +65,9 @@ private struct ConversationScrollObserver: NSViewRepresentable {
       observers.forEach(NotificationCenter.default.removeObserver)
       observers.removeAll()
       self.scrollView = scrollView
+      // 对话底部是一个真实的内容边界，不允许橡皮筋效果把最后一条消息
+      // 临时拖到固定留白之外。
+      scrollView.verticalScrollElasticity = .none
 
       for name in [
         NSScrollView.willStartLiveScrollNotification,
@@ -125,6 +133,8 @@ private struct SessionRelativeTime: View {
 }
 
 struct ContentView: View {
+  let tabID: UUID
+
   @EnvironmentObject private var app: AppModel
   @EnvironmentObject private var workspace: WorkspaceModel
   @EnvironmentObject private var extensionUI: ExtensionUIModel
@@ -140,6 +150,7 @@ struct ContentView: View {
   @State private var autoScrollGeneration = 0
   @State private var initialSessionScrollPending = true
   @State private var initialScrollGeneration = 0
+  @State private var conversationBottomIsVisible = false
   @State private var visibleSessionCount = 10
   @State private var hoveredSessionPath: String?
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
@@ -154,6 +165,10 @@ struct ContentView: View {
         Divider()
         composer
       }
+      // Keep this subtree alive across task changes. Re-keying even only the detail pane tears
+      // down its AppKit-backed scroll/editor views; because the sidebar uses translucent
+      // material, that teardown is visible as a flash across the entire left column. Per-task
+      // transient state is reset explicitly in the tabID change handler below instead.
       .frame(minWidth: 680, minHeight: 560)
     }
     .fileImporter(isPresented: $choosingProject, allowedContentTypes: [.folder]) { result in
@@ -171,7 +186,7 @@ struct ContentView: View {
       if case .success(let urls) = result { addAttachmentsAtSelection(urls) }
     }
     .sheet(isPresented: $showingSettings) {
-      SettingsView(path: app.piPath) { app.piPath = $0 }
+      SettingsView(path: app.piPath, projectURL: app.projectURL) { app.piPath = $0 }
     }
     .sheet(item: $previewedAttachment) { attachment in
       ImageAttachmentPreview(attachment: attachment)
@@ -187,6 +202,16 @@ struct ContentView: View {
     }
     .onChange(of: app.projectURL?.standardizedFileURL.path) {
       visibleSessionCount = 10
+    }
+    .onChange(of: tabID) {
+      composerSelection = NSRange(location: 0, length: 0)
+      conversationScrollMode = .pinnedToBottom
+      autoScrollScheduled = false
+      autoScrollGeneration += 1
+      initialSessionScrollPending = true
+      initialScrollGeneration += 1
+      conversationBottomIsVisible = false
+      previewedAttachment = nil
     }
   }
 
@@ -598,29 +623,35 @@ struct ContentView: View {
         ScrollView {
           // LazyVStack 在工具详情折叠导致高度骤变时，macOS 偶尔会保留失效的
           // 可视区域并显示白屏。普通 VStack 保持布局连续，完成任务后无需滚动恢复。
-          VStack(alignment: .leading, spacing: 14) {
-            if app.messages.isEmpty {
-              ContentUnavailableView(
-                "开始和 Pi 对话",
-                systemImage: "bubble.left.and.bubble.right",
-                description: Text("Pi 可以读取、编辑文件并执行项目命令。")
-              )
-              .frame(maxWidth: .infinity, minHeight: 360)
+          VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 14) {
+              if app.messages.isEmpty {
+                ContentUnavailableView(
+                  "开始和 Pi 对话",
+                  systemImage: "bubble.left.and.bubble.right",
+                  description: Text("Pi 可以读取、编辑文件并执行项目命令。")
+                )
+                .frame(maxWidth: .infinity, minHeight: 360)
+              }
+              ForEach(conversationTurns) { turn in
+                ConversationTurnView(
+                  turn: turn,
+                  isActive: app.isStreaming && turn.id == conversationTurns.last?.id,
+                  onEdit: { text in
+                    app.editMessage(text)
+                    composerFocused = true
+                  }
+                )
+                .id(turn.id)
+              }
             }
-            ForEach(conversationTurns) { turn in
-              ConversationTurnView(
-                turn: turn,
-                isActive: app.isStreaming && turn.id == conversationTurns.last?.id,
-                onEdit: { text in
-                  app.editMessage(text)
-                  composerFocused = true
-                }
-              )
-              .id(turn.id)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            // 这个 footer 同时定义固定留白和滚动内容的真实底边。锚点位于
+            // footer 底部，因此滚到底后既保留间距，也不存在可继续下滚的区域。
             Color.clear
-              .frame(height: 44)
-              .id("conversation-bottom")
+              .frame(height: ConversationLayout.contentInset)
+              .id(ConversationLayout.bottomAnchorID)
               .background {
                 GeometryReader { marker in
                   Color.clear.preference(
@@ -630,7 +661,8 @@ struct ContentView: View {
                 }
               }
           }
-          .padding(20)
+          .padding(.horizontal, ConversationLayout.contentInset)
+          .padding(.top, ConversationLayout.contentInset)
           .background {
             ConversationScrollObserver(onUserScroll: enterManualScrollMode)
               .frame(width: 0, height: 0)
@@ -644,9 +676,11 @@ struct ContentView: View {
         .onAppear {
           // 会话内容通过 RPC 异步到达；保持首次滚动待处理，直到消息完成首轮布局。
           initialSessionScrollPending = true
+          conversationBottomIsVisible = false
           scheduleInitialSessionScroll(proxy)
         }
         .onPreferenceChange(ConversationBottomPreferenceKey.self) { bottomY in
+          conversationBottomIsVisible = bottomY <= viewport.size.height + 1
           if bottomY <= viewport.size.height + 96 {
             // 手动滚回底部后，重新进入固定底部模式。
             conversationScrollMode = .pinnedToBottom
@@ -656,7 +690,8 @@ struct ContentView: View {
         }
         .onChange(of: app.messages.count) {
           if initialSessionScrollPending {
-            scheduleAutoScroll(proxy, force: true)
+            // defaultScrollAnchor 已经会把首帧放到底部。此时只安排一次布局稳定后的
+            // 兜底校正，避免多个延迟 scrollTo 造成可见跳动。
             scheduleInitialSessionScroll(proxy)
           } else {
             scheduleAutoScroll(proxy)
@@ -673,6 +708,7 @@ struct ContentView: View {
         }
         .onChange(of: app.currentSessionPath) {
           initialSessionScrollPending = true
+          conversationBottomIsVisible = false
           scheduleInitialSessionScroll(proxy)
         }
       }
@@ -685,9 +721,13 @@ struct ContentView: View {
 
     // RPC 返回、VStack 创建子视图以及 Markdown 定高并不在同一轮布局中。
     // 等布局稳定后再执行最终定位；若期间消息继续到达，旧任务会自动失效。
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
       guard generation == initialScrollGeneration, !app.messages.isEmpty else { return }
-      proxy.scrollTo("conversation-bottom", anchor: .bottom)
+      // defaultScrollAnchor 通常已经完成定位。只有底部确实还在视口外时才校正，
+      // 避免重复 scrollTo 的像素级位置差让整段内容在进入会话后向下跳。
+      if !conversationBottomIsVisible {
+        proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
+      }
       conversationScrollMode = .pinnedToBottom
       initialSessionScrollPending = false
     }
@@ -706,13 +746,13 @@ struct ContentView: View {
       guard generation == autoScrollGeneration,
         conversationScrollMode == .pinnedToBottom
       else { return }
-      proxy.scrollTo("conversation-bottom", anchor: .bottom)
+      proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
       guard generation == autoScrollGeneration,
         conversationScrollMode == .pinnedToBottom
       else { return }
-      proxy.scrollTo("conversation-bottom", anchor: .bottom)
+      proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
       autoScrollScheduled = false
     }
   }
@@ -1176,6 +1216,11 @@ private struct ComposerTextView: NSViewRepresentable {
 
   func updateNSView(_ scrollView: NSScrollView, context: Context) {
     guard let textView = scrollView.documentView as? SubmitTextView else { return }
+    // The representable now survives task switches. Rebind its coordinator to the currently
+    // selected AppModel; otherwise NSTextView continues writing into the previous task's
+    // composer while the current binding stays empty and keeps the placeholder visible.
+    context.coordinator.updateBindings(
+      text: $text, selection: $selection, isFocused: $isFocused)
     textView.onSubmit = onSubmit
     textView.onFollowUp = onFollowUp
     textView.onPasteFiles = onPasteFiles
@@ -1229,6 +1274,14 @@ private struct ComposerTextView: NSViewRepresentable {
       _selection = selection
       _isFocused = isFocused
       lastBindingText = initialText
+    }
+
+    func updateBindings(
+      text: Binding<String>, selection: Binding<NSRange>, isFocused: Binding<Bool>
+    ) {
+      _text = text
+      _selection = selection
+      _isFocused = isFocused
     }
 
     func textDidChange(_ notification: Notification) {
@@ -2073,28 +2126,188 @@ private struct ImageAttachmentPreview: View {
 
 private struct SettingsView: View {
   @Environment(\.dismiss) private var dismiss
-  @State var path: String
+  @State private var path: String
+  @StateObject private var versions: VersionManagerModel
+  let projectURL: URL?
   let save: (String) -> Void
 
+  init(path: String, projectURL: URL?, save: @escaping (String) -> Void) {
+    _path = State(initialValue: path)
+    _versions = StateObject(
+      wrappedValue: VersionManagerModel(piPath: path, projectURL: projectURL))
+    self.projectURL = projectURL
+    self.save = save
+  }
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 18) {
-      Text("设置").font(.title2.bold())
-      Text("Pi 可执行文件")
-      TextField("/path/to/pi", text: $path).textFieldStyle(.roundedBorder)
-      Text("程序通过 Pi 的 RPC 协议运行，登录信息、模型配置、Skills 和 AGENTS.md 都继续使用 ~/.pi/agent。")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+    VStack(spacing: 0) {
       HStack {
+        Text("设置").font(.title2.bold())
         Spacer()
-        Button("取消") { dismiss() }
-        Button("保存") {
+        Button("完成") {
           save(path)
           dismiss()
-        }.buttonStyle(.borderedProminent)
+        }
+        .buttonStyle(.borderedProminent)
+      }
+      .padding(20)
+
+      Divider()
+
+      ScrollView {
+        VStack(alignment: .leading, spacing: 22) {
+          GroupBox("Pi 可执行文件") {
+            VStack(alignment: .leading, spacing: 8) {
+              TextField("/path/to/pi", text: $path).textFieldStyle(.roundedBorder)
+              Text("修改路径后保存并重新打开设置，即可检查对应的 Pi。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 4)
+          }
+
+          GroupBox("Pi 版本") {
+            HStack(spacing: 12) {
+              versionIcon(hasUpdate: versions.piHasUpdate)
+              VStack(alignment: .leading, spacing: 3) {
+                Text("Pi coding agent").font(.headline)
+                Text(versionDescription)
+                  .font(.caption)
+                  .foregroundStyle(versions.piHasUpdate ? Color.orange : Color.secondary)
+              }
+              Spacer()
+              if versions.updatingID == "pi" {
+                ProgressView().controlSize(.small)
+              } else if versions.piHasUpdate {
+                Button("更新到 \(versions.piLatestVersion ?? "最新版")") {
+                  versions.updatePi()
+                }
+                .buttonStyle(.borderedProminent)
+              }
+            }
+            .padding(.vertical, 5)
+          }
+
+          GroupBox("扩展包版本") {
+            VStack(alignment: .leading, spacing: 0) {
+              if versions.extensions.isEmpty, versions.isChecking {
+                HStack(spacing: 8) {
+                  ProgressView().controlSize(.small)
+                  Text("正在读取扩展包并检查版本…")
+                }
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 12)
+              } else if versions.extensions.isEmpty {
+                Text("没有通过 Pi 包管理器安装的扩展包。")
+                  .foregroundStyle(.secondary)
+                  .padding(.vertical, 12)
+              } else {
+                ForEach(Array(versions.extensions.enumerated()), id: \.element.id) { index, item in
+                  extensionRow(item)
+                  if index < versions.extensions.count - 1 { Divider() }
+                }
+              }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+          }
+
+          if !versions.message.isEmpty {
+            Text(versions.message)
+              .font(.caption.monospaced())
+              .foregroundStyle(.secondary)
+              .textSelection(.enabled)
+              .lineLimit(8)
+          }
+        }
+        .padding(20)
+      }
+
+      Divider()
+      HStack {
+        Text("更新扩展后，需要重新打开会话才能载入新代码。")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        Spacer()
+        if versions.extensionUpdateCount > 0 {
+          Button("更新全部扩展（\(versions.extensionUpdateCount)）") {
+            versions.updateAllExtensions()
+          }
+          .disabled(versions.updatingID != nil || versions.isChecking)
+        }
+        Button {
+          versions.refresh()
+        } label: {
+          if versions.isChecking {
+            ProgressView().controlSize(.small)
+          } else {
+            Label("检查更新", systemImage: "arrow.clockwise")
+          }
+        }
+        .disabled(versions.isChecking || versions.updatingID != nil)
+      }
+      .padding(16)
+    }
+    .frame(width: 650, height: 620)
+    .onAppear { versions.refresh() }
+  }
+
+  private var versionDescription: String {
+    guard let current = versions.piCurrentVersion else { return "尚未读取版本" }
+    if versions.piHasUpdate { return "当前 \(current) · 最新 \(versions.piLatestVersion ?? "未知")" }
+    if let latest = versions.piLatestVersion { return "当前 \(current) · 已是最新版本（\(latest)）" }
+    return "当前 \(current) · 最新版本未知"
+  }
+
+  private func versionIcon(hasUpdate: Bool) -> some View {
+    Image(systemName: hasUpdate ? "arrow.up.circle.fill" : "checkmark.circle.fill")
+      .font(.title2)
+      .foregroundStyle(hasUpdate ? Color.orange : Color.green)
+  }
+
+  private func extensionRow(_ item: ManagedExtension) -> some View {
+    HStack(spacing: 11) {
+      versionIcon(hasUpdate: item.hasUpdate)
+      VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 6) {
+          Text(item.source).font(.callout.weight(.medium)).lineLimit(1)
+          Text(item.scope)
+            .font(.caption2)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(.quaternary, in: Capsule())
+        }
+        Text(extensionVersionDescription(item))
+          .font(.caption)
+          .foregroundStyle(item.hasUpdate ? Color.orange : Color.secondary)
+        if let error = item.error, !error.isEmpty {
+          Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2)
+        }
+      }
+      Spacer()
+      if versions.updatingID == item.id {
+        ProgressView().controlSize(.small)
+      } else if item.hasUpdate {
+        Button("更新") { versions.update(item) }.buttonStyle(.borderedProminent)
       }
     }
-    .padding(24)
-    .frame(width: 520)
+    .padding(.vertical, 9)
+  }
+
+  private func extensionVersionDescription(_ item: ManagedExtension) -> String {
+    let current = item.currentVersion ?? "未知"
+    if item.isPinned {
+      if let latest = item.latestVersion,
+        VersionManagerModel.isNewer(latest, than: current)
+      {
+        return "当前 \(current) · 已固定版本 · Registry 最新 \(latest)"
+      }
+      return "当前 \(current) · 已固定版本，不参与自动更新"
+    }
+    if case .local = item.kind { return "本地扩展 · 不由 Pi 更新" }
+    if item.hasUpdate { return "当前 \(current) · 最新 \(item.latestVersion ?? "未知")" }
+    if let latest = item.latestVersion { return "当前 \(current) · 已是最新版本（\(latest)）" }
+    return "当前 \(current) · 最新版本未知"
   }
 }
 

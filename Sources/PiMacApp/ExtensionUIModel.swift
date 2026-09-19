@@ -39,6 +39,12 @@ final class ExtensionUIModel: ObservableObject {
 
   func selectSource(_ source: AppModel?) {
     selectedSource = source
+    // A newly created/resumed process has not reported its session account yet. Keep showing
+    // the previous account meanwhile instead of briefly replacing the quota card with
+    // “等待扩展提供账户信息…”. Its first status payload will apply the new selection.
+    guard let source,
+      sessionAccountSelections[ObjectIdentifier(source)] != nil
+    else { return }
     applyUsageForSelectedSource()
   }
 
@@ -224,6 +230,7 @@ final class ExtensionUIModel: ObservableObject {
     // Only account selection belongs to a session. Ignore an older selection update from the
     // same process, but allow another process to have an independently selected account.
     let previousSelection = sessionAccountSelections[sourceID]
+    let isInitialStatusFromSource = previousSelection == nil
     let selectionIsCurrent =
       updatedAt.map { incoming in
         previousSelection?.updatedAt.map { incoming >= $0 } ?? true
@@ -236,13 +243,19 @@ final class ExtensionUIModel: ObservableObject {
       )
     }
 
-    // Quotas, reset times, visibility, and errors are application-wide. Whichever process has
-    // the newest payload updates the single shared snapshot; changing sessions never swaps it.
+    // Quotas, reset times, visibility, and errors are application-wide. A newly started Pi
+    // process always publishes an initial quota payload while opening a task. If a shared
+    // snapshot already exists, that first payload must only establish this session's selected
+    // account; otherwise merely creating/selecting a task makes the quota card appear refreshed.
+    // Subsequent payloads from the process are real periodic or user-requested refreshes.
+    let mayUpdateUsage =
+      usageSnapshot.accounts.isEmpty && usageSnapshot.gemini == nil
+      || !isInitialStatusFromSource
     let usageIsCurrent =
       updatedAt.map { incoming in
         usageSnapshot.updatedAt.map { incoming >= $0 } ?? true
       } ?? true
-    if usageIsCurrent {
+    if mayUpdateUsage && usageIsCurrent {
       usageSnapshot = UsageSnapshot(
         accounts: accounts,
         gemini: gemini,
@@ -258,10 +271,22 @@ final class ExtensionUIModel: ObservableObject {
     let selection = selectedSource.flatMap {
       sessionAccountSelections[ObjectIdentifier($0)]
     }
+    // The first status event after a project switch can arrive from the process that was just
+    // left while the new process is still starting. Keep the account currently shown (or use
+    // the payload's account when bootstrapping) until the selected process reports its own
+    // selection; never turn a valid shared quota snapshot into an empty card.
+    let fallbackActiveAccount =
+      codexAccounts.first(where: \.isActive)?.name
+      ?? usageSnapshot.accounts.first(where: \.isActive)?.name
+    let activeAccount = selection?.activeAccount ?? fallbackActiveAccount
+    let geminiIsActive =
+      selection?.geminiIsActive
+      ?? geminiUsage?.isActive
+      ?? usageSnapshot.gemini?.isActive
     let accounts = usageSnapshot.accounts.map { account in
       CodexAccountStatus(
         name: account.name,
-        isActive: account.name == selection?.activeAccount,
+        isActive: account.name == activeAccount,
         isDefault: account.isDefault,
         isHidden: account.isHidden,
         primary: account.primary,
@@ -275,7 +300,7 @@ final class ExtensionUIModel: ObservableObject {
     let gemini = usageSnapshot.gemini.map {
       GeminiUsageStatus(
         isConfigured: $0.isConfigured,
-        isActive: selection?.geminiIsActive ?? false,
+        isActive: geminiIsActive ?? false,
         quotas: $0.quotas,
         error: $0.error
       )
