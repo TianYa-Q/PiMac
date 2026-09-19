@@ -41,6 +41,81 @@ struct PiModelPreferences {
 }
 
 enum PiSettingsStore {
+  private static let compactionExtensionSource = #"""
+    import { readFileSync } from "node:fs";
+    import { homedir } from "node:os";
+    import { join } from "node:path";
+    import { uuidv7 } from "@earendil-works/pi-ai";
+    import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+    import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
+
+    const configPath = join(homedir(), ".pi", "agent", "pi-mac-compaction.json");
+
+    export default function (pi: ExtensionAPI) {
+      pi.on("session_before_compact", async (event, ctx) => {
+        let config: { provider?: string; modelId?: string };
+        try {
+          config = JSON.parse(readFileSync(configPath, "utf8"));
+        } catch {
+          return;
+        }
+        if (!config.provider || !config.modelId) return;
+        const model = ctx.modelRegistry.find(config.provider, config.modelId);
+        if (!model) return;
+
+        const { preparation, signal, customInstructions } = event;
+        const messages = [
+          ...preparation.messagesToSummarize,
+          ...preparation.turnPrefixMessages,
+        ];
+        const conversation = serializeConversation(convertToLlm(messages));
+        const previous = preparation.previousSummary
+          ? `\n<previous-summary>\n${preparation.previousSummary}\n</previous-summary>`
+          : "";
+        const focus = customInstructions ? `\nAdditional focus: ${customInstructions}` : "";
+        const prompt = `Summarize the conversation as a context checkpoint for another LLM.
+    Preserve goals, constraints, completed and ongoing work, decisions, exact file paths,
+    function names, errors, blockers, and next steps. Use concise structured Markdown.${focus}
+    <conversation>\n${conversation}\n</conversation>${previous}`;
+
+        const response = await ctx.modelRegistry.complete(
+          model,
+          { messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }] },
+          { maxTokens: Math.min(8192, model.maxTokens || 8192), signal, cacheRetention: "none", sessionId: uuidv7() },
+        );
+        let summary = response.content
+          .filter((block): block is { type: "text"; text: string } => block.type === "text")
+          .map((block) => block.text)
+          .join("\n");
+        if (!summary.trim()) return;
+
+        const modified = new Set([
+          ...preparation.fileOps.written,
+          ...preparation.fileOps.edited,
+        ]);
+        const readFiles = [...preparation.fileOps.read].filter((path) => !modified.has(path)).sort();
+        const modifiedFiles = [...modified].sort();
+        if (readFiles.length) summary += `\n\n<read-files>\n${readFiles.join("\n")}\n</read-files>`;
+        if (modifiedFiles.length) summary += `\n\n<modified-files>\n${modifiedFiles.join("\n")}\n</modified-files>`;
+
+        return {
+          compaction: {
+            summary,
+            firstKeptEntryId: preparation.firstKeptEntryId,
+            tokensBefore: preparation.tokensBefore,
+            usage: response.usage,
+            details: {
+              readFiles,
+              modifiedFiles,
+              compactionProvider: model.provider,
+              compactionModelId: model.id,
+            },
+          },
+        };
+      });
+    }
+    """#
+
   static var globalURL: URL {
     FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".pi/agent/settings.json")
@@ -62,6 +137,40 @@ enum PiSettingsStore {
     try saveJSON(settings)
   }
 
+  static func compactionModelID() -> String? {
+    guard let data = try? Data(contentsOf: compactionConfigURL),
+      let config = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+      let provider = config["provider"], let modelID = config["modelId"]
+    else { return nil }
+    return "\(provider)/\(modelID)"
+  }
+
+  static func installCompactionExtension() throws {
+    let extensionsDirectory = globalURL.deletingLastPathComponent()
+      .appendingPathComponent("extensions", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: extensionsDirectory,
+      withIntermediateDirectories: true
+    )
+    try Data(compactionExtensionSource.utf8).write(
+      to: compactionExtensionURL,
+      options: .atomic
+    )
+  }
+
+  static func setCompactionModel(_ model: PiModel?) throws {
+    let fileManager = FileManager.default
+    try installCompactionExtension()
+
+    if let model {
+      let config = ["provider": model.provider, "modelId": model.modelId]
+      let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted])
+      try data.write(to: compactionConfigURL, options: .atomic)
+    } else if fileManager.fileExists(atPath: compactionConfigURL.path) {
+      try fileManager.removeItem(at: compactionConfigURL)
+    }
+  }
+
   static func setThinkingLevel(_ level: String?, for modelID: String) throws {
     var settings = loadJSON()
     var levels = (settings["modelThinkingLevels"] as? [String: Any]) ?? [:]
@@ -76,6 +185,15 @@ enum PiSettingsStore {
       settings["modelThinkingLevels"] = levels
     }
     try saveJSON(settings)
+  }
+
+  private static var compactionConfigURL: URL {
+    globalURL.deletingLastPathComponent().appendingPathComponent("pi-mac-compaction.json")
+  }
+
+  private static var compactionExtensionURL: URL {
+    globalURL.deletingLastPathComponent()
+      .appendingPathComponent("extensions/pi-mac-compaction-model.ts")
   }
 
   private static func loadJSON() -> [String: Any] {

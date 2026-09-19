@@ -167,7 +167,6 @@ struct ContentView: View {
   @State private var initialSessionScrollPending = true
   @State private var initialScrollGeneration = 0
   @State private var conversationBottomIsVisible = false
-  @State private var visibleConversationTurnCount = 20
   @State private var visibleSessionCount = 10
   @State private var hoveredSessionPath: String?
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
@@ -232,7 +231,6 @@ struct ContentView: View {
       initialSessionScrollPending = true
       initialScrollGeneration += 1
       conversationBottomIsVisible = false
-      visibleConversationTurnCount = 20
       previewedAttachment = nil
     }
   }
@@ -641,14 +639,10 @@ struct ContentView: View {
 
   private var conversation: some View {
     let turns = conversationTurns
-    let visibleTurns = Array(turns.suffix(visibleConversationTurnCount))
 
     return GeometryReader { viewport in
       ScrollViewReader { proxy in
         ScrollView {
-          // LazyVStack on macOS 14 can lose its visible layout when a streaming row repeatedly
-          // changes height, leaving the transcript white. Keep a bounded regular VStack: it is
-          // stable during streaming while old turns are opt-in, so long sessions stay cheap.
           VStack(alignment: .leading, spacing: 14) {
             if app.messages.isEmpty {
               ContentUnavailableView(
@@ -658,17 +652,17 @@ struct ContentView: View {
               )
               .frame(maxWidth: .infinity, minHeight: 360)
             }
-            ForEach(visibleTurns) { turn in
-              ConversationTurnView(
-                turn: turn,
-                isActive: app.isStreaming && turn.id == turns.last?.id,
-                onEdit: { text in
-                  app.editMessage(text)
-                  composerFocused = true
-                }
+
+            VirtualConversationStack(
+              ids: turns.map(\.id),
+              pinnedToBottom: conversationScrollMode == .pinnedToBottom
+            ) { index in
+              conversationTurnView(
+                turns[index], isActive: app.isStreaming && index == turns.count - 1
               )
-              .id(turn.id)
             }
+            // Height caches and viewport coordinates must never leak across sessions.
+            .id("\(tabID)-\(app.currentSessionPath)")
 
             // The footer is the real content edge as well as the auto-scroll anchor.
             Color.clear
@@ -693,28 +687,6 @@ struct ContentView: View {
         }
         .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
-        .overlay(alignment: .top) {
-          if visibleTurns.count < turns.count {
-            Button {
-              visibleConversationTurnCount = min(
-                visibleConversationTurnCount + 20,
-                turns.count
-              )
-            } label: {
-              Label(
-                "载入更早的对话（还有 \(turns.count - visibleTurns.count) 轮）",
-                systemImage: "chevron.up"
-              )
-              .font(.caption.weight(.medium))
-              .padding(.horizontal, 12)
-              .padding(.vertical, 7)
-              .background(.regularMaterial, in: Capsule())
-              .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 8)
-          }
-        }
         // 让长会话在首帧布局时就以底部为基准，避免先显示靠上的位置，
         // 再等待延迟校正滚到底部。后续显式滚动仍用于 Markdown 高度变化。
         .defaultScrollAnchor(.bottom)
@@ -725,13 +697,16 @@ struct ContentView: View {
           scheduleInitialSessionScroll(proxy)
         }
         .onPreferenceChange(ConversationBottomPreferenceKey.self) { bottomY in
+          guard bottomY.isFinite, bottomY > 0 else { return }
           conversationBottomIsVisible = bottomY <= viewport.size.height + 1
-          if bottomY <= viewport.size.height + 96 {
+          if bottomY <= viewport.size.height + 1 {
             // 手动滚回底部后，重新进入固定底部模式。
             conversationScrollMode = .pinnedToBottom
           }
-          // 底部离开视口也可能只是流式内容变高。只有 AppKit 观察到用户
-          // 实际滚动时，才切换为手动位置模式。
+          // Follow actual layout changes rather than speculative repeated corrections.
+          if !conversationBottomIsVisible && !initialSessionScrollPending {
+            scheduleAutoScroll(proxy)
+          }
         }
         .onChange(of: app.messages.count) {
           if initialSessionScrollPending {
@@ -752,13 +727,30 @@ struct ContentView: View {
           )
         }
         .onChange(of: app.currentSessionPath) {
-          visibleConversationTurnCount = 20
+          autoScrollGeneration += 1
+          autoScrollScheduled = false
+          conversationScrollMode = .pinnedToBottom
           initialSessionScrollPending = true
           conversationBottomIsVisible = false
           scheduleInitialSessionScroll(proxy)
         }
       }
     }
+  }
+
+  private func conversationTurnView(
+    _ turn: ConversationTurn,
+    isActive: Bool
+  ) -> some View {
+    ConversationTurnView(
+      turn: turn,
+      isActive: isActive,
+      onEdit: { text in
+        app.editMessage(text)
+        composerFocused = true
+      }
+    )
+    .id(turn.id)
   }
 
   private func scheduleInitialSessionScroll(_ proxy: ScrollViewProxy) {
@@ -781,25 +773,22 @@ struct ContentView: View {
 
   private func scheduleAutoScroll(_ proxy: ScrollViewProxy, force: Bool = false) {
     if force { conversationScrollMode = .pinnedToBottom }
-    guard conversationScrollMode == .pinnedToBottom, !autoScrollScheduled else { return }
+    guard !initialSessionScrollPending,
+      conversationScrollMode == .pinnedToBottom, !autoScrollScheduled
+    else { return }
     autoScrollScheduled = true
     autoScrollGeneration += 1
     let generation = autoScrollGeneration
 
-    // Markdown 和工具卡片可能分两轮完成布局。连续校正两次，避免第一次滚动后
-    // 内容高度再次增加，导致流式回复的末尾仍停在视口之外。
+    // Coalesce updates into one correction; subsequent height changes are observed above.
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
       guard generation == autoScrollGeneration,
         conversationScrollMode == .pinnedToBottom
       else { return }
-      proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-      guard generation == autoScrollGeneration,
-        conversationScrollMode == .pinnedToBottom
-      else { return }
-      proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
       autoScrollScheduled = false
+      if !conversationBottomIsVisible {
+        proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
+      }
     }
   }
 
@@ -1450,7 +1439,9 @@ private struct ConversationTurn: Identifiable {
         || (entry.kind == .assistant && entry.id != finalAssistant?.id)
     }
   }
-  var systemEntries: [ChatEntry] { entries.filter { $0.kind == .system } }
+  var supplementaryEntries: [ChatEntry] {
+    entries.filter { $0.kind == .system || $0.kind == .compaction }
+  }
 }
 
 private struct ConversationTurnView: View {
@@ -1467,7 +1458,7 @@ private struct ConversationTurnView: View {
         ActivityGroupView(entries: turn.activity, taskIsRunning: isActive)
       }
       if let assistant = turn.finalAssistant { ChatEntryView(entry: assistant) }
-      ForEach(turn.systemEntries) { ChatEntryView(entry: $0) }
+      ForEach(turn.supplementaryEntries) { ChatEntryView(entry: $0) }
     }
   }
 }
@@ -1475,7 +1466,17 @@ private struct ConversationTurnView: View {
 private struct ActivityGroupView: View {
   let entries: [ChatEntry]
   let taskIsRunning: Bool
-  @State private var expanded = false
+  @Environment(\.conversationExpansionStore) private var expansionStore
+  @State private var localExpanded = false
+
+  private var expansionKey: String { "activity-\(entries.first?.id ?? "empty")" }
+  private var expanded: Bool {
+    get { expansionStore?.values[expansionKey] ?? localExpanded }
+    nonmutating set {
+      localExpanded = newValue
+      expansionStore?.values[expansionKey] = newValue
+    }
+  }
 
   private var hasRunningActivity: Bool { entries.contains(where: \.isRunning) }
   private var shouldStayExpanded: Bool { taskIsRunning || hasRunningActivity }
@@ -1538,7 +1539,9 @@ private struct ActivityGroupView: View {
       RoundedRectangle(cornerRadius: 12)
         .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
     }
-    .onAppear { expanded = shouldStayExpanded }
+    .onAppear {
+      if expansionStore?.values[expansionKey] == nil { expanded = shouldStayExpanded }
+    }
     .onChange(of: shouldStayExpanded) { wasRunning, running in
       if running { expanded = true }
       if wasRunning && !running { expanded = false }
@@ -1569,7 +1572,17 @@ private struct ActivityGroupView: View {
 private struct ActivityEntryView: View {
   let entry: ChatEntry
   let keepToolExpanded: Bool
-  @State private var expanded = false
+  @Environment(\.conversationExpansionStore) private var expansionStore
+  @State private var localExpanded = false
+
+  private var expansionKey: String { "tool-\(entry.id)" }
+  private var expanded: Bool {
+    get { expansionStore?.values[expansionKey] ?? localExpanded }
+    nonmutating set {
+      localExpanded = newValue
+      expansionStore?.values[expansionKey] = newValue
+    }
+  }
 
   var body: some View {
     Group {
@@ -1628,7 +1641,7 @@ private struct ActivityEntryView: View {
       }
     }
     .onAppear {
-      if entry.kind == .tool {
+      if entry.kind == .tool, expansionStore?.values[expansionKey] == nil {
         expanded = keepToolExpanded && entry.toolName != "bash" && entry.toolName != "read"
       }
     }
@@ -1732,6 +1745,7 @@ private struct ActivityEntryView: View {
     case .tool: "wrench.and.screwdriver"
     case .assistant: "sparkles"
     case .user: "person.crop.circle"
+    case .compaction: "arrow.down.right.and.arrow.up.left"
     case .system: "exclamationmark.circle"
     }
   }
@@ -1783,11 +1797,14 @@ private struct ChatEntryView: View {
   let entry: ChatEntry
   let onEdit: (() -> Void)?
   @State private var expanded: Bool
+  @State private var copied = false
 
   init(entry: ChatEntry, onEdit: (() -> Void)? = nil) {
     self.entry = entry
     self.onEdit = onEdit
-    _expanded = State(initialValue: entry.kind != .thinking && entry.kind != .tool)
+    _expanded = State(
+      initialValue: entry.kind != .thinking && entry.kind != .tool && entry.kind != .compaction
+    )
   }
 
   var body: some View {
@@ -1798,8 +1815,24 @@ private struct ChatEntryView: View {
       VStack(alignment: .leading, spacing: 6) {
         HStack {
           Text(entry.title).font(.caption.bold()).foregroundStyle(.secondary)
+          if let model = entry.modelLabel {
+            Text(model)
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+              .padding(.horizontal, 6)
+              .padding(.vertical, 2)
+              .background(Color.secondary.opacity(0.10), in: Capsule())
+          }
           if entry.isRunning { ProgressView().controlSize(.mini) }
           Spacer()
+          if entry.kind == .assistant, !entry.text.isEmpty {
+            Button(action: copyReply) {
+              Image(systemName: copied ? "checkmark" : "doc.on.doc")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(copied ? Color.green : Color.secondary)
+            .help(copied ? "已复制" : "复制这条回复")
+          }
           if let onEdit {
             Button(action: onEdit) {
               Image(systemName: "pencil")
@@ -1812,11 +1845,11 @@ private struct ChatEntryView: View {
         if !entry.attachments.isEmpty {
           MessageAttachmentsView(attachments: entry.attachments)
         }
-        if entry.kind == .tool || entry.kind == .thinking {
+        if entry.kind == .tool || entry.kind == .thinking || entry.kind == .compaction {
           DisclosureGroup(isExpanded: $expanded) {
-            content.padding(.top, 5)
+            if expanded { content.padding(.top, 5) }
           } label: {
-            Text(expanded ? "收起详情" : summary).font(.caption)
+            Text(disclosureLabel).font(.caption)
           }
         } else if !entry.text.isEmpty {
           content
@@ -1830,7 +1863,9 @@ private struct ChatEntryView: View {
 
   @ViewBuilder
   private var content: some View {
-    if entry.kind == .tool || entry.kind == .thinking {
+    if entry.kind == .tool || entry.kind == .thinking || entry.isRunning {
+      // Parsing and laying out the entire growing Markdown document for every provider chunk is
+      // expensive. Keep streaming output lightweight, then render Markdown once it is complete.
       Text(entry.text)
         .font(.system(.body, design: entry.kind == .tool ? .monospaced : .default))
         .textSelection(.enabled)
@@ -1841,9 +1876,26 @@ private struct ChatEntryView: View {
     }
   }
 
+  private func copyReply() {
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    pasteboard.setString(entry.text, forType: .string)
+    copied = true
+    Task { @MainActor in
+      try? await Task.sleep(for: .seconds(1.5))
+      copied = false
+    }
+  }
+
   private var summary: String {
     let firstLine = entry.text.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? "暂无输出"
     return String(firstLine.prefix(90))
+  }
+
+  private var disclosureLabel: String {
+    if expanded { return "收起详情" }
+    if entry.kind == .compaction { return "查看压缩摘要" }
+    return summary
   }
 
   private var icon: String {
@@ -1852,6 +1904,7 @@ private struct ChatEntryView: View {
     case .assistant: "sparkles"
     case .thinking: "brain.head.profile"
     case .tool: "wrench.and.screwdriver"
+    case .compaction: "arrow.down.right.and.arrow.up.left"
     case .system: "exclamationmark.circle"
     }
   }
@@ -1863,6 +1916,7 @@ private struct ChatEntryView: View {
     case .assistant: .purple
     case .thinking: .orange
     case .tool: .blue
+    case .compaction: .teal
     case .system: .secondary
     }
   }
@@ -2181,6 +2235,34 @@ private struct ModelSettingsView: View {
           .buttonStyle(.borderedProminent)
       }
       .padding(20)
+
+      Divider()
+
+      HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 3) {
+          Text("压缩使用的模型").font(.callout.weight(.medium))
+          Text("同时用于手动压缩和自动压缩；空闲时会在后台重新连接 Pi。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        Picker(
+          "压缩使用的模型",
+          selection: Binding(
+            get: { app.compactionModelID },
+            set: { app.setCompactionModel($0) }
+          )
+        ) {
+          Text("当前对话模型 · Current").tag(nil as String?)
+          ForEach(app.allModels) { model in
+            Text("\(model.name) · \(model.provider)").tag(Optional(model.id))
+          }
+        }
+        .labelsHidden()
+        .frame(width: 260)
+      }
+      .padding(.horizontal, 20)
+      .padding(.vertical, 14)
 
       Divider()
 

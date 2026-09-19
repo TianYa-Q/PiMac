@@ -13,6 +13,7 @@ final class AppModel: ObservableObject {
   @Published var models: [PiModel] = []
   @Published var allModels: [PiModel] = []
   @Published var modelDefaultThinkingLevels: [String: String] = [:]
+  @Published var compactionModelID: String?
   @Published var selectedModelId = ""
   @Published var thinkingLevels = ["off"]
   @Published var selectedThinkingLevel = "off"
@@ -36,6 +37,7 @@ final class AppModel: ObservableObject {
   private let client = PiRPCClient()
   private var activeAssistantId: String?
   private var activeThinkingId: String?
+  private var activeCompactionId: String?
   private var sessionLoadGeneration = UUID()
   private var isRewritingQueue = false
   private var submittingQueuedPrompts: [UUID: Int] = [:]
@@ -44,6 +46,18 @@ final class AppModel: ObservableObject {
   private var queueSnapshotGeneration = 0
   private var latestQueueSnapshot: (steering: [String], followUp: [String])?
   private var thinkingConfigurationGeneration = 0
+  private var transcriptLoadGeneration = 0
+  private var transcriptLoadInFlightKey: String?
+  private var loadedTranscriptKey: String?
+  private var loadedTranscriptPath: String?
+  private var statsRefreshScheduled = false
+  private var pendingMessageDeltas: [String: String] = [:]
+  private var messageDeltaFlushScheduled = false
+  private var messageDeltaFlushGeneration = 0
+
+  private var selectedModel: PiModel? {
+    allModels.first { $0.id == selectedModelId }
+  }
 
   var piPath: String {
     get { UserDefaults.standard.string(forKey: "piPath") ?? Self.suggestedPiPath() }
@@ -83,17 +97,14 @@ final class AppModel: ObservableObject {
       await Task.yield()
       if let startupProjectURL {
         if let startupSessionPath {
-          // 本地 JSONL 读取与 RPC 进程启动并行进行，历史内容无需等待 Pi 完成连接。
-          let transcriptTask = Task.detached(priority: .userInitiated) {
-            Self.loadTranscript(at: startupSessionPath)
-          }
           self?.connect(
             to: startupProjectURL,
             continueLastSession: continueLastSession,
             sessionPath: startupSessionPath
           )
-          let cachedMessages = await transcriptTask.value
-          if self?.messages.isEmpty == true { self?.messages = cachedMessages }
+          // 本地 JSONL 读取与 RPC 配置请求并行进行；后续 get_state/get_messages 会复用
+          // 这次加载，避免大会话在启动时被重复解析。
+          self?.loadCompleteTranscript(at: startupSessionPath)
         } else {
           self?.connect(
             to: startupProjectURL,
@@ -128,6 +139,7 @@ final class AppModel: ObservableObject {
 
     connectionState = .connecting
     if !preservingState {
+      resetTranscriptLoading()
       messages.removeAll()
       queuedPrompts.removeAll()
       submittingQueuedPrompts.removeAll()
@@ -136,8 +148,12 @@ final class AppModel: ObservableObject {
       queueSnapshotGeneration = 0
       latestQueueSnapshot = nil
       diagnosticText = ""
+      discardPendingMessageDeltas()
     }
     self.projectURL = projectURL
+    // Install/update the companion before Pi starts so this process loads the same extension
+    // version that writes compression-model metadata into session records.
+    try? PiSettingsStore.installCompactionExtension()
     do {
       try client.start(
         piPath: piPath,
@@ -149,6 +165,7 @@ final class AppModel: ObservableObject {
       isLoadingConfiguration = true
       statusText = sessionPath == nil ? "正在读取 Pi 配置…" : "正在打开会话…"
       if let sessionPath {
+        currentSessionPath = sessionPath
         client.request(["type": "switch_session", "sessionPath": sessionPath]) {
           [weak self] result in
           guard let self else { return }
@@ -210,6 +227,7 @@ final class AppModel: ObservableObject {
     pendingAssistantError = nil
     queueSnapshotGeneration = 0
     latestQueueSnapshot = nil
+    discardPendingMessageDeltas()
     sessions = []
     currentSessionPath = ""
     client.stop()
@@ -566,6 +584,8 @@ final class AppModel: ObservableObject {
           self.latestQueueSnapshot = nil
           self.sessionName = ""
           self.stats = nil
+          self.currentSessionPath = ""
+          self.resetTranscriptLoading()
           self.refreshAll()
         }
       }
@@ -583,7 +603,11 @@ final class AppModel: ObservableObject {
       case .failure(let error): self.appendSystemError(error.localizedDescription)
       case .success(let response):
         let cancelled = (response["data"] as? PiRPCClient.JSON)?["cancelled"] as? Bool ?? false
-        if !cancelled { self.refreshAll() }
+        if !cancelled {
+          self.resetTranscriptLoading()
+          self.currentSessionPath = path
+          self.refreshAll()
+        }
       }
     }
   }
@@ -654,6 +678,39 @@ final class AppModel: ObservableObject {
     } catch {
       appendSystemError("保存模型默认思考等级失败：\(error.localizedDescription)")
     }
+  }
+
+  func setCompactionModel(_ modelID: String?) {
+    do {
+      let model = modelID.flatMap { id in allModels.first(where: { $0.id == id }) }
+      try PiSettingsStore.setCompactionModel(model)
+      compactionModelID = model?.id
+      reloadRPCProcessForCompactionModel()
+    } catch {
+      appendSystemError("保存压缩模型失败：\(error.localizedDescription)")
+    }
+  }
+
+  private func reloadRPCProcessForCompactionModel() {
+    guard client.isRunning else {
+      statusText = "压缩模型已保存，将在下次连接时生效"
+      return
+    }
+    guard !isBusy, queuedPrompts.isEmpty, let projectURL else {
+      statusText = "压缩模型已保存，将在当前任务结束并重新打开会话后生效"
+      return
+    }
+
+    let sessionPath = currentSessionPath.isEmpty ? nil : currentSessionPath
+    extensionUI?.removeRequests(from: self)
+    connectionState = .disconnected
+    client.stop()
+    connect(
+      to: projectURL,
+      continueLastSession: sessionPath == nil,
+      sessionPath: sessionPath,
+      preservingState: true
+    )
   }
 
   func switchCodexAccount(to accountName: String) {
@@ -758,7 +815,10 @@ final class AppModel: ObservableObject {
       self?.isStreaming = data["isStreaming"] as? Bool ?? false
       self?.isCompacting = data["isCompacting"] as? Bool ?? false
       self?.sessionName = data["sessionName"] as? String ?? ""
-      self?.currentSessionPath = data["sessionFile"] as? String ?? ""
+      let sessionPath = data["sessionFile"] as? String ?? ""
+      if self?.currentSessionPath != sessionPath { self?.resetTranscriptLoading() }
+      self?.currentSessionPath = sessionPath
+      if !sessionPath.isEmpty { self?.loadCompleteTranscript(at: sessionPath) }
       if let model = data["model"] as? PiRPCClient.JSON,
         let provider = model["provider"] as? String,
         let id = model["id"] as? String
@@ -770,12 +830,66 @@ final class AppModel: ObservableObject {
 
   private func loadMessages() {
     client.request(["type": "get_messages"]) { [weak self] result in
-      guard case .success(let response) = result,
+      guard let self, case .success(let response) = result,
         let data = response["data"] as? PiRPCClient.JSON,
         let rawMessages = data["messages"] as? [PiRPCClient.JSON]
       else { return }
-      self?.messages = Self.chatEntries(from: rawMessages)
+      self.applyRPCMessageSnapshot(rawMessages)
+      if !self.currentSessionPath.isEmpty {
+        self.loadCompleteTranscript(at: self.currentSessionPath)
+      }
     }
+  }
+
+  // RPC get_messages is the model's current context, not the complete session history.
+  // Once JSONL has supplied this session, late RPC snapshots must not truncate it,
+  // even if the file has since grown and another full-history refresh is pending.
+  func applyRPCMessageSnapshot(_ rawMessages: [PiRPCClient.JSON]) {
+    guard currentSessionPath.isEmpty || loadedTranscriptPath != currentSessionPath else { return }
+    messages = Self.chatEntries(from: rawMessages)
+  }
+
+  func applyCompleteTranscript(_ complete: [ChatEntry], at path: String, cacheKey: String) {
+    guard currentSessionPath == path, !complete.isEmpty else { return }
+    loadedTranscriptKey = cacheKey
+    loadedTranscriptPath = path
+    messages = complete
+  }
+
+  private func resetTranscriptLoading() {
+    transcriptLoadGeneration += 1
+    transcriptLoadInFlightKey = nil
+    loadedTranscriptKey = nil
+    loadedTranscriptPath = nil
+  }
+
+  private func loadCompleteTranscript(at path: String) {
+    // get_state and get_messages normally finish almost together during startup. Both request the
+    // complete JSONL transcript, so coalesce them and cache the parsed version while the file is
+    // unchanged instead of parsing a large session two or three times.
+    let key = Self.transcriptCacheKey(at: path)
+    guard transcriptLoadInFlightKey != key, loadedTranscriptKey != key else { return }
+    transcriptLoadGeneration += 1
+    let generation = transcriptLoadGeneration
+    transcriptLoadInFlightKey = key
+    Task { @MainActor [weak self] in
+      let complete = await Task.detached(priority: .userInitiated) {
+        Self.loadTranscript(at: path)
+      }.value
+      guard let self else { return }
+      if self.transcriptLoadInFlightKey == key { self.transcriptLoadInFlightKey = nil }
+      guard generation == self.transcriptLoadGeneration,
+        self.currentSessionPath == path, !complete.isEmpty
+      else { return }
+      self.applyCompleteTranscript(complete, at: path, cacheKey: key)
+    }
+  }
+
+  nonisolated private static func transcriptCacheKey(at path: String) -> String {
+    let attributes = try? FileManager.default.attributesOfItem(atPath: path)
+    let size = (attributes?[.size] as? NSNumber)?.uint64Value ?? 0
+    let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSinceReferenceDate ?? 0
+    return "\(path)\u{0}\(size)\u{0}\(modified)"
   }
 
   private func loadModels() {
@@ -877,6 +991,7 @@ final class AppModel: ObservableObject {
   private func applyModelPreferences() {
     let preferences = PiSettingsStore.loadModelPreferences()
     modelDefaultThinkingLevels = preferences.thinkingLevels
+    compactionModelID = PiSettingsStore.compactionModelID()
     models = allModels.filter(preferences.includes)
   }
 
@@ -892,6 +1007,17 @@ final class AppModel: ObservableObject {
         contextPercent: context?["percent"] as? Double,
         totalTokens: tokens?["total"] as? Int ?? 0
       )
+    }
+  }
+
+  private func scheduleStreamingStatsRefresh() {
+    guard !statsRefreshScheduled else { return }
+    statsRefreshScheduled = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+      guard let self else { return }
+      self.statsRefreshScheduled = false
+      guard self.isStreaming else { return }
+      self.loadStats()
     }
   }
 
@@ -1033,6 +1159,7 @@ final class AppModel: ObservableObject {
     case "agent_end":
       if event["willRetry"] as? Bool != true { flushPendingAssistantError() }
     case "agent_settled":
+      flushPendingMessageDeltas()
       flushConsumedPromptsIntoTranscript()
       flushPendingAssistantError()
       isStreaming = false
@@ -1051,19 +1178,17 @@ final class AppModel: ObservableObject {
       if !isRewritingQueue { reconcileQueue(steering: steering, followUp: followUp) }
     case "message_update":
       handleMessageUpdate(event)
+      // RPC exposes cumulative provider usage on streaming events. Throttle authoritative
+      // stats requests so the context footer follows the stream without one request per token.
+      scheduleStreamingStatsRefresh()
     case "message_end":
       handleMessageEnd(event)
     case "tool_execution_start", "tool_execution_update", "tool_execution_end":
       handleToolEvent(event, type: type)
     case "compaction_start":
-      isCompacting = true
-      statusText = "正在压缩上下文…"
+      handleCompactionStart(event)
     case "compaction_end":
-      isCompacting = false
-      statusText = ""
-      loadStats()
-      refreshSessionMetadata()
-      flushCompactionQueue(willRetry: event["willRetry"] as? Bool ?? false)
+      handleCompactionEnd(event)
     case "auto_retry_start":
       statusText = "请求失败，Pi 正在自动重试…"
     case "auto_retry_end":
@@ -1157,6 +1282,72 @@ final class AppModel: ObservableObject {
     consumedPromptsAwaitingDisplay.removeAll()
   }
 
+  private func handleCompactionStart(_ event: PiRPCClient.JSON) {
+    isCompacting = true
+    statusText = "正在压缩上下文…"
+    let id = UUID().uuidString
+    activeCompactionId = id
+    let model =
+      compactionModelID.flatMap { configuredID in
+        allModels.first { $0.id == configuredID }
+      } ?? selectedModel
+    let reason = Self.compactionReasonLabel(event["reason"] as? String)
+    messages.append(
+      ChatEntry(
+        id: id,
+        kind: .compaction,
+        title: "上下文压缩",
+        text: "正在压缩（\(reason)）…",
+        isRunning: true,
+        modelProvider: model?.provider,
+        modelID: model?.modelId
+      ))
+  }
+
+  private func handleCompactionEnd(_ event: PiRPCClient.JSON) {
+    isCompacting = false
+    statusText = ""
+    let result = event["result"] as? PiRPCClient.JSON
+    let details = result?["details"] as? PiRPCClient.JSON
+    let summary = result?["summary"] as? String
+    let aborted = event["aborted"] as? Bool ?? false
+    let error = event["errorMessage"] as? String
+    let reason = Self.compactionReasonLabel(event["reason"] as? String)
+    let text: String
+    if aborted {
+      text = "压缩已取消（\(reason)）"
+    } else if let error {
+      text = "压缩失败（\(reason)）：\(error)"
+    } else {
+      text = summary ?? "压缩完成（\(reason)）"
+    }
+
+    if let id = activeCompactionId,
+      let index = messages.firstIndex(where: { $0.id == id })
+    {
+      messages[index].text = text
+      messages[index].isRunning = false
+      messages[index].isError = error != nil
+      messages[index].modelProvider =
+        details?["compactionProvider"] as? String ?? messages[index].modelProvider
+      messages[index].modelID =
+        details?["compactionModelId"] as? String ?? messages[index].modelID
+    }
+    activeCompactionId = nil
+    loadStats()
+    refreshSessionMetadata()
+    flushCompactionQueue(willRetry: event["willRetry"] as? Bool ?? false)
+  }
+
+  nonisolated private static func compactionReasonLabel(_ reason: String?) -> String {
+    switch reason {
+    case "manual": "手动"
+    case "threshold": "达到阈值"
+    case "overflow": "上下文溢出"
+    default: reason ?? "未知原因"
+    }
+  }
+
   private func handleMessageUpdate(_ event: PiRPCClient.JSON) {
     guard let deltaEvent = event["assistantMessageEvent"] as? PiRPCClient.JSON,
       let type = deltaEvent["type"] as? String
@@ -1166,9 +1357,18 @@ final class AppModel: ObservableObject {
       let id = activeAssistantId ?? UUID().uuidString
       if activeAssistantId == nil {
         activeAssistantId = id
-        messages.append(ChatEntry(id: id, kind: .assistant, title: "Pi", text: "", isRunning: true))
+        messages.append(
+          ChatEntry(
+            id: id,
+            kind: .assistant,
+            title: "Pi",
+            text: "",
+            isRunning: true,
+            modelProvider: selectedModel?.provider,
+            modelID: selectedModel?.modelId
+          ))
       }
-      append(delta, to: id)
+      enqueueMessageDelta(delta, for: id)
     } else if type == "thinking_delta", let delta = deltaEvent["delta"] as? String {
       let id = activeThinkingId ?? UUID().uuidString
       if activeThinkingId == nil {
@@ -1176,11 +1376,12 @@ final class AppModel: ObservableObject {
         messages.append(
           ChatEntry(id: id, kind: .thinking, title: "思考过程", text: "", isRunning: true))
       }
-      append(delta, to: id)
+      enqueueMessageDelta(delta, for: id)
     }
   }
 
   private func handleMessageEnd(_ event: PiRPCClient.JSON) {
+    flushPendingMessageDeltas()
     guard let message = event["message"] as? PiRPCClient.JSON,
       message["role"] as? String == "assistant"
     else { return }
@@ -1191,12 +1392,23 @@ final class AppModel: ObservableObject {
     {
       flushConsumedPromptsIntoTranscript()
     }
+    let provider = message["provider"] as? String
+    let modelID = message["model"] as? String
     if let id = activeAssistantId, let index = messages.firstIndex(where: { $0.id == id }) {
       if !exactText.isEmpty { messages[index].text = exactText }
       messages[index].isRunning = false
+      messages[index].modelProvider = provider ?? messages[index].modelProvider
+      messages[index].modelID = modelID ?? messages[index].modelID
     } else if !exactText.isEmpty {
       messages.append(
-        ChatEntry(id: UUID().uuidString, kind: .assistant, title: "Pi", text: exactText))
+        ChatEntry(
+          id: UUID().uuidString,
+          kind: .assistant,
+          title: "Pi",
+          text: exactText,
+          modelProvider: provider,
+          modelID: modelID
+        ))
     }
     if let id = activeThinkingId, let index = messages.firstIndex(where: { $0.id == id }) {
       messages[index].isRunning = false
@@ -1210,6 +1422,8 @@ final class AppModel: ObservableObject {
   }
 
   private func handleToolEvent(_ event: PiRPCClient.JSON, type: String) {
+    // Preserve protocol order if a tool starts before the scheduled UI update for the final text.
+    flushPendingMessageDeltas()
     guard let id = event["toolCallId"] as? String else { return }
     let name = event["toolName"] as? String ?? "tool"
     if type == "tool_execution_start" {
@@ -1248,9 +1462,41 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func append(_ text: String, to id: String) {
-    guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-    messages[index].text += text
+  private func enqueueMessageDelta(_ text: String, for id: String) {
+    pendingMessageDeltas[id, default: ""] += text
+    guard !messageDeltaFlushScheduled else { return }
+    messageDeltaFlushScheduled = true
+    messageDeltaFlushGeneration += 1
+    let generation = messageDeltaFlushGeneration
+    // Provider chunks can arrive much faster than SwiftUI can lay out Markdown. Publish at most
+    // about 30 frames per second while retaining every byte and flush synchronously at boundaries.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 30.0) { [weak self] in
+      guard let self, generation == self.messageDeltaFlushGeneration else { return }
+      self.messageDeltaFlushScheduled = false
+      self.flushPendingMessageDeltas()
+    }
+  }
+
+  private func flushPendingMessageDeltas() {
+    guard !pendingMessageDeltas.isEmpty else { return }
+    if messageDeltaFlushScheduled {
+      messageDeltaFlushGeneration += 1
+      messageDeltaFlushScheduled = false
+    }
+    let deltas = pendingMessageDeltas
+    pendingMessageDeltas.removeAll(keepingCapacity: true)
+    var updatedMessages = messages
+    for (id, delta) in deltas {
+      guard let index = updatedMessages.firstIndex(where: { $0.id == id }) else { continue }
+      updatedMessages[index].text += delta
+    }
+    messages = updatedMessages
+  }
+
+  private func discardPendingMessageDeltas() {
+    messageDeltaFlushGeneration += 1
+    messageDeltaFlushScheduled = false
+    pendingMessageDeltas.removeAll(keepingCapacity: true)
   }
 
   private func appendSystemError(_ text: String) {
@@ -1278,18 +1524,78 @@ final class AppModel: ObservableObject {
     diagnosticText = lines.joined(separator: "\n")
   }
 
-  nonisolated private static func loadTranscript(at path: String) -> [ChatEntry] {
+  nonisolated static func loadTranscript(at path: String) -> [ChatEntry] {
     guard let data = FileManager.default.contents(atPath: path),
       let text = String(data: data, encoding: .utf8)
     else { return [] }
-    let messages = text.split(separator: "\n").compactMap { line -> PiRPCClient.JSON? in
-      guard let data = String(line).data(using: .utf8),
-        let record = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
-        record["type"] as? String == "message"
-      else { return nil }
-      return record["message"] as? PiRPCClient.JSON
+    let records = text.split(separator: "\n").compactMap { line -> PiRPCClient.JSON? in
+      guard let data = String(line).data(using: .utf8) else { return nil }
+      return try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON
     }
-    return chatEntries(from: messages)
+
+    // Pi sessions are trees after edits/branching. Follow the latest leaf back to the root so
+    // abandoned branches are not mixed into the visible transcript. Legacy files have no IDs.
+    let indexed = Dictionary(
+      uniqueKeysWithValues: records.compactMap { record -> (String, PiRPCClient.JSON)? in
+        guard let id = record["id"] as? String else { return nil }
+        return (id, record)
+      }
+    )
+    let branchRecords: [PiRPCClient.JSON]
+    if let leafID = records.last?["id"] as? String, !indexed.isEmpty {
+      var branchIDs = Set<String>()
+      var currentID: String? = leafID
+      while let id = currentID, let record = indexed[id], branchIDs.insert(id).inserted {
+        currentID = record["parentId"] as? String
+      }
+      branchRecords = records.filter { record in
+        guard let id = record["id"] as? String else { return false }
+        return branchIDs.contains(id)
+      }
+    } else {
+      branchRecords = records
+    }
+
+    var entries: [ChatEntry] = []
+    var messageBuffer: [PiRPCClient.JSON] = []
+    var currentProvider: String?
+    var currentModelID: String?
+
+    func flushMessages() {
+      entries.append(contentsOf: chatEntries(from: messageBuffer))
+      messageBuffer.removeAll()
+    }
+
+    for record in branchRecords {
+      switch record["type"] as? String {
+      case "model_change":
+        currentProvider = record["provider"] as? String
+        currentModelID = record["modelId"] as? String
+      case "message":
+        guard var message = record["message"] as? PiRPCClient.JSON else { continue }
+        if message["role"] as? String == "assistant" {
+          message["provider"] = message["provider"] ?? currentProvider
+          message["model"] = message["model"] ?? currentModelID
+        }
+        messageBuffer.append(message)
+      case "compaction":
+        flushMessages()
+        let details = record["details"] as? PiRPCClient.JSON
+        entries.append(
+          ChatEntry(
+            id: record["id"] as? String ?? UUID().uuidString,
+            kind: .compaction,
+            title: "上下文压缩",
+            text: record["summary"] as? String ?? "压缩完成",
+            modelProvider: details?["compactionProvider"] as? String ?? currentProvider,
+            modelID: details?["compactionModelId"] as? String ?? currentModelID
+          ))
+      default:
+        continue
+      }
+    }
+    flushMessages()
+    return entries
   }
 
   nonisolated static func chatEntries(
@@ -1353,7 +1659,14 @@ final class AppModel: ObservableObject {
     case "assistant":
       let text = contentText(message["content"])
       if !text.isEmpty {
-        return ChatEntry(id: UUID().uuidString, kind: .assistant, title: "Pi", text: text)
+        return ChatEntry(
+          id: UUID().uuidString,
+          kind: .assistant,
+          title: "Pi",
+          text: text,
+          modelProvider: message["provider"] as? String,
+          modelID: message["model"] as? String
+        )
       }
       if let errorText = assistantErrorText(message) {
         return ChatEntry(

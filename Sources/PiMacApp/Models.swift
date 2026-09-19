@@ -30,6 +30,7 @@ enum ChatEntryKind: Sendable {
   case assistant
   case thinking
   case tool
+  case compaction
   case system
 }
 
@@ -44,6 +45,13 @@ struct ChatEntry: Identifiable, Sendable {
   var toolInput: String? = nil
   var diff: String? = nil
   var attachments: [PromptAttachment] = []
+  var modelProvider: String? = nil
+  var modelID: String? = nil
+
+  var modelLabel: String? {
+    guard let modelID else { return nil }
+    return modelProvider.map { "\(modelID) · \($0)" } ?? modelID
+  }
 }
 
 enum QueuedPromptDelivery: String, Sendable {

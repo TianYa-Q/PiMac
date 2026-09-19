@@ -7,18 +7,24 @@ final class JSONLineDecoder {
   func append(_ data: Data) -> [Data] {
     buffer.append(data)
     var records: [Data] = []
+    var recordStart = buffer.startIndex
 
-    while let newlineIndex = buffer.firstIndex(of: 0x0A) {
-      var record = buffer[..<newlineIndex]
-      if record.last == 0x0D {
-        record = record.dropLast()
+    // Scan the newly completed buffer once. Removing each line from the front would shift the
+    // remaining bytes repeatedly and becomes quadratic when one pipe read contains many events.
+    for newlineIndex in buffer.indices where buffer[newlineIndex] == 0x0A {
+      var recordEnd = newlineIndex
+      if recordEnd > recordStart, buffer[buffer.index(before: recordEnd)] == 0x0D {
+        recordEnd = buffer.index(before: recordEnd)
       }
-      if !record.isEmpty {
-        records.append(Data(record))
+      if recordStart < recordEnd {
+        records.append(Data(buffer[recordStart..<recordEnd]))
       }
-      buffer.removeSubrange(...newlineIndex)
+      recordStart = buffer.index(after: newlineIndex)
     }
 
+    if recordStart > buffer.startIndex {
+      buffer.removeSubrange(buffer.startIndex..<recordStart)
+    }
     return records
   }
 

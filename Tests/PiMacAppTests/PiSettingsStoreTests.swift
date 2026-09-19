@@ -1,4 +1,5 @@
 import Testing
+
 @testable import PiMacApp
 
 @Suite struct PiSettingsStoreTests {
