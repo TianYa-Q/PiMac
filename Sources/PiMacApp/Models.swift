@@ -86,11 +86,30 @@ struct PromptAttachment: Identifiable, Hashable, Sendable {
 }
 
 struct PiModel: Identifiable, Hashable {
+  static let thinkingLevelOrder = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
   let provider: String
   let modelId: String
   let name: String
+  let reasoning: Bool
+  let thinkingLevels: [String]
 
   var id: String { "\(provider)/\(modelId)" }
+
+  init(
+    provider: String,
+    modelId: String,
+    name: String,
+    reasoning: Bool = false,
+    thinkingLevels: [String]? = nil
+  ) {
+    self.provider = provider
+    self.modelId = modelId
+    self.name = name
+    self.reasoning = reasoning
+    self.thinkingLevels =
+      thinkingLevels ?? (reasoning ? Array(Self.thinkingLevelOrder.prefix(5)) : ["off"])
+  }
 }
 
 struct SessionStats {

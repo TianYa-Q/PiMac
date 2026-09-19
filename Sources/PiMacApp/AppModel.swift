@@ -9,7 +9,10 @@ final class AppModel: ObservableObject {
   @Published var connectionState: ConnectionState = .disconnected
   @Published var projectURL: URL?
   @Published var messages: [ChatEntry] = []
+  /// Models shown in the composer. `allModels` also contains models hidden by Pi's enabledModels setting.
   @Published var models: [PiModel] = []
+  @Published var allModels: [PiModel] = []
+  @Published var modelDefaultThinkingLevels: [String: String] = [:]
   @Published var selectedModelId = ""
   @Published var thinkingLevels = ["off"]
   @Published var selectedThinkingLevel = "off"
@@ -40,6 +43,7 @@ final class AppModel: ObservableObject {
   private var pendingAssistantError: String?
   private var queueSnapshotGeneration = 0
   private var latestQueueSnapshot: (steering: [String], followUp: [String])?
+  private var thinkingConfigurationGeneration = 0
 
   var piPath: String {
     get { UserDefaults.standard.string(forKey: "piPath") ?? Self.suggestedPiPath() }
@@ -585,25 +589,70 @@ final class AppModel: ObservableObject {
   }
 
   func changeModel(to id: String) {
-    guard id != selectedModelId, let model = models.first(where: { $0.id == id }) else { return }
+    guard id != selectedModelId, let model = allModels.first(where: { $0.id == id }) else { return }
     client.request(["type": "set_model", "provider": model.provider, "modelId": model.modelId]) {
       [weak self] result in
       switch result {
       case .success:
-        self?.selectedModelId = id
-        self?.loadThinkingLevels()
+        guard let self else { return }
+        self.selectedModelId = id
+        // The RPC process may have started before the settings sheet changed the file.
+        // Apply the saved per-model default explicitly so it also works in this process.
+        if let defaultLevel = self.modelDefaultThinkingLevels[id],
+          model.thinkingLevels.contains(defaultLevel)
+        {
+          self.client.request(["type": "set_thinking_level", "level": defaultLevel]) {
+            [weak self] result in
+            if case .failure(let error) = result {
+              self?.appendSystemError(error.localizedDescription)
+            }
+            self?.synchronizeThinkingConfiguration(expectedModelID: id)
+          }
+        } else {
+          self.synchronizeThinkingConfiguration(expectedModelID: id)
+        }
       case .failure(let error): self?.appendSystemError(error.localizedDescription)
       }
     }
   }
 
   func changeThinkingLevel(to level: String) {
-    guard level != selectedThinkingLevel else { return }
+    guard level != selectedThinkingLevel, thinkingLevels.contains(level) else { return }
     client.request(["type": "set_thinking_level", "level": level]) { [weak self] result in
       switch result {
-      case .success: self?.selectedThinkingLevel = level
+      case .success:
+        // Pi may clamp a requested value to model capabilities. get_state is authoritative.
+        self?.synchronizeThinkingConfiguration(expectedModelID: self?.selectedModelId)
       case .failure(let error): self?.appendSystemError(error.localizedDescription)
       }
+    }
+  }
+
+  func setModelVisible(_ visible: Bool, modelID: String) {
+    var visibleIDs = Set(models.map(\.id))
+    if visible { visibleIDs.insert(modelID) } else { visibleIDs.remove(modelID) }
+    guard !visibleIDs.isEmpty else {
+      statusText = "至少需要保留一个可见模型"
+      return
+    }
+    do {
+      let orderedIDs = allModels.map(\.id).filter { visibleIDs.contains($0) }
+      try PiSettingsStore.setEnabledModelIDs(orderedIDs)
+      applyModelPreferences()
+    } catch {
+      appendSystemError("保存模型显示设置失败：\(error.localizedDescription)")
+    }
+  }
+
+  func setDefaultThinkingLevel(_ level: String?, for modelID: String) {
+    do {
+      try PiSettingsStore.setThinkingLevel(level, for: modelID)
+      applyModelPreferences()
+      if modelID == selectedModelId {
+        statusText = "默认值将在下次切换到该模型或新建会话时生效"
+      }
+    } catch {
+      appendSystemError("保存模型默认思考等级失败：\(error.localizedDescription)")
     }
   }
 
@@ -746,15 +795,30 @@ final class AppModel: ObservableObject {
           self.appendSystemError("Pi 返回的模型数据格式不正确")
           return
         }
-        self.models = rawModels.compactMap { raw in
+        self.allModels = rawModels.compactMap { raw in
           guard let provider = raw["provider"] as? String,
             let id = raw["id"] as? String
           else { return nil }
-          return PiModel(provider: provider, modelId: id, name: raw["name"] as? String ?? id)
+          let reasoning = raw["reasoning"] as? Bool ?? false
+          let levelMap = raw["thinkingLevelMap"] as? PiRPCClient.JSON
+          let levels = PiModel.thinkingLevelOrder.filter { level in
+            if level == "xhigh" || level == "max" {
+              return levelMap?[level] != nil && !(levelMap?[level] is NSNull)
+            }
+            return reasoning && !(levelMap?[level] is NSNull)
+          }
+          return PiModel(
+            provider: provider,
+            modelId: id,
+            name: raw["name"] as? String ?? id,
+            reasoning: reasoning,
+            thinkingLevels: reasoning ? levels : ["off"]
+          )
         }
+        self.applyModelPreferences()
         self.isLoadingConfiguration = false
         self.statusText = ""
-        if self.models.isEmpty {
+        if self.allModels.isEmpty {
           self.appendSystemError("Pi 没有可用模型，请先检查 ~/.pi/agent 的登录配置")
         }
       }
@@ -762,21 +826,58 @@ final class AppModel: ObservableObject {
   }
 
   private func loadThinkingLevels() {
-    client.request(["type": "get_available_thinking_levels"]) { [weak self] result in
-      guard let self else { return }
-      switch result {
-      case .failure(let error):
-        self.appendSystemError("读取推理强度失败：\(error.localizedDescription)")
-      case .success(let response):
-        guard let data = response["data"] as? PiRPCClient.JSON,
-          let levels = data["levels"] as? [String], !levels.isEmpty
-        else {
-          self.appendSystemError("Pi 返回的推理强度数据格式不正确")
-          return
+    // Session switches can change the model, so no previously selected ID is authoritative here.
+    synchronizeThinkingConfiguration(expectedModelID: nil)
+  }
+
+  private func synchronizeThinkingConfiguration(expectedModelID: String?) {
+    thinkingConfigurationGeneration += 1
+    let generation = thinkingConfigurationGeneration
+    client.request(["type": "get_state"]) { [weak self] stateResult in
+      guard let self, generation == self.thinkingConfigurationGeneration else { return }
+      guard case .success(let stateResponse) = stateResult,
+        let state = stateResponse["data"] as? PiRPCClient.JSON
+      else {
+        if case .failure(let error) = stateResult {
+          self.appendSystemError("读取思考等级失败：\(error.localizedDescription)")
         }
-        self.thinkingLevels = levels
+        return
+      }
+      if let model = state["model"] as? PiRPCClient.JSON,
+        let provider = model["provider"] as? String,
+        let modelID = model["id"] as? String
+      {
+        let actualID = "\(provider)/\(modelID)"
+        guard expectedModelID == nil || expectedModelID == actualID else { return }
+        self.selectedModelId = actualID
+      }
+      self.selectedThinkingLevel = state["thinkingLevel"] as? String ?? "off"
+
+      self.client.request(["type": "get_available_thinking_levels"]) { [weak self] result in
+        guard let self, generation == self.thinkingConfigurationGeneration else { return }
+        switch result {
+        case .failure(let error):
+          self.appendSystemError("读取推理强度失败：\(error.localizedDescription)")
+        case .success(let response):
+          guard let data = response["data"] as? PiRPCClient.JSON,
+            let levels = data["levels"] as? [String], !levels.isEmpty
+          else {
+            self.appendSystemError("Pi 返回的推理强度数据格式不正确")
+            return
+          }
+          self.thinkingLevels = levels
+          if !levels.contains(self.selectedThinkingLevel) {
+            self.selectedThinkingLevel = levels.first ?? "off"
+          }
+        }
       }
     }
+  }
+
+  private func applyModelPreferences() {
+    let preferences = PiSettingsStore.loadModelPreferences()
+    modelDefaultThinkingLevels = preferences.thinkingLevels
+    models = allModels.filter(preferences.includes)
   }
 
   private func loadStats() {
@@ -940,6 +1041,8 @@ final class AppModel: ObservableObject {
       statusText = ""
       loadStats()
       refreshSessionMetadata()
+    case "thinking_level_changed":
+      if let level = event["level"] as? String { selectedThinkingLevel = level }
     case "queue_update":
       let steering = event["steering"] as? [String] ?? []
       let followUp = event["followUp"] as? [String] ?? []

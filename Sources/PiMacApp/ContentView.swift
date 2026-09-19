@@ -2,6 +2,21 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+private func thinkingLevelLabel(_ level: String) -> String {
+  let chinese: String
+  switch level {
+  case "off": chinese = "不思考"
+  case "minimal": chinese = "最简"
+  case "low": chinese = "低"
+  case "medium": chinese = "中等"
+  case "high": chinese = "高"
+  case "xhigh": chinese = "超高"
+  case "max": chinese = "最大"
+  default: chinese = level
+  }
+  return chinese == level ? level : "\(chinese) · \(level)"
+}
+
 private func isWhitespace(in text: NSString, before location: Int) -> Bool {
   guard location > 0, let scalar = UnicodeScalar(text.character(at: location - 1)) else {
     return false
@@ -142,6 +157,7 @@ struct ContentView: View {
   @State private var choosingSession = false
   @State private var choosingAttachments = false
   @State private var showingSettings = false
+  @State private var showingModelSettings = false
   @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
   @State private var composerSelection = NSRange(location: 0, length: 0)
@@ -151,6 +167,7 @@ struct ContentView: View {
   @State private var initialSessionScrollPending = true
   @State private var initialScrollGeneration = 0
   @State private var conversationBottomIsVisible = false
+  @State private var visibleConversationTurnCount = 20
   @State private var visibleSessionCount = 10
   @State private var hoveredSessionPath: String?
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
@@ -188,6 +205,10 @@ struct ContentView: View {
     .sheet(isPresented: $showingSettings) {
       SettingsView(path: app.piPath, projectURL: app.projectURL) { app.piPath = $0 }
     }
+    .sheet(isPresented: $showingModelSettings) {
+      ModelSettingsView()
+        .environmentObject(app)
+    }
     .sheet(item: $previewedAttachment) { attachment in
       ImageAttachmentPreview(attachment: attachment)
     }
@@ -211,6 +232,7 @@ struct ContentView: View {
       initialSessionScrollPending = true
       initialScrollGeneration += 1
       conversationBottomIsVisible = false
+      visibleConversationTurnCount = 20
       previewedAttachment = nil
     }
   }
@@ -618,37 +640,37 @@ struct ContentView: View {
   }
 
   private var conversation: some View {
-    GeometryReader { viewport in
+    let turns = conversationTurns
+    let visibleTurns = Array(turns.suffix(visibleConversationTurnCount))
+
+    return GeometryReader { viewport in
       ScrollViewReader { proxy in
         ScrollView {
-          // LazyVStack 在工具详情折叠导致高度骤变时，macOS 偶尔会保留失效的
-          // 可视区域并显示白屏。普通 VStack 保持布局连续，完成任务后无需滚动恢复。
-          VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-              if app.messages.isEmpty {
-                ContentUnavailableView(
-                  "开始和 Pi 对话",
-                  systemImage: "bubble.left.and.bubble.right",
-                  description: Text("Pi 可以读取、编辑文件并执行项目命令。")
-                )
-                .frame(maxWidth: .infinity, minHeight: 360)
-              }
-              ForEach(conversationTurns) { turn in
-                ConversationTurnView(
-                  turn: turn,
-                  isActive: app.isStreaming && turn.id == conversationTurns.last?.id,
-                  onEdit: { text in
-                    app.editMessage(text)
-                    composerFocused = true
-                  }
-                )
-                .id(turn.id)
-              }
+          // LazyVStack on macOS 14 can lose its visible layout when a streaming row repeatedly
+          // changes height, leaving the transcript white. Keep a bounded regular VStack: it is
+          // stable during streaming while old turns are opt-in, so long sessions stay cheap.
+          VStack(alignment: .leading, spacing: 14) {
+            if app.messages.isEmpty {
+              ContentUnavailableView(
+                "开始和 Pi 对话",
+                systemImage: "bubble.left.and.bubble.right",
+                description: Text("Pi 可以读取、编辑文件并执行项目命令。")
+              )
+              .frame(maxWidth: .infinity, minHeight: 360)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(visibleTurns) { turn in
+              ConversationTurnView(
+                turn: turn,
+                isActive: app.isStreaming && turn.id == turns.last?.id,
+                onEdit: { text in
+                  app.editMessage(text)
+                  composerFocused = true
+                }
+              )
+              .id(turn.id)
+            }
 
-            // 这个 footer 同时定义固定留白和滚动内容的真实底边。锚点位于
-            // footer 底部，因此滚到底后既保留间距，也不存在可继续下滚的区域。
+            // The footer is the real content edge as well as the auto-scroll anchor.
             Color.clear
               .frame(height: ConversationLayout.contentInset)
               .id(ConversationLayout.bottomAnchorID)
@@ -661,6 +683,7 @@ struct ContentView: View {
                 }
               }
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
           .padding(.horizontal, ConversationLayout.contentInset)
           .padding(.top, ConversationLayout.contentInset)
           .background {
@@ -670,6 +693,28 @@ struct ContentView: View {
         }
         .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
+        .overlay(alignment: .top) {
+          if visibleTurns.count < turns.count {
+            Button {
+              visibleConversationTurnCount = min(
+                visibleConversationTurnCount + 20,
+                turns.count
+              )
+            } label: {
+              Label(
+                "载入更早的对话（还有 \(turns.count - visibleTurns.count) 轮）",
+                systemImage: "chevron.up"
+              )
+              .font(.caption.weight(.medium))
+              .padding(.horizontal, 12)
+              .padding(.vertical, 7)
+              .background(.regularMaterial, in: Capsule())
+              .shadow(color: .black.opacity(0.12), radius: 5, y: 2)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 8)
+          }
+        }
         // 让长会话在首帧布局时就以底部为基准，避免先显示靠上的位置，
         // 再等待延迟校正滚到底部。后续显式滚动仍用于 Markdown 高度变化。
         .defaultScrollAnchor(.bottom)
@@ -707,6 +752,7 @@ struct ContentView: View {
           )
         }
         .onChange(of: app.currentSessionPath) {
+          visibleConversationTurnCount = 20
           initialSessionScrollPending = true
           conversationBottomIsVisible = false
           scheduleInitialSessionScroll(proxy)
@@ -1055,11 +1101,16 @@ struct ContentView: View {
             Text("\(model.name) · \(model.provider)")
           }
         }
+        .disabled(app.isBusy)
+      }
+      Divider()
+      Button("管理模型与默认思考等级…", systemImage: "slider.horizontal.3") {
+        showingModelSettings = true
       }
     } label: {
       HStack(spacing: 4) {
         Image(systemName: "sparkles")
-        Text(app.models.first(where: { $0.id == app.selectedModelId })?.name ?? "选择模型")
+        Text(app.allModels.first(where: { $0.id == app.selectedModelId })?.name ?? "选择模型")
           .lineLimit(1)
         Image(systemName: "chevron.down").font(.caption2)
       }
@@ -1067,7 +1118,7 @@ struct ContentView: View {
     }
     .menuStyle(.borderlessButton)
     .fixedSize()
-    .disabled(app.isBusy || app.models.isEmpty)
+    .disabled(app.allModels.isEmpty)
   }
 
   private var sessionControls: some View {
@@ -1112,16 +1163,16 @@ struct ContentView: View {
           app.changeThinkingLevel(to: level)
         } label: {
           if level == app.selectedThinkingLevel {
-            Label(thinkingLabel(level), systemImage: "checkmark")
+            Label(thinkingLevelLabel(level), systemImage: "checkmark")
           } else {
-            Text(thinkingLabel(level))
+            Text(thinkingLevelLabel(level))
           }
         }
       }
     } label: {
       HStack(spacing: 4) {
         Image(systemName: "brain.head.profile")
-        Text(thinkingLabel(app.selectedThinkingLevel))
+        Text(thinkingLevelLabel(app.selectedThinkingLevel))
         Image(systemName: "chevron.down").font(.caption2)
       }
       .font(.caption)
@@ -1131,18 +1182,6 @@ struct ContentView: View {
     .disabled(app.isBusy)
   }
 
-  private func thinkingLabel(_ level: String) -> String {
-    switch level {
-    case "off": "不思考"
-    case "minimal": "最简思考"
-    case "low": "低思考"
-    case "medium": "中等思考"
-    case "high": "高思考"
-    case "xhigh": "超高思考"
-    case "max": "最大思考"
-    default: level
-    }
-  }
 }
 
 private struct ComposerTextView: NSViewRepresentable {
@@ -2121,6 +2160,90 @@ private struct ImageAttachmentPreview: View {
       }
     }
     .frame(minWidth: 640, idealWidth: 900, minHeight: 480, idealHeight: 680)
+  }
+}
+
+private struct ModelSettingsView: View {
+  @Environment(\.dismiss) private var dismiss
+  @EnvironmentObject private var app: AppModel
+
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack {
+        VStack(alignment: .leading, spacing: 3) {
+          Text("模型与思考等级").font(.title2.bold())
+          Text("显示设置写入 Pi 的 enabledModels；默认等级写入 modelThinkingLevels。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        Button("完成") { dismiss() }
+          .buttonStyle(.borderedProminent)
+      }
+      .padding(20)
+
+      Divider()
+
+      ScrollView {
+        LazyVStack(spacing: 0) {
+          ForEach(app.allModels) { model in
+            modelRow(model)
+            Divider()
+          }
+        }
+        .padding(.horizontal, 20)
+      }
+    }
+    .frame(width: 700, height: 560)
+  }
+
+  private func modelRow(_ model: PiModel) -> some View {
+    HStack(spacing: 14) {
+      Toggle(
+        "",
+        isOn: Binding(
+          get: { app.models.contains(where: { $0.id == model.id }) },
+          set: { app.setModelVisible($0, modelID: model.id) }
+        )
+      )
+      .labelsHidden()
+      .toggleStyle(.switch)
+      .controlSize(.small)
+
+      VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 6) {
+          Text(model.name).font(.callout.weight(.medium))
+          if model.id == app.selectedModelId {
+            Text("当前")
+              .font(.caption2)
+              .foregroundStyle(Color.accentColor)
+          }
+        }
+        Text(model.id)
+          .font(.caption.monospaced())
+          .foregroundStyle(.secondary)
+      }
+
+      Spacer()
+
+      Picker(
+        "默认思考等级",
+        selection: Binding(
+          get: { app.modelDefaultThinkingLevels[model.id] ?? "__global__" },
+          set: { value in
+            app.setDefaultThinkingLevel(value == "__global__" ? nil : value, for: model.id)
+          }
+        )
+      ) {
+        Text("跟随全局 · Global").tag("__global__")
+        ForEach(model.thinkingLevels, id: \.self) { level in
+          Text(thinkingLevelLabel(level)).tag(level)
+        }
+      }
+      .labelsHidden()
+      .frame(width: 175)
+    }
+    .padding(.vertical, 11)
   }
 }
 

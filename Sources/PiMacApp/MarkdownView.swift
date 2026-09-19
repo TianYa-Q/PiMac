@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 /// Lightweight GitHub-flavoured Markdown block parser used by chat messages.
@@ -314,11 +315,33 @@ enum MarkdownParser {
   }
 }
 
+private final class MarkdownDocumentBox {
+  let value: MarkdownDocument
+  init(_ value: MarkdownDocument) { self.value = value }
+}
+
+private enum MarkdownDocumentCache {
+  static let cache: NSCache<NSString, MarkdownDocumentBox> = {
+    let cache = NSCache<NSString, MarkdownDocumentBox>()
+    cache.countLimit = 256
+    cache.totalCostLimit = 8 * 1_024 * 1_024
+    return cache
+  }()
+
+  static func document(for source: String) -> MarkdownDocument {
+    let key = source as NSString
+    if let cached = cache.object(forKey: key) { return cached.value }
+    let document = MarkdownDocument(source)
+    cache.setObject(MarkdownDocumentBox(document), forKey: key, cost: source.utf8.count)
+    return document
+  }
+}
+
 struct MarkdownView: View {
   let document: MarkdownDocument
 
   init(_ source: String) {
-    document = MarkdownDocument(source)
+    document = MarkdownDocumentCache.document(for: source)
   }
 
   var body: some View {
