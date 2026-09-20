@@ -599,6 +599,7 @@ struct ContentView: View {
           Text("\(stats.totalTokens.formatted()) tokens")
           Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文统计等待更新")
             .foregroundStyle(contextUsageColor(stats.contextPercent))
+          Text(stats.cacheHitPercent.map { "缓存命中 \(Int($0.rounded()))%" } ?? "缓存命中 --")
           Text(stats.cost, format: .currency(code: "USD"))
         }
         .font(.caption)
@@ -1129,6 +1130,7 @@ struct ContentView: View {
           Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文 --")
             .foregroundStyle(contextUsageColor(stats.contextPercent))
           Text("\(stats.totalTokens.formatted()) tokens")
+          Text(stats.cacheHitPercent.map { "缓存命中 \(Int($0.rounded()))%" } ?? "缓存命中 --")
           Text(stats.cost, format: .currency(code: "USD"))
         }
         .font(.caption)

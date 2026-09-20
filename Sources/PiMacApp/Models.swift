@@ -124,6 +124,15 @@ struct SessionStats {
   let cost: Double
   let contextPercent: Double?
   let totalTokens: Int
+  let inputTokens: Int
+  let cacheReadTokens: Int
+  let cacheWriteTokens: Int
+
+  var cacheHitPercent: Double? {
+    let promptTokens = inputTokens + cacheReadTokens + cacheWriteTokens
+    guard promptTokens > 0 else { return nil }
+    return Double(cacheReadTokens) / Double(promptTokens) * 100
+  }
 }
 
 struct CodexUsageWindow: Hashable {

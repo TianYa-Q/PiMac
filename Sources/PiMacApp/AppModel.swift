@@ -1005,7 +1005,10 @@ final class AppModel: ObservableObject {
       self?.stats = SessionStats(
         cost: data["cost"] as? Double ?? 0,
         contextPercent: context?["percent"] as? Double,
-        totalTokens: tokens?["total"] as? Int ?? 0
+        totalTokens: tokens?["total"] as? Int ?? 0,
+        inputTokens: tokens?["input"] as? Int ?? 0,
+        cacheReadTokens: tokens?["cacheRead"] as? Int ?? 0,
+        cacheWriteTokens: tokens?["cacheWrite"] as? Int ?? 0
       )
     }
   }
