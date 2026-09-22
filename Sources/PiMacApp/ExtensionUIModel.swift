@@ -197,6 +197,7 @@ final class ExtensionUIModel: ObservableObject {
         isHidden: raw["hidden"] as? Bool ?? false,
         primary: Self.codexWindow(from: raw["primary"]),
         secondary: Self.codexWindow(from: raw["secondary"]),
+        resetCredits: Self.codexResetCredits(from: raw["resetCredits"]),
         error: raw["error"] as? String
       )
     }.sorted {
@@ -291,6 +292,7 @@ final class ExtensionUIModel: ObservableObject {
         isHidden: account.isHidden,
         primary: account.primary,
         secondary: account.secondary,
+        resetCredits: account.resetCredits,
         error: account.error
       )
     }.sorted {
@@ -323,6 +325,19 @@ final class ExtensionUIModel: ObservableObject {
       resetAt: resetAt,
       windowSeconds: raw["windowSeconds"] as? Double
     )
+  }
+
+  nonisolated private static func codexResetCredits(from value: Any?) -> CodexResetCredits? {
+    guard let raw = value as? PiRPCClient.JSON,
+      let availableCount = (raw["availableCount"] as? NSNumber)?.intValue,
+      availableCount > 0
+    else { return nil }
+    let expirations = (raw["credits"] as? [PiRPCClient.JSON] ?? []).compactMap {
+      ($0["expiresAt"] as? NSNumber).map {
+        Date(timeIntervalSince1970: $0.doubleValue)
+      }
+    }.sorted()
+    return CodexResetCredits(availableCount: availableCount, expirations: expirations)
   }
 
   nonisolated private static func removingANSIEscapes(_ text: String) -> String {

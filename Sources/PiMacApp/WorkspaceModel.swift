@@ -10,12 +10,17 @@ struct WorkspaceProject: Identifiable, Hashable {
 
 @MainActor
 final class WorkspaceModel: ObservableObject {
+  private struct ComposerDraft: Codable {
+    let sessionPath: String?
+    let text: String
+  }
+
   struct Tab: Identifiable {
     let id: UUID
     let model: AppModel
-    let requestedSessionPath: String?
-    let createdAt: Date
-    let isDraft: Bool
+    var requestedSessionPath: String?
+    var createdAt: Date
+    var isDraft: Bool
   }
 
   @Published private(set) var tabs: [Tab] = []
@@ -28,13 +33,16 @@ final class WorkspaceModel: ObservableObject {
   private static let activeProjectKey = "workspaceActiveProjectPath"
   private static let archivedSessionsKey = "workspaceArchivedSessionPaths"
   private static let sessionCatalogsKey = "workspaceSessionCatalogs"
+  private static let composerDraftsKey = "workspaceComposerDrafts"
   private static let maximumLiveProcesses = 4
   private static let idleProcessLifetime: Duration = .seconds(10 * 60)
   private var observations: [UUID: AnyCancellable] = [:]
   private var streamingObservations: [UUID: AnyCancellable] = [:]
   private var sessionObservations: [UUID: AnyCancellable] = [:]
+  private var composerDraftObservations: [UUID: AnyCancellable] = [:]
   private var selectedTabByProject: [String: UUID] = [:]
   private var sessionCatalogs: [String: [SessionItem]]
+  private var composerDrafts: [String: ComposerDraft]
   private var sessionCatalogGenerations: [String: UUID] = [:]
   private var lastUsedAt: [UUID: Date] = [:]
   private var idleProcessTasks: [UUID: Task<Void, Never>] = [:]
@@ -44,6 +52,7 @@ final class WorkspaceModel: ObservableObject {
     let defaults = UserDefaults.standard
     archivedSessionPaths = Set(defaults.stringArray(forKey: Self.archivedSessionsKey) ?? [])
     sessionCatalogs = Self.readSessionCatalogs(from: defaults)
+    composerDrafts = Self.readComposerDrafts(from: defaults)
     let savedPaths = defaults.stringArray(forKey: Self.savedProjectsKey) ?? []
     let fallbackPath = defaults.string(forKey: "lastProjectPath")
     let paths = savedPaths.isEmpty ? fallbackPath.map { [$0] } ?? [] : savedPaths
@@ -52,7 +61,11 @@ final class WorkspaceModel: ObservableObject {
     let activePath = defaults.string(forKey: Self.activeProjectKey)
     if let project = projects.first(where: { $0.id == activePath }) ?? projects.first {
       addTab(
-        model: AppModel(startupProjectURL: project.url, continueLastSession: true),
+        model: AppModel(
+          startupProjectURL: project.url,
+          continueLastSession: true,
+          initialComposerText: composerDrafts[project.id]?.text ?? ""
+        ),
         requestedSessionPath: nil,
         isDraft: false
       )
@@ -100,7 +113,11 @@ final class WorkspaceModel: ObservableObject {
     }
     discardSelectedDraftIfEmpty()
     addTab(
-      model: AppModel(startupProjectURL: project.url, continueLastSession: true),
+      model: AppModel(
+        startupProjectURL: project.url,
+        continueLastSession: true,
+        initialComposerText: composerDrafts[project.id]?.text ?? ""
+      ),
       requestedSessionPath: nil,
       isDraft: false
     )
@@ -117,6 +134,7 @@ final class WorkspaceModel: ObservableObject {
       observations.removeValue(forKey: tab.id)
       streamingObservations.removeValue(forKey: tab.id)
       sessionObservations.removeValue(forKey: tab.id)
+      composerDraftObservations.removeValue(forKey: tab.id)
       idleProcessTasks.removeValue(forKey: tab.id)?.cancel()
       lastUsedAt.removeValue(forKey: tab.id)
     }
@@ -124,6 +142,8 @@ final class WorkspaceModel: ObservableObject {
     projects.removeAll { $0.id == project.id }
     selectedTabByProject.removeValue(forKey: project.id)
     sessionCatalogs.removeValue(forKey: project.id)
+    composerDrafts.removeValue(forKey: project.id)
+    persistComposerDrafts()
     sessionCatalogGenerations.removeValue(forKey: project.id)
     loadingSessionCatalogs.remove(project.id)
     persistProjects()
@@ -139,6 +159,49 @@ final class WorkspaceModel: ObservableObject {
   }
 
   func newSession(in projectURL: URL) {
+    let projectPath = projectURL.standardizedFileURL.path
+    if let selectedIndex = tabs.firstIndex(where: { $0.id == selectedTabID }),
+      tabs[selectedIndex].model.projectURL?.standardizedFileURL.path == projectPath
+    {
+      let tab = tabs[selectedIndex]
+      // Clicking New again on an untouched draft should not throw away a warm process just to
+      // create an equivalent draft.
+      if tab.isDraft, !tab.model.hasUserMessage, !tab.model.hasUnsubmittedInput,
+        !tab.model.isBusy
+      {
+        selectTab(tab.id)
+        return
+      }
+      // An idle RPC process can replace its active session in place. Busy sessions still get a
+      // separate process so background work remains genuinely concurrent.
+      if tab.model.isProcessRunning, !tab.model.isBusy, tab.model.queuedPrompts.isEmpty,
+        !extensionUI.hasPendingRequests(from: tab.model)
+      {
+        // Change the workspace selection state before waiting for Pi's new_session reply. AppModel
+        // also clears its visible transcript optimistically, so New Task opens on this run loop.
+        let previousRequestedPath = tab.requestedSessionPath
+        let previousCreatedAt = tab.createdAt
+        let previousIsDraft = tab.isDraft
+        tabs[selectedIndex].requestedSessionPath = nil
+        tabs[selectedIndex].createdAt = .now
+        tabs[selectedIndex].isDraft = true
+        lastUsedAt[tab.id] = .now
+
+        tab.model.newSession { [weak self, weak model = tab.model] created in
+          guard let self, let model,
+            let index = self.tabs.firstIndex(where: { $0.model === model })
+          else { return }
+          if !created {
+            self.tabs[index].requestedSessionPath = previousRequestedPath
+            self.tabs[index].createdAt = previousCreatedAt
+            self.tabs[index].isDraft = previousIsDraft
+          }
+          self.lastUsedAt[self.tabs[index].id] = .now
+        }
+        return
+      }
+    }
+
     discardSelectedDraftIfEmpty()
     addTab(
       model: AppModel(startupProjectURL: projectURL, continueLastSession: false),
@@ -157,11 +220,14 @@ final class WorkspaceModel: ObservableObject {
       return
     }
     discardSelectedDraftIfEmpty()
+    let projectPath = projectURL.standardizedFileURL.path
+    let savedDraft = composerDrafts[projectPath]
     addTab(
       model: AppModel(
         startupProjectURL: projectURL,
         continueLastSession: false,
-        startupSessionPath: path
+        startupSessionPath: path,
+        initialComposerText: savedDraft?.sessionPath == path ? savedDraft?.text ?? "" : ""
       ),
       requestedSessionPath: path,
       isDraft: false
@@ -224,6 +290,7 @@ final class WorkspaceModel: ObservableObject {
       observations.removeValue(forKey: tab.id)
       streamingObservations.removeValue(forKey: tab.id)
       sessionObservations.removeValue(forKey: tab.id)
+      composerDraftObservations.removeValue(forKey: tab.id)
       idleProcessTasks.removeValue(forKey: tab.id)?.cancel()
       lastUsedAt.removeValue(forKey: tab.id)
       tab.model.disconnect()
@@ -302,6 +369,15 @@ final class WorkspaceModel: ObservableObject {
           self.updateSessionCatalog(sessions, for: projectURL)
         }
       }
+    composerDraftObservations[tab.id] = Publishers.CombineLatest(
+      model.$composerText, model.$currentSessionPath
+    )
+    .dropFirst()
+    .sink { [weak self] _, _ in
+      MainActor.assumeIsolated {
+        self?.persistComposerDraft(for: tab.id)
+      }
+    }
     selectTab(tab.id)
   }
 
@@ -310,6 +386,7 @@ final class WorkspaceModel: ObservableObject {
     if id != previousID { discardSelectedDraftIfEmpty(except: id) }
     selectedTabID = id
     guard let selected = tabs.first(where: { $0.id == id }) else { return }
+    persistComposerDraft(for: id)
 
     idleProcessTasks.removeValue(forKey: id)?.cancel()
     lastUsedAt[id] = .now
@@ -393,6 +470,7 @@ final class WorkspaceModel: ObservableObject {
     observations.removeValue(forKey: id)
     streamingObservations.removeValue(forKey: id)
     sessionObservations.removeValue(forKey: id)
+    composerDraftObservations.removeValue(forKey: id)
     idleProcessTasks.removeValue(forKey: id)?.cancel()
     lastUsedAt.removeValue(forKey: id)
     tab.model.discardEmptyDraft()
@@ -452,6 +530,28 @@ final class WorkspaceModel: ObservableObject {
     UserDefaults.standard.set(data, forKey: Self.sessionCatalogsKey)
   }
 
+  private func persistComposerDraft(for tabID: UUID) {
+    guard tabID == selectedTabID,
+      let tab = tabs.first(where: { $0.id == tabID }),
+      let projectPath = tab.model.projectURL?.standardizedFileURL.path
+    else { return }
+
+    let text = tab.model.composerText
+    if text.isEmpty {
+      composerDrafts.removeValue(forKey: projectPath)
+    } else {
+      let currentPath = tab.model.currentSessionPath
+      let sessionPath = tab.requestedSessionPath ?? (currentPath.isEmpty ? nil : currentPath)
+      composerDrafts[projectPath] = ComposerDraft(sessionPath: sessionPath, text: text)
+    }
+    persistComposerDrafts()
+  }
+
+  private func persistComposerDrafts() {
+    guard let data = try? JSONEncoder().encode(composerDrafts) else { return }
+    UserDefaults.standard.set(data, forKey: Self.composerDraftsKey)
+  }
+
   private func persistArchivedSessions() {
     UserDefaults.standard.set(Array(archivedSessionPaths), forKey: Self.archivedSessionsKey)
   }
@@ -463,6 +563,15 @@ final class WorkspaceModel: ObservableObject {
       let catalogs = try? JSONDecoder().decode([String: [SessionItem]].self, from: data)
     else { return [:] }
     return catalogs
+  }
+
+  private static func readComposerDrafts(
+    from defaults: UserDefaults
+  ) -> [String: ComposerDraft] {
+    guard let data = defaults.data(forKey: composerDraftsKey),
+      let drafts = try? JSONDecoder().decode([String: ComposerDraft].self, from: data)
+    else { return [:] }
+    return drafts
   }
 
   nonisolated private static func validProject(path: String) -> WorkspaceProject? {

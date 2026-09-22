@@ -25,7 +25,7 @@ enum ConnectionState: Equatable {
   }
 }
 
-enum ChatEntryKind: Sendable {
+enum ChatEntryKind: Equatable, Sendable {
   case user
   case assistant
   case thinking
@@ -34,7 +34,7 @@ enum ChatEntryKind: Sendable {
   case system
 }
 
-struct ChatEntry: Identifiable, Sendable {
+struct ChatEntry: Identifiable, Equatable, Sendable {
   let id: String
   var kind: ChatEntryKind
   var title: String
@@ -156,6 +156,11 @@ struct GeminiUsageStatus: Hashable {
   let error: String?
 }
 
+struct CodexResetCredits: Hashable {
+  let availableCount: Int
+  let expirations: [Date]
+}
+
 struct CodexAccountStatus: Identifiable, Hashable {
   let name: String
   let isActive: Bool
@@ -163,6 +168,7 @@ struct CodexAccountStatus: Identifiable, Hashable {
   let isHidden: Bool
   let primary: CodexUsageWindow?
   let secondary: CodexUsageWindow?
+  let resetCredits: CodexResetCredits?
   let error: String?
 
   var id: String { name }

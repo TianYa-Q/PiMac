@@ -14,8 +14,9 @@ final class PiRPCClient {
   private var errorHandle: FileHandle?
   private var pendingResponses: [String: (Result<JSON, Error>) -> Void] = [:]
   private let readQueue = DispatchQueue(label: "com.jianfeng.pi-mac.rpc-reader")
-  private let outputDecoder = JSONLineDecoder()
-  private let errorDecoder = JSONLineDecoder()
+  /// Identifies the current child process so data already queued by an old pipe cannot be
+  /// decoded as output from its replacement.
+  private var processGeneration = UUID()
 
   var isRunning: Bool { process?.isRunning == true }
 
@@ -23,9 +24,15 @@ final class PiRPCClient {
     stop()
 
     let process = Process()
+    let generation = UUID()
+    processGeneration = generation
     let inputPipe = Pipe()
     let outputPipe = Pipe()
     let errorPipe = Pipe()
+    // Decoders belong to this pair of pipes. Keeping them local prevents a trailing partial
+    // record from a stopped process being combined with output from a replacement process.
+    let outputDecoder = JSONLineDecoder()
+    let errorDecoder = JSONLineDecoder()
     process.executableURL = URL(fileURLWithPath: "/bin/zsh")
     // 登录 shell 能拿到 GUI 应用通常缺失的 Node/pnpm PATH；不要启用交互模式（-i）。
     // 从终端用 `swift run` 启动时，后台的交互式 shell 会因读取控制终端而收到
@@ -43,8 +50,8 @@ final class PiRPCClient {
       guard !data.isEmpty else { return }
       self?.readQueue.async { [weak self] in
         guard let self else { return }
-        for record in self.outputDecoder.append(data) {
-          self.decode(record)
+        for record in outputDecoder.append(data) {
+          self.decode(record, generation: generation)
         }
       }
     }
@@ -53,15 +60,20 @@ final class PiRPCClient {
       guard !data.isEmpty else { return }
       self?.readQueue.async { [weak self] in
         guard let self else { return }
-        for record in self.errorDecoder.append(data) {
+        for record in errorDecoder.append(data) {
           let text = String(decoding: record, as: UTF8.self)
-          Task { @MainActor [weak self] in self?.onErrorOutput?(text) }
+          Task { @MainActor [weak self] in
+            guard self?.processGeneration == generation else { return }
+            self?.onErrorOutput?(text)
+          }
         }
       }
     }
     process.terminationHandler = { [weak self] process in
       DispatchQueue.main.async { [weak self] in
-        guard let self, self.process === process else { return }
+        guard let self, self.process === process,
+          self.processGeneration == generation
+        else { return }
         self.input = nil
         self.process = nil
         let error = RPCError.processTerminated(process.terminationStatus)
@@ -82,6 +94,8 @@ final class PiRPCClient {
   }
 
   func stop() {
+    processGeneration = UUID()
+    pendingResponses.removeAll()
     guard let process else { return }
     outputHandle?.readabilityHandler = nil
     errorHandle?.readabilityHandler = nil
@@ -134,15 +148,19 @@ final class PiRPCClient {
     _ = request(response)
   }
 
-  private func decode(_ data: Data) {
+  private func decode(_ data: Data, generation: UUID) {
     do {
       guard let event = try JSONSerialization.jsonObject(with: data) as? JSON else {
         throw RPCError.invalidResponse
       }
-      DispatchQueue.main.async { [weak self] in self?.receive(event) }
+      DispatchQueue.main.async { [weak self] in
+        guard self?.processGeneration == generation else { return }
+        self?.receive(event)
+      }
     } catch {
       let text = String(decoding: data, as: UTF8.self)
       DispatchQueue.main.async { [weak self] in
+        guard self?.processGeneration == generation else { return }
         self?.onErrorOutput?("无法解析 Pi 输出：\(text)")
       }
     }

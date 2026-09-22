@@ -337,11 +337,17 @@ private enum MarkdownDocumentCache {
   }
 }
 
-struct MarkdownView: View {
+struct MarkdownView: View, Equatable {
+  let source: String
   let document: MarkdownDocument
 
   init(_ source: String) {
+    self.source = source
     document = MarkdownDocumentCache.document(for: source)
+  }
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    lhs.source == rhs.source
   }
 
   var body: some View {

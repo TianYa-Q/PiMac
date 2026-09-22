@@ -54,6 +54,8 @@ final class AppModel: ObservableObject {
   private var pendingMessageDeltas: [String: String] = [:]
   private var messageDeltaFlushScheduled = false
   private var messageDeltaFlushGeneration = 0
+  /// Invalidates startup callbacks and timeout tasks when an RPC process is replaced.
+  private var connectionGeneration = UUID()
 
   private var selectedModel: PiModel? {
     allModels.first { $0.id == selectedModelId }
@@ -71,12 +73,14 @@ final class AppModel: ObservableObject {
     startupProjectURL: URL? = nil,
     continueLastSession: Bool = true,
     startupSessionPath: String? = nil,
-    restoreLastProjectOnLaunch: Bool = true
+    restoreLastProjectOnLaunch: Bool = true,
+    initialComposerText: String = ""
   ) {
     // The workspace already knows the target project when constructing a tab. Publish it
     // synchronously so persistent chrome (project/session sidebar) never observes a temporary
     // nil project while the RPC connection is deferred to the next main-actor turn.
     projectURL = startupProjectURL?.standardizedFileURL
+    composerText = initialComposerText
 
     client.onEvent = { [weak self] event in self?.handle(event) }
     client.onErrorOutput = { [weak self] line in
@@ -89,6 +93,8 @@ final class AppModel: ObservableObject {
       guard let self else { return }
       self.isStreaming = false
       self.isCompacting = false
+      self.isLoadingConfiguration = false
+      self.statusText = ""
       if case .disconnected = self.connectionState { return }
       self.connectionState = .failed("Pi 进程退出，状态码 \(code)")
     }
@@ -137,7 +143,11 @@ final class AppModel: ObservableObject {
       return
     }
 
+    let generation = UUID()
+    connectionGeneration = generation
     connectionState = .connecting
+    isLoadingConfiguration = true
+    statusText = sessionPath == nil ? "正在启动 Pi…" : "正在打开会话…"
     if !preservingState {
       resetTranscriptLoading()
       messages.removeAll()
@@ -161,9 +171,6 @@ final class AppModel: ObservableObject {
         continueLastSession: continueLastSession
       )
       UserDefaults.standard.set(projectURL.path, forKey: Self.lastProjectPathKey)
-      connectionState = .connected
-      isLoadingConfiguration = true
-      statusText = sessionPath == nil ? "正在读取 Pi 配置…" : "正在打开会话…"
       if let sessionPath {
         currentSessionPath = sessionPath
         client.request(["type": "switch_session", "sessionPath": sessionPath]) {
@@ -171,18 +178,23 @@ final class AppModel: ObservableObject {
           guard let self else { return }
           switch result {
           case .failure(let error):
+            guard self.connectionGeneration == generation else { return }
             self.appendSystemError(error.localizedDescription)
-            self.refreshAll()
+            self.refreshAll(startupGeneration: generation)
           case .success(let response):
             let cancelled = (response["data"] as? PiRPCClient.JSON)?["cancelled"] as? Bool ?? false
-            if !cancelled { self.refreshAll() }
+            if !cancelled, self.connectionGeneration == generation {
+              self.refreshAll(startupGeneration: generation)
+            }
           }
         }
       } else {
-        refreshAll()
+        refreshAll(startupGeneration: generation)
       }
-      startConfigurationTimeout()
+      startConfigurationTimeout(for: generation)
     } catch {
+      isLoadingConfiguration = false
+      statusText = ""
       connectionState = .failed(error.localizedDescription)
     }
   }
@@ -198,6 +210,7 @@ final class AppModel: ObservableObject {
   /// attachments, or extension snapshot. Selecting the session starts a replacement process.
   func suspendProcess() {
     guard !isBusy, queuedPrompts.isEmpty, client.isRunning else { return }
+    connectionGeneration = UUID()
     connectionState = .disconnected
     isLoadingConfiguration = false
     statusText = ""
@@ -216,6 +229,7 @@ final class AppModel: ObservableObject {
   }
 
   func disconnect() {
+    connectionGeneration = UUID()
     extensionUI?.removeRequests(from: self)
     connectionState = .disconnected
     isStreaming = false
@@ -290,7 +304,9 @@ final class AppModel: ObservableObject {
 
   func sendPrompt(delivery: QueuedPromptDelivery = .steer) {
     let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !text.isEmpty || !attachments.isEmpty, client.isRunning else { return }
+    guard !text.isEmpty || !attachments.isEmpty, client.isRunning,
+      !isLoadingConfiguration, case .connected = connectionState
+    else { return }
     let sentAttachments = attachments
     composerText = ""
     attachments = []
@@ -567,27 +583,72 @@ final class AppModel: ObservableObject {
     return command
   }
 
-  func newSession() {
-    client.request(["type": "new_session"]) { [weak self] result in
+  func newSession(completion: ((Bool) -> Void)? = nil) {
+    guard client.isRunning, !isBusy, !isLoadingConfiguration,
+      queuedPrompts.isEmpty, case .connected = connectionState
+    else {
+      completion?(false)
+      return
+    }
+
+    // Switch the visible document immediately. The RPC process can finish resetting in the
+    // background; keeping the previous transcript on screen made New Task feel blocked on Pi.
+    // Retain enough state to put the old session back if Pi rejects the request.
+    let previousMessages = messages
+    let previousSessionName = sessionName
+    let previousStats = stats
+    let previousSessionPath = currentSessionPath
+    let previousLoadedTranscriptKey = loadedTranscriptKey
+    let previousLoadedTranscriptPath = loadedTranscriptPath
+
+    let generation = UUID()
+    connectionGeneration = generation
+    connectionState = .connecting
+    isLoadingConfiguration = true
+    statusText = "正在新建任务…"
+    messages.removeAll()
+    queuedPrompts.removeAll()
+    submittingQueuedPrompts.removeAll()
+    consumedPromptsAwaitingDisplay.removeAll()
+    pendingAssistantError = nil
+    queueSnapshotGeneration = 0
+    latestQueueSnapshot = nil
+    sessionName = ""
+    stats = nil
+    currentSessionPath = ""
+    resetTranscriptLoading()
+
+    let restorePreviousSession = { [weak self] in
       guard let self else { return }
+      self.messages = previousMessages
+      self.sessionName = previousSessionName
+      self.stats = previousStats
+      self.currentSessionPath = previousSessionPath
+      self.loadedTranscriptKey = previousLoadedTranscriptKey
+      self.loadedTranscriptPath = previousLoadedTranscriptPath
+      self.transcriptLoadInFlightKey = nil
+      self.isLoadingConfiguration = false
+      self.connectionState = .connected
+      self.statusText = ""
+    }
+
+    client.request(["type": "new_session"]) { [weak self] result in
+      guard let self, self.connectionGeneration == generation else { return }
       switch result {
-      case .failure(let error): self.appendSystemError(error.localizedDescription)
+      case .failure(let error):
+        restorePreviousSession()
+        self.appendSystemError(error.localizedDescription)
+        completion?(false)
       case .success(let response):
         let cancelled = (response["data"] as? PiRPCClient.JSON)?["cancelled"] as? Bool ?? false
-        if !cancelled {
-          self.messages.removeAll()
-          self.queuedPrompts.removeAll()
-          self.submittingQueuedPrompts.removeAll()
-          self.consumedPromptsAwaitingDisplay.removeAll()
-          self.pendingAssistantError = nil
-          self.queueSnapshotGeneration = 0
-          self.latestQueueSnapshot = nil
-          self.sessionName = ""
-          self.stats = nil
-          self.currentSessionPath = ""
-          self.resetTranscriptLoading()
-          self.refreshAll()
+        guard !cancelled else {
+          restorePreviousSession()
+          completion?(false)
+          return
         }
+        self.refreshAll(startupGeneration: generation)
+        self.startConfigurationTimeout(for: generation)
+        completion?(true)
       }
     }
   }
@@ -786,21 +847,24 @@ final class AppModel: ObservableObject {
     connect(to: URL(fileURLWithPath: path, isDirectory: true))
   }
 
-  private func startConfigurationTimeout() {
+  private func startConfigurationTimeout(for generation: UUID) {
     Task { @MainActor [weak self] in
       try? await Task.sleep(for: .seconds(15))
-      guard let self, self.isLoadingConfiguration else { return }
+      guard let self, self.connectionGeneration == generation,
+        self.isLoadingConfiguration
+      else { return }
       self.isLoadingConfiguration = false
+      self.connectionState = .failed("Pi 启动超时")
       self.statusText = ""
-      self.appendSystemError("读取 Pi 配置超过 15 秒。请展开左侧“诊断日志”查看 RPC 是否返回。")
-      self.appendDiagnostic("配置读取超时：没有收到 get_available_models 的有效响应")
+      self.appendSystemError("启动 Pi 超过 15 秒。请展开左侧“诊断日志”查看 RPC 是否返回。")
+      self.appendDiagnostic("启动超时：没有收到 get_available_models 的有效响应")
     }
   }
 
-  private func refreshAll() {
+  private func refreshAll(startupGeneration: UUID? = nil) {
     loadState()
     loadMessages()
-    loadModels()
+    loadModels(startupGeneration: startupGeneration)
     loadThinkingLevels()
     loadStats()
     loadSessions()
@@ -892,12 +956,15 @@ final class AppModel: ObservableObject {
     return "\(path)\u{0}\(size)\u{0}\(modified)"
   }
 
-  private func loadModels() {
+  private func loadModels(startupGeneration: UUID? = nil) {
     client.request(["type": "get_available_models"]) { [weak self] result in
-      guard let self else { return }
+      guard let self,
+        startupGeneration == nil || self.connectionGeneration == startupGeneration
+      else { return }
       switch result {
       case .failure(let error):
         self.isLoadingConfiguration = false
+        if startupGeneration != nil { self.connectionState = .failed("Pi 配置读取失败") }
         self.statusText = ""
         self.appendSystemError("读取模型失败：\(error.localizedDescription)")
       case .success(let response):
@@ -931,6 +998,7 @@ final class AppModel: ObservableObject {
         }
         self.applyModelPreferences()
         self.isLoadingConfiguration = false
+        if startupGeneration != nil { self.connectionState = .connected }
         self.statusText = ""
         if self.allModels.isEmpty {
           self.appendSystemError("Pi 没有可用模型，请先检查 ~/.pi/agent 的登录配置")
@@ -1093,45 +1161,71 @@ final class AppModel: ObservableObject {
       if title.isEmpty { title = firstUserText }
       if title.isEmpty { title = "未命名会话" }
       title = String(title.prefix(70))
-      // Pi may touch a session file while merely opening it. Sort by the latest
-      // actual message instead of filesystem modification time so viewing a
-      // session does not move it to the top of the list.
-      let activityDates = [
-        latestMessageDate(in: lines),
-        latestMessageDate(inTailOf: url),
-        recordDate(header),
-      ].compactMap { $0 }
+      // 会话顺序只取决于用户最后一次发送消息的时间。助手回复、工具调用以及仅仅
+      // 打开会话都可能继续写入文件，但这些操作不应把会话移到列表顶部。
+      let lastUserMessageAt = latestUserMessageDate(inFile: url)
       result.append(
         SessionItem(
           path: url.path,
           title: title,
-          modifiedAt: activityDates.max() ?? .distantPast
+          modifiedAt: lastUserMessageAt ?? recordDate(header) ?? .distantPast
         ))
     }
     return result.sorted { $0.modifiedAt > $1.modifiedAt }
   }
 
-  nonisolated private static func latestMessageDate(in lines: [Substring]) -> Date? {
+  nonisolated private static func latestUserMessageDate(in lines: [Substring]) -> Date? {
     for line in lines.reversed() {
       guard let data = String(line).data(using: .utf8),
         let record = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
-        record["type"] as? String == "message"
+        record["type"] as? String == "message",
+        let message = record["message"] as? PiRPCClient.JSON,
+        message["role"] as? String == "user"
       else { continue }
       if let date = recordDate(record) { return date }
     }
     return nil
   }
 
-  nonisolated private static func latestMessageDate(inTailOf url: URL) -> Date? {
+  /// 从文件尾部反向分块查找，避免为确定会话顺序而把可能很大的 JSONL 全部载入内存。
+  /// 跨分块的超长消息行会保留到下一轮，因此最后一条用户消息不会因大段工具输出而遗漏。
+  nonisolated static func latestUserMessageDate(inFile url: URL) -> Date? {
     guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
     defer { try? handle.close() }
     guard let size = try? handle.seekToEnd() else { return nil }
-    let tailSize: UInt64 = 1_048_576
-    try? handle.seek(toOffset: size > tailSize ? size - tailSize : 0)
-    guard let data = try? handle.readToEnd(),
-      let text = String(data: data, encoding: .utf8)
-    else { return nil }
-    return latestMessageDate(in: text.split(separator: "\n", omittingEmptySubsequences: true))
+
+    let chunkSize: UInt64 = 1_048_576
+    var end = size
+    var suffix = Data()
+    while end > 0 {
+      let start = end > chunkSize ? end - chunkSize : 0
+      try? handle.seek(toOffset: start)
+      guard let chunk = try? handle.read(upToCount: Int(end - start)) else { return nil }
+      var combined = chunk
+      combined.append(suffix)
+
+      if start == 0 {
+        let text = String(decoding: combined, as: UTF8.self)
+        return latestUserMessageDate(
+          in: text.split(separator: "\n", omittingEmptySubsequences: true))
+      }
+
+      guard let firstNewline = combined.firstIndex(of: 0x0A) else {
+        suffix = combined
+        end = start
+        continue
+      }
+      let completeLines = combined[combined.index(after: firstNewline)...]
+      let text = String(decoding: completeLines, as: UTF8.self)
+      if let date = latestUserMessageDate(
+        in: text.split(separator: "\n", omittingEmptySubsequences: true))
+      {
+        return date
+      }
+      suffix = Data(combined[..<firstNewline])
+      end = start
+    }
+    return nil
   }
 
   nonisolated private static func recordDate(_ record: PiRPCClient.JSON) -> Date? {

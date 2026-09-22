@@ -57,6 +57,36 @@ struct ExtensionUIModelTests {
   }
 
   @Test
+  func parsesStoredResetCredits() throws {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    ui.selectSource(source)
+
+    ui.handle(
+      try statusEvent(
+        activeAccount: "X",
+        updatedAt: 1_000,
+        remainingPercent: 10,
+        resetCredits: [
+          "availableCount": 2,
+          "credits": [
+            ["expiresAt": 1_800_000_000.0],
+            ["expiresAt": 1_700_000_000.0],
+          ],
+        ]
+      ),
+      from: source
+    )
+
+    let credits = ui.codexAccounts.first?.resetCredits
+    #expect(credits?.availableCount == 2)
+    #expect(
+      credits?.expirations.map(\.timeIntervalSince1970) == [
+        1_700_000_000.0, 1_800_000_000.0,
+      ])
+  }
+
+  @Test
   func backgroundStatusDoesNotEmptyAccountWhileSelectedProjectStarts() throws {
     let ui = ExtensionUIModel()
     let first = AppModel(restoreLastProjectOnLaunch: false)
@@ -81,9 +111,12 @@ struct ExtensionUIModelTests {
   }
 
   private func statusEvent(
-    activeAccount: String, updatedAt: Double, remainingPercent: Double
+    activeAccount: String,
+    updatedAt: Double,
+    remainingPercent: Double,
+    resetCredits: PiRPCClient.JSON? = nil
   ) throws -> PiRPCClient.JSON {
-    let status: PiRPCClient.JSON = [
+    var status: PiRPCClient.JSON = [
       "version": 1,
       "activeAccount": activeAccount,
       "defaultAccount": "X",
@@ -96,6 +129,11 @@ struct ExtensionUIModelTests {
         ["name": "Y"],
       ],
     ]
+    if let resetCredits {
+      var accounts = status["accounts"] as! [PiRPCClient.JSON]
+      accounts[0]["resetCredits"] = resetCredits
+      status["accounts"] = accounts
+    }
     let data = try JSONSerialization.data(withJSONObject: status)
     return [
       "type": "extension_ui_request",

@@ -37,6 +37,11 @@ private enum ConversationScrollMode {
   case manual
 }
 
+private enum MainPage {
+  case conversation
+  case usage
+}
+
 private enum ConversationLayout {
   static let contentInset: CGFloat = 20
   static let bottomAnchorID = "conversation-bottom"
@@ -45,7 +50,7 @@ private enum ConversationLayout {
 /// SwiftUI does not expose scroll phases on macOS 14. Observe AppKit's live-scroll
 /// notifications so content growth is never mistaken for a user's scroll gesture.
 private struct ConversationScrollObserver: NSViewRepresentable {
-  let onUserScroll: () -> Void
+  let onUserScroll: (_ isAtBottom: Bool) -> Void
 
   func makeCoordinator() -> Coordinator {
     Coordinator(onUserScroll: onUserScroll)
@@ -63,11 +68,11 @@ private struct ConversationScrollObserver: NSViewRepresentable {
   }
 
   final class Coordinator {
-    var onUserScroll: () -> Void
+    var onUserScroll: (Bool) -> Void
     private weak var scrollView: NSScrollView?
     private var observers: [NSObjectProtocol] = []
 
-    init(onUserScroll: @escaping () -> Void) {
+    init(onUserScroll: @escaping (Bool) -> Void) {
       self.onUserScroll = onUserScroll
     }
 
@@ -84,19 +89,39 @@ private struct ConversationScrollObserver: NSViewRepresentable {
       // 临时拖到固定留白之外。
       scrollView.verticalScrollElasticity = .none
 
+      observers.append(
+        NotificationCenter.default.addObserver(
+          forName: NSScrollView.willStartLiveScrollNotification,
+          object: scrollView,
+          queue: .main
+        ) { [weak self] _ in
+          self?.onUserScroll(false)
+        })
       for name in [
-        NSScrollView.willStartLiveScrollNotification,
         NSScrollView.didLiveScrollNotification,
+        NSScrollView.didEndLiveScrollNotification,
       ] {
         observers.append(
           NotificationCenter.default.addObserver(
             forName: name,
             object: scrollView,
             queue: .main
-          ) { [weak self] _ in
-            self?.onUserScroll()
+          ) { [weak self, weak scrollView] _ in
+            guard let self, let scrollView else { return }
+            self.onUserScroll(Self.isAtBottom(scrollView))
           })
       }
+    }
+
+    private static func isAtBottom(_ scrollView: NSScrollView) -> Bool {
+      guard let documentView = scrollView.documentView else { return true }
+      let visible = scrollView.contentView.documentVisibleRect
+      let document = documentView.bounds
+      let tolerance: CGFloat = 2
+      if scrollView.contentView.isFlipped {
+        return visible.maxY >= document.maxY - tolerance
+      }
+      return visible.minY <= document.minY + tolerance
     }
   }
 }
@@ -158,6 +183,7 @@ struct ContentView: View {
   @State private var choosingAttachments = false
   @State private var showingSettings = false
   @State private var showingModelSettings = false
+  @State private var selectedPage: MainPage = .conversation
   @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
   @State private var composerSelection = NSRange(location: 0, length: 0)
@@ -176,10 +202,22 @@ struct ContentView: View {
       redesignedSidebar
         .frame(width: 292)
 
-      VStack(spacing: 0) {
-        conversation
-        Divider()
-        composer
+      ZStack {
+        VStack(spacing: 0) {
+          conversation
+          Divider()
+          composer
+        }
+        // Keep the AppKit-backed conversation alive while viewing usage so returning to the
+        // task preserves its scroll position and editor selection.
+        .opacity(selectedPage == .conversation ? 1 : 0)
+        .allowsHitTesting(selectedPage == .conversation)
+        .accessibilityHidden(selectedPage != .conversation)
+
+        if selectedPage == .usage {
+          UsageDashboardView()
+            .transition(.opacity)
+        }
       }
       // Keep this subtree alive across task changes. Re-keying even only the detail pane tears
       // down its AppKit-backed scroll/editor views; because the sidebar uses translucent
@@ -229,7 +267,6 @@ struct ContentView: View {
       autoScrollScheduled = false
       autoScrollGeneration += 1
       initialSessionScrollPending = true
-      initialScrollGeneration += 1
       conversationBottomIsVisible = false
       previewedAttachment = nil
     }
@@ -257,6 +294,13 @@ struct ContentView: View {
           .buttonStyle(.plain)
           .help("设置")
         }
+
+        HStack(spacing: 4) {
+          mainPageButton(.conversation, title: "对话", icon: "bubble.left.and.bubble.right")
+          mainPageButton(.usage, title: "用量", icon: "chart.bar.xaxis")
+        }
+        .padding(3)
+        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
 
         HStack {
           Text("项目").font(.caption.bold()).foregroundStyle(.secondary)
@@ -364,6 +408,23 @@ struct ContentView: View {
       .background(.ultraThinMaterial)
     }
     .background(Color(nsColor: .controlBackgroundColor).opacity(0.52))
+  }
+
+  private func mainPageButton(_ page: MainPage, title: String, icon: String) -> some View {
+    Button {
+      withAnimation(.easeOut(duration: 0.14)) { selectedPage = page }
+    } label: {
+      Label(title, systemImage: icon)
+        .font(.caption.weight(.medium))
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 6)
+        .background(
+          selectedPage == page ? Color(nsColor: .controlBackgroundColor) : Color.clear,
+          in: RoundedRectangle(cornerRadius: 7)
+        )
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
   }
 
   private func compactProjectButton(_ project: WorkspaceProject) -> some View {
@@ -682,7 +743,7 @@ struct ContentView: View {
           .padding(.horizontal, ConversationLayout.contentInset)
           .padding(.top, ConversationLayout.contentInset)
           .background {
-            ConversationScrollObserver(onUserScroll: enterManualScrollMode)
+            ConversationScrollObserver(onUserScroll: updateScrollModeAfterUserScroll)
               .frame(width: 0, height: 0)
           }
         }
@@ -735,6 +796,17 @@ struct ContentView: View {
           conversationBottomIsVisible = false
           scheduleInitialSessionScroll(proxy)
         }
+        .onChange(of: tabID) {
+          // Switching projects replaces the environment AppModel while preserving this ScrollView.
+          // The two projects can temporarily expose the same/empty session path, so path changes
+          // alone are not a reliable trigger for the initial bottom positioning.
+          autoScrollGeneration += 1
+          autoScrollScheduled = false
+          conversationScrollMode = .pinnedToBottom
+          initialSessionScrollPending = true
+          conversationBottomIsVisible = false
+          scheduleInitialSessionScroll(proxy)
+        }
       }
     }
   }
@@ -751,6 +823,9 @@ struct ContentView: View {
         composerFocused = true
       }
     )
+    // Appending a prompt rebuilds the turn array. Preserve unchanged Markdown/AppKit text
+    // subtrees so earlier messages are not briefly cleared and redrawn.
+    .equatable()
     .id(turn.id)
   }
 
@@ -762,11 +837,9 @@ struct ContentView: View {
     // 等布局稳定后再执行最终定位；若期间消息继续到达，旧任务会自动失效。
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
       guard generation == initialScrollGeneration, !app.messages.isEmpty else { return }
-      // defaultScrollAnchor 通常已经完成定位。只有底部确实还在视口外时才校正，
-      // 避免重复 scrollTo 的像素级位置差让整段内容在进入会话后向下跳。
-      if !conversationBottomIsVisible {
-        proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
-      }
+      // 会话切换时 preference 可能仍短暂携带上一个会话的“底部可见”值，不能用它
+      // 决定是否定位。首次稳定布局后始终滚到新会话底部；每次切换只执行一次。
+      proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
       conversationScrollMode = .pinnedToBottom
       initialSessionScrollPending = false
     }
@@ -793,7 +866,19 @@ struct ContentView: View {
     }
   }
 
-  private func enterManualScrollMode() {
+  private func updateScrollModeAfterUserScroll(isAtBottom: Bool) {
+    // Replacing a project's transcript makes AppKit emit transient scroll notifications while
+    // the new content is being laid out. They are not user intent and must not cancel the
+    // pending one-shot scroll to the new session's bottom.
+    guard !initialSessionScrollPending else { return }
+
+    if isAtBottom {
+      // AppKit's end-of-scroll notification can arrive after the geometry preference update.
+      // Re-pin directly so returning to the bottom always resumes following new output.
+      conversationScrollMode = .pinnedToBottom
+      return
+    }
+
     conversationScrollMode = .manual
     autoScrollGeneration += 1
     autoScrollScheduled = false
@@ -1428,7 +1513,7 @@ private struct ComposerTextView: NSViewRepresentable {
   }
 }
 
-private struct ConversationTurn: Identifiable {
+private struct ConversationTurn: Identifiable, Equatable {
   let entries: [ChatEntry]
 
   var id: String { entries.first?.id ?? UUID().uuidString }
@@ -1446,21 +1531,37 @@ private struct ConversationTurn: Identifiable {
   }
 }
 
-private struct ConversationTurnView: View {
+private struct ConversationTurnView: View, Equatable {
   let turn: ConversationTurn
   let isActive: Bool
   let onEdit: (String) -> Void
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    // `onEdit` is recreated with ContentView's body but has the same behavior. Comparing only
+    // render inputs lets SwiftUI retain completed turns when a new prompt is appended.
+    lhs.turn == rhs.turn && lhs.isActive == rhs.isActive
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       if let user = turn.user {
         ChatEntryView(entry: user) { onEdit(user.text) }
+          .equatable()
+          .id(user.id)
       }
       if !turn.activity.isEmpty {
         ActivityGroupView(entries: turn.activity, taskIsRunning: isActive)
       }
-      if let assistant = turn.finalAssistant { ChatEntryView(entry: assistant) }
-      ForEach(turn.supplementaryEntries) { ChatEntryView(entry: $0) }
+      if let assistant = turn.finalAssistant {
+        ChatEntryView(entry: assistant)
+          .equatable()
+          .id(assistant.id)
+      }
+      ForEach(turn.supplementaryEntries) { entry in
+        ChatEntryView(entry: entry)
+          .equatable()
+          .id(entry.id)
+      }
     }
   }
 }
@@ -1795,11 +1896,17 @@ private struct GitDiffView: View {
   }
 }
 
-private struct ChatEntryView: View {
+private struct ChatEntryView: View, Equatable {
   let entry: ChatEntry
   let onEdit: (() -> Void)?
   @State private var expanded: Bool
   @State private var copied = false
+
+  static func == (lhs: Self, rhs: Self) -> Bool {
+    // The edit closure is recreated whenever ContentView updates, but its behavior is tied to
+    // the stable entry ID. Ignore it so an unchanged message keeps its rendered text subtree.
+    lhs.entry == rhs.entry
+  }
 
   init(entry: ChatEntry, onEdit: (() -> Void)? = nil) {
     self.entry = entry
@@ -1874,6 +1981,7 @@ private struct ChatEntryView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     } else {
       MarkdownView(entry.text)
+        .equatable()
         .font(.body)
     }
   }
@@ -1925,6 +2033,80 @@ private struct ChatEntryView: View {
 
   private var background: Color {
     entry.kind == .user ? Color.accentColor.opacity(0.09) : Color.secondary.opacity(0.07)
+  }
+}
+
+private struct ResetCreditsIcon: View {
+  let credits: CodexResetCredits
+  @State private var isHovered = false
+
+  var body: some View {
+    Image(systemName: "exclamationmark.circle")
+      .font(.caption2)
+      .foregroundStyle(.orange)
+      .frame(width: 16, height: 16)
+      .contentShape(Rectangle())
+      .onHover { isHovered = $0 }
+      .popover(isPresented: $isHovered, attachmentAnchor: .rect(.bounds), arrowEdge: .bottom) {
+        hoverCard
+      }
+      .accessibilityLabel(accessibilityText)
+  }
+
+  private var hoverCard: some View {
+    VStack(alignment: .leading, spacing: 9) {
+      HStack(spacing: 7) {
+        Image(systemName: "arrow.counterclockwise.circle.fill")
+          .foregroundStyle(.orange)
+        Text("已存储的重置机会")
+          .font(.caption.bold())
+        Spacer(minLength: 8)
+        Text("\(credits.availableCount) 次")
+          .font(.caption2.bold())
+          .monospacedDigit()
+          .foregroundStyle(.orange)
+          .padding(.horizontal, 7)
+          .padding(.vertical, 3)
+          .background(Color.orange.opacity(0.12), in: Capsule())
+      }
+
+      if credits.expirations.isEmpty {
+        Text("未提供失效时间")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      } else {
+        Divider()
+        VStack(alignment: .leading, spacing: 7) {
+          ForEach(Array(credits.expirations.enumerated()), id: \.offset) { index, date in
+            HStack(spacing: 7) {
+              Image(systemName: "clock")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 12)
+              Text("第 \(index + 1) 次")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+              Spacer(minLength: 8)
+              Text(date.formatted(date: .abbreviated, time: .shortened))
+                .font(.caption2.weight(.medium))
+                .monospacedDigit()
+            }
+          }
+        }
+      }
+    }
+    .foregroundStyle(.primary)
+    .padding(12)
+    .frame(width: 270)
+  }
+
+  private var accessibilityText: String {
+    var lines = ["已存储的重置机会：\(credits.availableCount) 次"]
+    lines.append(
+      contentsOf: credits.expirations.map {
+        "失效时间：\($0.formatted(date: .abbreviated, time: .shortened))"
+      })
+    return lines.joined(separator: "，")
   }
 }
 
@@ -2027,6 +2209,9 @@ private struct CodexAccountsView: View {
         if account.isHidden {
           Image(systemName: "eye.slash").font(.caption2).foregroundStyle(.secondary)
         }
+        if let resetCredits = account.resetCredits {
+          ResetCreditsIcon(credits: resetCredits)
+        }
         Spacer()
         if !account.isActive {
           Button("切换") { app.switchCodexAccount(to: account.name) }
@@ -2035,6 +2220,8 @@ private struct CodexAccountsView: View {
             .disabled(app.isBusy)
         }
       }
+      // The hover card extends over the quota rows, so its source row must paint above them.
+      .zIndex(1)
       if let error = account.error {
         Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2)
       } else if account.primary == nil && account.secondary == nil {
