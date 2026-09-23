@@ -33,6 +33,7 @@ final class AppModel: ObservableObject {
   weak var extensionUI: ExtensionUIModel?
 
   private static let lastProjectPathKey = "lastProjectPath"
+  private static let lastSelectedModelKey = "lastSelectedModelID"
 
   private let client = PiRPCClient()
   private var activeAssistantId: String?
@@ -188,6 +189,8 @@ final class AppModel: ObservableObject {
             }
           }
         }
+      } else if !continueLastSession {
+        selectPreferredModelForNewSession(generation: generation)
       } else {
         refreshAll(startupGeneration: generation)
       }
@@ -201,6 +204,10 @@ final class AppModel: ObservableObject {
 
   var isProcessRunning: Bool { client.isRunning }
   var isBusy: Bool { isStreaming || isCompacting }
+  var canReloadModelList: Bool {
+    client.isRunning && !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty
+      && projectURL != nil
+  }
 
   var hasUnsubmittedInput: Bool {
     !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
@@ -646,9 +653,10 @@ final class AppModel: ObservableObject {
           completion?(false)
           return
         }
-        self.refreshAll(startupGeneration: generation)
+        self.selectPreferredModelForNewSession(generation: generation) {
+          completion?(true)
+        }
         self.startConfigurationTimeout(for: generation)
-        completion?(true)
       }
     }
   }
@@ -681,6 +689,7 @@ final class AppModel: ObservableObject {
       case .success:
         guard let self else { return }
         self.selectedModelId = id
+        UserDefaults.standard.set(id, forKey: Self.lastSelectedModelKey)
         // The RPC process may have started before the settings sheet changed the file.
         // Apply the saved per-model default explicitly so it also works in this process.
         if let defaultLevel = self.modelDefaultThinkingLevels[id],
@@ -750,6 +759,24 @@ final class AppModel: ObservableObject {
     } catch {
       appendSystemError("保存压缩模型失败：\(error.localizedDescription)")
     }
+  }
+
+  func reloadModelList() {
+    guard canReloadModelList, let projectURL else {
+      statusText = "请等待当前任务完成后再重新载入模型列表"
+      return
+    }
+
+    let sessionPath = currentSessionPath.isEmpty ? nil : currentSessionPath
+    extensionUI?.removeRequests(from: self)
+    connectionState = .disconnected
+    client.stop()
+    connect(
+      to: projectURL,
+      continueLastSession: sessionPath == nil,
+      sessionPath: sessionPath,
+      preservingState: true
+    )
   }
 
   private func reloadRPCProcessForCompactionModel() {
@@ -858,6 +885,39 @@ final class AppModel: ObservableObject {
       self.statusText = ""
       self.appendSystemError("启动 Pi 超过 15 秒。请展开左侧“诊断日志”查看 RPC 是否返回。")
       self.appendDiagnostic("启动超时：没有收到 get_available_models 的有效响应")
+    }
+  }
+
+  // Only explicit model changes update the preference. Opening an older session must not
+  // replace the model used for future new tasks with that session's historical model.
+  static func preferredNewSessionModelID(
+    currentModelID: String, defaults: UserDefaults = .standard
+  ) -> String? {
+    let saved = defaults.string(forKey: lastSelectedModelKey) ?? ""
+    let id = saved.isEmpty ? currentModelID : saved
+    let parts = id.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+    guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
+    return id
+  }
+
+  private func selectPreferredModelForNewSession(
+    generation: UUID, completion: (() -> Void)? = nil
+  ) {
+    guard let id = Self.preferredNewSessionModelID(currentModelID: selectedModelId) else {
+      refreshAll(startupGeneration: generation)
+      completion?()
+      return
+    }
+    let parts = id.split(separator: "/", maxSplits: 1)
+    client.request([
+      "type": "set_model", "provider": String(parts[0]), "modelId": String(parts[1]),
+    ]) { [weak self] result in
+      guard let self, self.connectionGeneration == generation else { return }
+      if case .failure(let error) = result {
+        self.appendSystemError("无法为新任务选择上次使用的模型：\(error.localizedDescription)")
+      }
+      self.refreshAll(startupGeneration: generation)
+      completion?()
     }
   }
 
@@ -1716,6 +1776,58 @@ final class AppModel: ObservableObject {
           else { continue }
           toolInputs[id] = input
         }
+      }
+
+      if message["role"] as? String == "assistant",
+        let blocks = message["content"] as? [PiRPCClient.JSON],
+        blocks.contains(where: { $0["type"] as? String == "thinking" })
+      {
+        let provider = message["provider"] as? String
+        let modelID = message["model"] as? String
+        var currentKind: ChatEntryKind?
+        var currentText = ""
+        func flushBlock() {
+          guard let kind = currentKind, !currentText.isEmpty else { return }
+          entries.append(ChatEntry(
+            id: UUID().uuidString, kind: kind,
+            title: kind == .thinking ? "思考过程" : "Pi", text: currentText,
+            modelProvider: provider, modelID: modelID
+          ))
+        }
+        for block in blocks {
+          let kind: ChatEntryKind
+          let text: String
+          switch block["type"] as? String {
+          case "thinking":
+            kind = .thinking
+            text = block["thinking"] as? String ?? ""
+          case "text":
+            kind = .assistant
+            text = block["text"] as? String ?? ""
+          default:
+            flushBlock()
+            currentKind = nil
+            currentText = ""
+            continue
+          }
+          if kind != currentKind {
+            flushBlock()
+            currentKind = kind
+            currentText = ""
+          }
+          if !text.isEmpty {
+            if !currentText.isEmpty { currentText += "\n" }
+            currentText += text
+          }
+        }
+        flushBlock()
+        if !hidesRetriedError, let errorText = assistantErrorText(message) {
+          entries.append(ChatEntry(
+            id: UUID().uuidString, kind: .system, title: "错误",
+            text: errorText, isError: true
+          ))
+        }
+        continue
       }
 
       guard var entry = chatEntry(from: message) else { continue }

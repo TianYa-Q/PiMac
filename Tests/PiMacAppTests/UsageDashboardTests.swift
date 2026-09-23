@@ -41,6 +41,35 @@ struct UsageDashboardTests {
     #expect(result.projects.first?.tokens == 225)
   }
 
+  @Test func indexReusesUnchangedFilesAndUpdatesChangedOrRemovedSessions() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let cache = root.appendingPathComponent("cache/index.json")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("session.jsonl")
+    let header = "{\"type\":\"session\",\"cwd\":\"/tmp/example\"}\n"
+    let message =
+      "{\"type\":\"message\",\"timestamp\":\"2025-02-01T10:00:00Z\",\"message\":{\"role\":\"assistant\",\"model\":\"test\",\"usage\":{\"totalTokens\":100}}}\n"
+    try (header + message).write(to: file, atomically: true, encoding: .utf8)
+    let first = UsageScanner.scan(root: root, startingAt: nil, cacheURL: cache)
+    #expect(first.totalTokens == 100)
+    #expect(FileManager.default.fileExists(atPath: cache.path))
+    let cacheDate = try cache.resourceValues(forKeys: [.contentModificationDateKey])
+      .contentModificationDate
+    let second = UsageScanner.scan(root: root, startingAt: nil, cacheURL: cache)
+    #expect(second.totalTokens == 100)
+    #expect(
+      try cache.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        == cacheDate)
+
+    try (header + message + message).write(to: file, atomically: true, encoding: .utf8)
+    #expect(UsageScanner.scan(root: root, startingAt: nil, cacheURL: cache).totalTokens == 200)
+    let start = ISO8601DateFormatter().date(from: "2025-02-02T00:00:00Z")!
+    #expect(UsageScanner.scan(root: root, startingAt: start, cacheURL: cache).requests == 0)
+    try FileManager.default.removeItem(at: file)
+    #expect(UsageScanner.scan(root: root, startingAt: nil, cacheURL: cache).requests == 0)
+  }
+
   @Test func scannerHonorsStartDate() throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent(UUID().uuidString, isDirectory: true)

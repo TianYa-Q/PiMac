@@ -75,117 +75,209 @@ enum UsagePeriod: String, CaseIterable, Identifiable {
   }
 }
 
+// One entry per day/model/session, rather than retaining full message bodies in the cache.
+private struct UsageBucket: Codable {
+  var day: Date
+  var model: String
+  var input = 0
+  var output = 0
+  var cacheRead = 0
+  var cacheWrite = 0
+  var tokens = 0
+  var cost = 0.0
+  var requests = 0
+}
+
+private struct UsageFileIndex: Codable {
+  var size: Int64
+  var modified: Date
+  var project: String
+  var buckets: [UsageBucket]
+}
+
+private struct UsageIndex: Codable {
+  var root: String
+  var files: [String: UsageFileIndex]
+}
+
 enum UsageScanner {
+  // Scans from different period selections are serialized so an older scan cannot overwrite
+  // a newer index. The lock also protects the on-disk index from concurrent read/write races.
+  private nonisolated static let indexLock = NSLock()
+
   nonisolated static func scan(period: UsagePeriod) -> UsageSnapshot {
     let root = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".pi/agent/sessions", isDirectory: true)
-    return scan(root: root, startingAt: period.startDate)
+    let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("PiMac/usage-index.json")
+    return scan(root: root, startingAt: period.startDate, cacheURL: cache)
   }
 
   nonisolated static func scan(root: URL, startingAt startDate: Date?) -> UsageSnapshot {
+    scan(root: root, startingAt: startDate, cacheURL: nil)
+  }
+
+  // cacheURL is injectable so tests can verify cache invalidation without touching the user's cache.
+  nonisolated static func scan(root: URL, startingAt startDate: Date?, cacheURL: URL?)
+    -> UsageSnapshot
+  {
+    indexLock.lock()
+    defer { indexLock.unlock() }
+    let fm = FileManager.default
     guard
-      let enumerator = FileManager.default.enumerator(
+      let enumerator = fm.enumerator(
         at: root,
-        includingPropertiesForKeys: [.isRegularFileKey],
+        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey],
         options: [.skipsHiddenFiles]
       )
     else { return UsageSnapshot() }
+
+    var index: UsageIndex
+    if let cacheURL, let data = try? Data(contentsOf: cacheURL),
+      let saved = try? JSONDecoder().decode(UsageIndex.self, from: data), saved.root == root.path
+    {
+      index = saved
+    } else {
+      index = UsageIndex(root: root.path, files: [:])
+    }
+    var changed = false
+    var seen = Set<String>()
+    for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+      let path = url.path
+      seen.insert(path)
+      guard
+        let attributes = try? url.resourceValues(forKeys: [
+          .fileSizeKey, .contentModificationDateKey,
+        ]),
+        let size = attributes.fileSize, let modified = attributes.contentModificationDate
+      else { continue }
+      if let cached = index.files[path], cached.size == Int64(size), cached.modified == modified {
+        continue
+      }
+      // A file can be appended while we're reading it. Recheck metadata before caching it.
+      if let parsed = parseFile(url, size: Int64(size), modified: modified) {
+        index.files[path] = parsed
+      } else {
+        index.files.removeValue(forKey: path)
+      }
+      changed = true
+    }
+    let removed = index.files.keys.filter { !seen.contains($0) }
+    for path in removed { index.files.removeValue(forKey: path) }
+    if !removed.isEmpty { changed = true }
+    if changed, let cacheURL, let data = try? JSONEncoder().encode(index) {
+      try? fm.createDirectory(
+        at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try? data.write(to: cacheURL, options: .atomic)
+    }
 
     let calendar = Calendar.current
     var snapshot = UsageSnapshot()
     var days: [Date: UsageDay] = [:]
     var models: [String: ModelUsage] = [:]
     var projects: [String: ProjectUsage] = [:]
-
-    for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-      guard let data = try? Data(contentsOf: url, options: .mappedIfSafe), !data.isEmpty else {
-        continue
-      }
-      var projectPath: String?
+    for file in index.files.values {
       var sessionIncluded = false
-
-      for line in data.split(separator: 0x0A) {
-        guard
-          let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
-        else { continue }
-
-        if projectPath == nil {
-          guard record["type"] as? String == "session" else { break }
-          projectPath = record["cwd"] as? String ?? "未知项目"
-          continue
-        }
-        guard record["type"] as? String == "message",
-          let message = record["message"] as? [String: Any],
-          message["role"] as? String == "assistant",
-          let usage = message["usage"] as? [String: Any],
-          let date = recordDate(record, message: message),
-          startDate.map({ date >= $0 }) ?? true,
-          let projectPath
-        else { continue }
-
-        let input = integer(usage["input"])
-        let output = integer(usage["output"])
-        let cacheRead = integer(usage["cacheRead"])
-        let cacheWrite = integer(usage["cacheWrite"])
-        let total = integer(usage["totalTokens"], fallback: input + output + cacheRead + cacheWrite)
-        let costObject = usage["cost"] as? [String: Any]
-        let cost = number(costObject?["total"] ?? usage["cost"])
-        let modelName = message["model"] as? String ?? "未知模型"
-
-        snapshot.totalTokens += total
-        snapshot.inputTokens += input
-        snapshot.outputTokens += output
-        snapshot.cacheReadTokens += cacheRead
-        snapshot.cacheWriteTokens += cacheWrite
-        snapshot.cost += cost
-        snapshot.requests += 1
+      for bucket in file.buckets
+      where startDate.map({ bucket.day >= calendar.startOfDay(for: $0) }) ?? true {
+        snapshot.totalTokens += bucket.tokens
+        snapshot.inputTokens += bucket.input
+        snapshot.outputTokens += bucket.output
+        snapshot.cacheReadTokens += bucket.cacheRead
+        snapshot.cacheWriteTokens += bucket.cacheWrite
+        snapshot.cost += bucket.cost
+        snapshot.requests += bucket.requests
         sessionIncluded = true
 
-        let day = calendar.startOfDay(for: date)
-        var dayUsage = days[day] ?? UsageDay(date: day, tokens: 0, cost: 0)
-        dayUsage.tokens += total
-        dayUsage.cost += cost
-        days[day] = dayUsage
-
-        var modelUsage =
-          models[modelName]
-          ?? ModelUsage(name: modelName, tokens: 0, cost: 0, requests: 0)
-        modelUsage.tokens += total
-        modelUsage.cost += cost
-        modelUsage.requests += 1
-        models[modelName] = modelUsage
-
-        var projectUsage =
-          projects[projectPath]
-          ?? ProjectUsage(path: projectPath, tokens: 0, cost: 0, sessions: 0)
-        projectUsage.tokens += total
-        projectUsage.cost += cost
-        projects[projectPath] = projectUsage
+        var day = days[bucket.day] ?? UsageDay(date: bucket.day, tokens: 0, cost: 0)
+        day.tokens += bucket.tokens
+        day.cost += bucket.cost
+        days[bucket.day] = day
+        var model =
+          models[bucket.model] ?? ModelUsage(name: bucket.model, tokens: 0, cost: 0, requests: 0)
+        model.tokens += bucket.tokens
+        model.cost += bucket.cost
+        model.requests += bucket.requests
+        models[bucket.model] = model
+        var project =
+          projects[file.project]
+          ?? ProjectUsage(path: file.project, tokens: 0, cost: 0, sessions: 0)
+        project.tokens += bucket.tokens
+        project.cost += bucket.cost
+        projects[file.project] = project
       }
-
-      if sessionIncluded, let projectPath {
+      if sessionIncluded {
         snapshot.sessions += 1
-        projects[projectPath]?.sessions += 1
+        projects[file.project]?.sessions += 1
       }
     }
-
     if let startDate {
-      let start = calendar.startOfDay(for: startDate)
       let end = calendar.startOfDay(for: .now)
-      if start <= end {
-        var date = start
-        while date <= end {
-          if days[date] == nil { days[date] = UsageDay(date: date, tokens: 0, cost: 0) }
-          guard let next = calendar.date(byAdding: .day, value: 1, to: date) else { break }
-          date = next
-        }
+      var date = calendar.startOfDay(for: startDate)
+      while date <= end {
+        if days[date] == nil { days[date] = UsageDay(date: date, tokens: 0, cost: 0) }
+        guard let next = calendar.date(byAdding: .day, value: 1, to: date) else { break }
+        date = next
       }
     }
-
     snapshot.days = days.values.sorted { $0.date < $1.date }
     snapshot.models = models.values.sorted { $0.tokens > $1.tokens }
     snapshot.projects = projects.values.sorted { $0.tokens > $1.tokens }
     return snapshot
+  }
+
+  private nonisolated static func parseFile(_ url: URL, size: Int64, modified: Date)
+    -> UsageFileIndex?
+  {
+    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+    var project: String?
+    var buckets: [String: UsageBucket] = [:]
+    let calendar = Calendar.current
+    let formatter = ISO8601DateFormatter()
+    for line in data.split(separator: 0x0A) {
+      // Most lines are user messages, tool calls or events; avoid JSON decoding those bodies.
+      if project != nil && !line.contains(Data("\"usage\"".utf8)) { continue }
+      guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
+      else { continue }
+      if project == nil {
+        guard record["type"] as? String == "session" else { break }
+        project = record["cwd"] as? String ?? "未知项目"
+        continue
+      }
+      guard record["type"] as? String == "message",
+        let message = record["message"] as? [String: Any],
+        message["role"] as? String == "assistant",
+        let usage = message["usage"] as? [String: Any],
+        let date = recordDate(record, message: message, formatter: formatter)
+      else { continue }
+      let day = calendar.startOfDay(for: date)
+      let model = message["model"] as? String ?? "未知模型"
+      let key = "\(day.timeIntervalSince1970):\(model)"
+      var bucket = buckets[key] ?? UsageBucket(day: day, model: model)
+      let input = integer(usage["input"])
+      let output = integer(usage["output"])
+      let cacheRead = integer(usage["cacheRead"])
+      let cacheWrite = integer(usage["cacheWrite"])
+      bucket.input += input
+      bucket.output += output
+      bucket.cacheRead += cacheRead
+      bucket.cacheWrite += cacheWrite
+      bucket.tokens += integer(
+        usage["totalTokens"], fallback: input + output + cacheRead + cacheWrite)
+      let costObject = usage["cost"] as? [String: Any]
+      bucket.cost += number(costObject?["total"] ?? usage["cost"])
+      bucket.requests += 1
+      buckets[key] = bucket
+    }
+    guard let project else { return nil }
+    // If the file grew during parsing, retry on the next scan instead of persisting stale data.
+    guard
+      let attributes = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]
+      ),
+      attributes.fileSize.map(Int64.init) == size, attributes.contentModificationDate == modified
+    else { return nil }
+    return UsageFileIndex(
+      size: size, modified: modified, project: project, buckets: Array(buckets.values))
   }
 
   private nonisolated static func integer(_ value: Any?, fallback: Int = 0) -> Int {
@@ -198,10 +290,9 @@ enum UsageScanner {
   }
 
   private nonisolated static func recordDate(
-    _ record: [String: Any], message: [String: Any]
+    _ record: [String: Any], message: [String: Any], formatter: ISO8601DateFormatter
   ) -> Date? {
     if let timestamp = record["timestamp"] as? String {
-      let formatter = ISO8601DateFormatter()
       formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
       if let date = formatter.date(from: timestamp) { return date }
       formatter.formatOptions = [.withInternetDateTime]

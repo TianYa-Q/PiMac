@@ -1193,7 +1193,6 @@ struct ContentView: View {
     }
     .menuStyle(.borderlessButton)
     .fixedSize()
-    .disabled(app.allModels.isEmpty)
   }
 
   private var sessionControls: some View {
@@ -1689,7 +1688,7 @@ private struct ActivityEntryView: View {
 
   var body: some View {
     Group {
-      if entry.kind == .tool {
+      if entry.kind == .tool || entry.kind == .thinking {
         VStack(alignment: .leading, spacing: 7) {
           Button {
             guard hasVisibleDetails else { return }
@@ -1699,7 +1698,8 @@ private struct ActivityEntryView: View {
               toolIcon
               VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 6) {
-                  Text(toolTitle).font(.caption.weight(.semibold))
+                  Text(entry.kind == .thinking ? "思考过程" : toolTitle)
+                    .font(.caption.weight(.semibold))
                   if entry.isRunning { ProgressView().controlSize(.mini) }
                   if entry.isError {
                     Text("失败")
@@ -1707,7 +1707,7 @@ private struct ActivityEntryView: View {
                       .foregroundStyle(.red)
                   }
                 }
-                if let toolInput = entry.toolInput, !toolInput.isEmpty {
+                if entry.kind == .tool, let toolInput = entry.toolInput, !toolInput.isEmpty {
                   Text(toolInput)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.primary.opacity(0.88))
@@ -1744,8 +1744,12 @@ private struct ActivityEntryView: View {
       }
     }
     .onAppear {
-      if entry.kind == .tool, expansionStore?.values[expansionKey] == nil {
-        expanded = keepToolExpanded && entry.toolName != "bash" && entry.toolName != "read"
+      if expansionStore?.values[expansionKey] == nil {
+        if entry.kind == .thinking {
+          expanded = true
+        } else if entry.kind == .tool {
+          expanded = keepToolExpanded && entry.toolName != "bash" && entry.toolName != "read"
+        }
       }
     }
     .onChange(of: keepToolExpanded) { _, keepExpanded in
@@ -1783,7 +1787,8 @@ private struct ActivityEntryView: View {
   }
 
   private var toolColor: Color {
-    switch entry.toolName {
+    if entry.kind == .thinking { return .orange }
+    return switch entry.toolName {
     case "bash": .blue
     case "read": .teal
     case "edit", "write": .orange
@@ -1808,6 +1813,7 @@ private struct ActivityEntryView: View {
   }
 
   private var hasVisibleDetails: Bool {
+    if entry.kind == .thinking { return !entry.text.isEmpty }
     guard entry.toolName != "read" else { return false }
     return entry.diff?.isEmpty == false || !entry.text.isEmpty
   }
@@ -2420,6 +2426,19 @@ private struct ModelSettingsView: View {
             .foregroundStyle(.secondary)
         }
         Spacer()
+        Button(action: app.reloadModelList) {
+          if app.isLoadingConfiguration {
+            HStack(spacing: 6) {
+              ProgressView().controlSize(.small)
+              Text("正在重新载入…")
+            }
+          } else {
+            Label("重新载入模型列表", systemImage: "arrow.clockwise")
+          }
+        }
+        .disabled(!app.canReloadModelList)
+        .help("重新启动当前 Pi 连接，并从配置中重新读取可用模型")
+
         Button("完成") { dismiss() }
           .buttonStyle(.borderedProminent)
       }
