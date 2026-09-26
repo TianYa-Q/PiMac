@@ -194,7 +194,6 @@ struct ContentView: View {
   @State private var initialScrollGeneration = 0
   @State private var conversationBottomIsVisible = false
   @State private var visibleSessionCount = 10
-  @State private var hoveredSessionPath: String?
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
 
   var body: some View {
@@ -240,7 +239,7 @@ struct ContentView: View {
       if case .success(let urls) = result { addAttachmentsAtSelection(urls) }
     }
     .sheet(isPresented: $showingSettings) {
-      SettingsView(path: app.piPath, projectURL: app.projectURL) { app.piPath = $0 }
+      SettingsView(path: app.piPath, projectURL: app.projectURL, telegram: workspace.telegram) { app.piPath = $0 }
     }
     .sheet(isPresented: $showingModelSettings) {
       ModelSettingsView()
@@ -262,6 +261,7 @@ struct ContentView: View {
       visibleSessionCount = 10
     }
     .onChange(of: tabID) {
+      app.refreshModelPreferences()
       composerSelection = NSRange(location: 0, length: 0)
       conversationScrollMode = .pinnedToBottom
       autoScrollScheduled = false
@@ -273,14 +273,16 @@ struct ContentView: View {
   }
 
   private var redesignedSidebar: some View {
-    VStack(spacing: 0) {
+    let sessions = allSessions
+    let visibleSessions = Array(sessions.prefix(visibleSessionCount))
+    return VStack(spacing: 0) {
       VStack(alignment: .leading, spacing: 7) {
         HStack(spacing: 9) {
           HStack(spacing: 7) {
             Text("Pi Mac").font(.headline)
             HStack(spacing: 4) {
               Circle().fill(app.connectionState.color).frame(width: 6, height: 6)
-              Text(app.connectionState.label).lineLimit(1)
+              Text("Pi \(app.connectionState.label)").lineLimit(1)
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -294,6 +296,8 @@ struct ContentView: View {
           .buttonStyle(.plain)
           .help("设置")
         }
+
+        TelegramConnectionBadge(control: workspace.telegram)
 
         HStack(spacing: 4) {
           mainPageButton(.conversation, title: "对话", icon: "bubble.left.and.bubble.right")
@@ -348,16 +352,42 @@ struct ContentView: View {
         }
 
         if app.projectURL != nil {
+          SidebarHoverRegion { newChatHovered in
           Button {
             guard let projectURL = app.projectURL else { return }
             workspace.newSession(in: projectURL)
           } label: {
-            Label("新建任务", systemImage: "square.and.pencil")
-              .frame(maxWidth: .infinity)
+            HStack(spacing: 8) {
+              Image(systemName: "square.and.pencil")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(
+                  newChatHovered ? Color.accentColor : Color.secondary
+                )
+                .frame(width: 26, height: 26)
+                .background(
+                  newChatHovered ? Color.accentColor.opacity(0.10) : Color.clear,
+                  in: RoundedRectangle(cornerRadius: 7)
+                )
+              Text("新聊天")
+                .font(.callout.weight(.medium))
+              Spacer()
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .contentShape(RoundedRectangle(cornerRadius: 10))
           }
-          .buttonStyle(.borderedProminent)
-          .controlSize(.large)
-          .disabled(!app.clientConnectedForCommands)
+          .buttonStyle(.plain)
+          .background {
+            let hovered = newChatHovered
+            RoundedRectangle(cornerRadius: 10)
+              .fill(hovered ? Color.accentColor.opacity(0.12) : Color.clear)
+              .overlay {
+                RoundedRectangle(cornerRadius: 10)
+                  .strokeBorder(hovered ? Color.accentColor.opacity(0.20) : Color.clear, lineWidth: 1)
+              }
+              .shadow(color: .black.opacity(hovered ? 0.08 : 0), radius: 4, y: 1)
+          }
+          }
 
           Text("会话")
             .font(.caption.bold())
@@ -388,10 +418,11 @@ struct ContentView: View {
                 ForEach(visibleSessions) { session in
                   redesignedSessionRow(session)
                 }
-                if hasMoreSessions {
-                  loadMoreSessionsButton
+                if visibleSessions.count < sessions.count {
+                  loadMoreSessionsButton(totalCount: sessions.count)
                 }
               }
+              .padding(.vertical, 6)
             }
           }
         }
@@ -507,8 +538,8 @@ struct ContentView: View {
   private func redesignedSessionRow(_ session: SessionItem) -> some View {
     let selected = workspace.isSelectedSession(path: session.path)
     let running = workspace.model(forSessionPath: session.path)?.isBusy == true
-    let hovered = hoveredSessionPath == session.path
-    return ZStack(alignment: .trailing) {
+    return SidebarHoverRegion { hovered in
+    ZStack(alignment: .trailing) {
       Button {
         guard let projectURL = app.projectURL else { return }
         workspace.openSession(path: session.path, in: projectURL)
@@ -542,8 +573,10 @@ struct ContentView: View {
           workspace.archiveSession(path: session.path, in: projectURL)
         } label: {
           Image(systemName: "archivebox")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.secondary)
             .frame(width: 26, height: 26)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
         .disabled(running)
@@ -552,27 +585,38 @@ struct ContentView: View {
         .transition(.opacity)
       }
     }
-    .background(
-      selected ? Color.accentColor.opacity(0.13) : Color.clear,
-      in: RoundedRectangle(cornerRadius: 9)
-    )
-    .contentShape(Rectangle())
-    .onHover { isHovered in
-      withAnimation(.easeOut(duration: 0.12)) {
-        hoveredSessionPath = isHovered ? session.path : nil
-      }
+    .background {
+      RoundedRectangle(cornerRadius: 9)
+        .fill(
+          selected ? Color.accentColor.opacity(0.11)
+            : hovered ? Color.primary.opacity(0.055) : Color.clear
+        )
+        .overlay {
+          RoundedRectangle(cornerRadius: 9)
+            .strokeBorder(
+              hovered ? (selected ? Color.accentColor.opacity(0.17) : Color.primary.opacity(0.07))
+                : Color.clear,
+              lineWidth: 1
+            )
+        }
+        .shadow(color: .black.opacity(hovered ? 0.07 : 0), radius: 4, y: 1)
+    }
+    .contentShape(RoundedRectangle(cornerRadius: 9))
     }
   }
 
   private var sidebar: some View {
-    VStack(alignment: .leading, spacing: 16) {
+    let sessions = allSessions
+    let visibleSessions = Array(sessions.prefix(visibleSessionCount))
+    return VStack(alignment: .leading, spacing: 16) {
       Label("Pi Mac", systemImage: "apple.terminal")
         .font(.title2.bold())
 
       HStack(spacing: 7) {
         Circle().fill(app.connectionState.color).frame(width: 8, height: 8)
-        Text(app.connectionState.label).font(.caption)
+        Text("Pi \(app.connectionState.label)").font(.caption)
       }
+      TelegramConnectionBadge(control: workspace.telegram)
 
       GroupBox("工作目录") {
         VStack(alignment: .leading, spacing: 8) {
@@ -637,8 +681,8 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                   }
-                  if hasMoreSessions {
-                    loadMoreSessionsButton
+                  if visibleSessions.count < sessions.count {
+                    loadMoreSessionsButton(totalCount: sessions.count)
                   }
                 }
               }
@@ -678,17 +722,9 @@ struct ContentView: View {
     return workspace.sessions(in: projectURL)
   }
 
-  private var visibleSessions: [SessionItem] {
-    Array(allSessions.prefix(visibleSessionCount))
-  }
-
-  private var hasMoreSessions: Bool {
-    visibleSessions.count < allSessions.count
-  }
-
-  private var loadMoreSessionsButton: some View {
+  private func loadMoreSessionsButton(totalCount: Int) -> some View {
     Button {
-      visibleSessionCount = min(visibleSessionCount + 10, allSessions.count)
+      visibleSessionCount = min(visibleSessionCount + 10, totalCount)
     } label: {
       Label("载入更多", systemImage: "chevron.down")
         .font(.caption)
@@ -1244,6 +1280,11 @@ struct ContentView: View {
           }
         }
       }
+      Divider()
+      Button("将当前等级设为全局默认") {
+        app.setGlobalDefaultThinkingLevel(app.selectedThinkingLevel)
+      }
+      Text("全局默认：\(thinkingLevelLabel(app.globalDefaultThinkingLevel))")
     } label: {
       HStack(spacing: 4) {
         Image(systemName: "brain.head.profile")
@@ -1257,6 +1298,35 @@ struct ContentView: View {
     .disabled(app.isBusy)
   }
 
+}
+
+/// Hover is local to the row, not ContentView (which also lays out the transcript).
+private struct TelegramConnectionBadge: View {
+  @ObservedObject var control: TelegramControl
+
+  var body: some View {
+    HStack(spacing: 4) {
+      Circle()
+        .fill(control.enabled ? control.connectionState.color : Color.secondary)
+        .frame(width: 6, height: 6)
+      Text("Telegram \(control.enabled ? control.connectionState.label : "未启用")")
+        .lineLimit(1)
+    }
+    .font(.caption2)
+    .foregroundStyle(.secondary)
+    .help(control.status)
+  }
+}
+
+private struct SidebarHoverRegion<Content: View>: View {
+  @State private var hovered = false
+  @ViewBuilder var content: (Bool) -> Content
+
+  var body: some View {
+    content(hovered)
+      .onHover { hovered = $0 }
+      .animation(.easeOut(duration: 0.12), value: hovered)
+  }
 }
 
 private struct ComposerTextView: NSViewRepresentable {
@@ -2421,7 +2491,7 @@ private struct ModelSettingsView: View {
       HStack {
         VStack(alignment: .leading, spacing: 3) {
           Text("模型与思考等级").font(.title2.bold())
-          Text("显示设置写入 Pi 的 enabledModels；默认等级写入 modelThinkingLevels。")
+          Text("全局默认写入 defaultThinkingLevel；单个模型默认写入 modelThinkingLevels。")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -2443,6 +2513,33 @@ private struct ModelSettingsView: View {
           .buttonStyle(.borderedProminent)
       }
       .padding(20)
+
+      Divider()
+
+      HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 3) {
+          Text("全局默认思考等级").font(.callout.weight(.medium))
+          Text("无模型专属默认时使用；当前会话的等级不会因此改变。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        Picker(
+          "全局默认思考等级",
+          selection: Binding(
+            get: { app.globalDefaultThinkingLevel },
+            set: { app.setGlobalDefaultThinkingLevel($0) }
+          )
+        ) {
+          ForEach(PiModel.thinkingLevelOrder, id: \.self) { level in
+            Text(thinkingLevelLabel(level)).tag(level)
+          }
+        }
+        .labelsHidden()
+        .frame(width: 175)
+      }
+      .padding(.horizontal, 20)
+      .padding(.vertical, 14)
 
       Divider()
 
@@ -2540,15 +2637,18 @@ private struct ModelSettingsView: View {
 private struct SettingsView: View {
   @Environment(\.dismiss) private var dismiss
   @State private var path: String
+  @State private var editingPath = false
   @StateObject private var versions: VersionManagerModel
   let projectURL: URL?
+  let telegram: TelegramControl
   let save: (String) -> Void
 
-  init(path: String, projectURL: URL?, save: @escaping (String) -> Void) {
+  init(path: String, projectURL: URL?, telegram: TelegramControl, save: @escaping (String) -> Void) {
     _path = State(initialValue: path)
     _versions = StateObject(
       wrappedValue: VersionManagerModel(piPath: path, projectURL: projectURL))
     self.projectURL = projectURL
+    self.telegram = telegram
     self.save = save
   }
 
@@ -2571,14 +2671,31 @@ private struct SettingsView: View {
         VStack(alignment: .leading, spacing: 22) {
           GroupBox("Pi 可执行文件") {
             VStack(alignment: .leading, spacing: 8) {
-              TextField("/path/to/pi", text: $path).textFieldStyle(.roundedBorder)
-              Text("修改路径后保存并重新打开设置，即可检查对应的 Pi。")
+              HStack(spacing: 8) {
+                if editingPath {
+                  TextField("/path/to/pi", text: $path)
+                    .textFieldStyle(.roundedBorder)
+                } else {
+                  Text(path)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+                    .padding(.horizontal, 8)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                }
+                Button(editingPath ? "完成编辑" : "编辑路径") { editingPath.toggle() }
+              }
+              Text("如需修改，点击“编辑路径”；保存后重新打开设置即可检查对应的 Pi。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
           }
+
+          TelegramSettingsView(control: telegram)
 
           GroupBox("Pi 版本") {
             HStack(spacing: 12) {

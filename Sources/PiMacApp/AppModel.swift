@@ -6,20 +6,31 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AppModel: ObservableObject {
-  @Published var connectionState: ConnectionState = .disconnected
+  @Published var connectionState: ConnectionState = .disconnected {
+    didSet { if connectionState == .connected { scheduleCodexAccountRotation() } }
+  }
   @Published var projectURL: URL?
   @Published var messages: [ChatEntry] = []
   /// Models shown in the composer. `allModels` also contains models hidden by Pi's enabledModels setting.
   @Published var models: [PiModel] = []
   @Published var allModels: [PiModel] = []
   @Published var modelDefaultThinkingLevels: [String: String] = [:]
+  @Published var globalDefaultThinkingLevel = "medium"
   @Published var compactionModelID: String?
-  @Published var selectedModelId = ""
+  @Published var selectedModelId = "" {
+    didSet { scheduleCodexAccountRotation() }
+  }
   @Published var thinkingLevels = ["off"]
   @Published var selectedThinkingLevel = "off"
-  @Published var isStreaming = false
-  @Published var isCompacting = false
-  @Published var isLoadingConfiguration = false
+  @Published var isStreaming = false {
+    didSet { if !isStreaming { scheduleCodexAccountRotation() } }
+  }
+  @Published var isCompacting = false {
+    didSet { if !isCompacting { scheduleCodexAccountRotation() } }
+  }
+  @Published var isLoadingConfiguration = false {
+    didSet { if !isLoadingConfiguration { scheduleCodexAccountRotation() } }
+  }
   @Published var sessionName = ""
   @Published var sessions: [SessionItem] = []
   @Published var currentSessionPath = ""
@@ -36,11 +47,19 @@ final class AppModel: ObservableObject {
   private static let lastSelectedModelKey = "lastSelectedModelID"
 
   private let client = PiRPCClient()
+  private var codexRotationScheduled = false
+  @Published private(set) var codexRotationInFlight = false
+  private let codexHandoff = CodexAccountHandoff()
+  private var lastCodexRotationAttempt: Date?
+  private let remembersDesktopProject: Bool
+  private let modelPreferenceKey: String
+  private let thinkingPreferenceKey: String?
   private var activeAssistantId: String?
   private var activeThinkingId: String?
   private var activeCompactionId: String?
   private var sessionLoadGeneration = UUID()
   private var isRewritingQueue = false
+  private var awaitingAgentStart = false
   private var submittingQueuedPrompts: [UUID: Int] = [:]
   private var consumedPromptsAwaitingDisplay: [QueuedPrompt] = []
   private var pendingAssistantError: String?
@@ -56,7 +75,13 @@ final class AppModel: ObservableObject {
   private var messageDeltaFlushScheduled = false
   private var messageDeltaFlushGeneration = 0
   /// Invalidates startup callbacks and timeout tasks when an RPC process is replaced.
-  private var connectionGeneration = UUID()
+  private var connectionGeneration = UUID() {
+    didSet {
+      codexHandoff.reset()
+      codexRotationInFlight = false
+      lastCodexRotationAttempt = nil
+    }
+  }
 
   private var selectedModel: PiModel? {
     allModels.first { $0.id == selectedModelId }
@@ -75,8 +100,14 @@ final class AppModel: ObservableObject {
     continueLastSession: Bool = true,
     startupSessionPath: String? = nil,
     restoreLastProjectOnLaunch: Bool = true,
-    initialComposerText: String = ""
+    initialComposerText: String = "",
+    remembersDesktopProject: Bool = true,
+    modelPreferenceKey: String = "lastSelectedModelID",
+    thinkingPreferenceKey: String? = nil
   ) {
+    self.remembersDesktopProject = remembersDesktopProject
+    self.modelPreferenceKey = modelPreferenceKey
+    self.thinkingPreferenceKey = thinkingPreferenceKey
     // The workspace already knows the target project when constructing a tab. Publish it
     // synchronously so persistent chrome (project/session sidebar) never observes a temporary
     // nil project while the RPC connection is deferred to the next main-actor turn.
@@ -93,6 +124,7 @@ final class AppModel: ObservableObject {
     client.onTermination = { [weak self] code in
       guard let self else { return }
       self.isStreaming = false
+      self.awaitingAgentStart = false
       self.isCompacting = false
       self.isLoadingConfiguration = false
       self.statusText = ""
@@ -102,6 +134,9 @@ final class AppModel: ObservableObject {
 
     Task { @MainActor [weak self] in
       await Task.yield()
+      // A tab may have been selected again before this deferred startup runs. In that case
+      // resumeProcess has already connected it; do not stop and restart the same RPC process.
+      guard self?.isProcessRunning != true else { return }
       if let startupProjectURL {
         if let startupSessionPath {
           self?.connect(
@@ -171,7 +206,9 @@ final class AppModel: ObservableObject {
         workingDirectory: projectURL,
         continueLastSession: continueLastSession
       )
-      UserDefaults.standard.set(projectURL.path, forKey: Self.lastProjectPathKey)
+      if remembersDesktopProject {
+        UserDefaults.standard.set(projectURL.path, forKey: Self.lastProjectPathKey)
+      }
       if let sessionPath {
         currentSessionPath = sessionPath
         client.request(["type": "switch_session", "sessionPath": sessionPath]) {
@@ -203,7 +240,11 @@ final class AppModel: ObservableObject {
   }
 
   var isProcessRunning: Bool { client.isRunning }
-  var isBusy: Bool { isStreaming || isCompacting }
+  var isBusy: Bool { isStreaming || isCompacting || codexRotationInFlight }
+  var canRestartSafely: Bool {
+    !isBusy && !awaitingAgentStart && !isLoadingConfiguration && queuedPrompts.isEmpty
+      && submittingQueuedPrompts.isEmpty && !isRewritingQueue
+  }
   var canReloadModelList: Bool {
     client.isRunning && !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty
       && projectURL != nil
@@ -216,7 +257,7 @@ final class AppModel: ObservableObject {
   /// Stop an idle RPC process without discarding the session's transcript, composer draft,
   /// attachments, or extension snapshot. Selecting the session starts a replacement process.
   func suspendProcess() {
-    guard !isBusy, queuedPrompts.isEmpty, client.isRunning else { return }
+    guard canRestartSafely, client.isRunning else { return }
     connectionGeneration = UUID()
     connectionState = .disconnected
     isLoadingConfiguration = false
@@ -240,6 +281,7 @@ final class AppModel: ObservableObject {
     extensionUI?.removeRequests(from: self)
     connectionState = .disconnected
     isStreaming = false
+    awaitingAgentStart = false
     isCompacting = false
     isLoadingConfiguration = false
     queuedPrompts = []
@@ -320,7 +362,7 @@ final class AppModel: ObservableObject {
     let displayText = text.isEmpty ? "请查看附件。" : text
     let rpcText = Self.rpcText(for: displayText, attachments: sentAttachments)
 
-    if isCompacting {
+    if isCompacting || codexRotationInFlight {
       queuedPrompts.append(
         QueuedPrompt(
           id: UUID(),
@@ -455,6 +497,11 @@ final class AppModel: ObservableObject {
   }
 
   func abort() {
+    if codexRotationInFlight {
+      codexHandoff.cancel()
+      statusText = "正在停止，已取消账户切换后的自动继续…"
+      return
+    }
     isRewritingQueue = true
     client.request(["type": "clear_queue"]) { [weak self] result in
       guard let self else { return }
@@ -476,6 +523,19 @@ final class AppModel: ObservableObject {
     }
   }
 
+  /// Remote input must not consume or overwrite the local composer draft and attachments.
+  func sendRemotePrompt(
+    _ text: String, attachments: [PromptAttachment] = [], completion: @escaping (Bool) -> Void
+  ) {
+    guard clientConnectedForCommands, client.isRunning, !isLoadingConfiguration,
+      !isBusy, queuedPrompts.isEmpty,
+      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    else { completion(false); return }
+    submitImmediatePrompt(
+      QueuedPrompt(id: UUID(), text: text, rpcText: text, delivery: .steer, attachments: attachments),
+      completion: completion)
+  }
+
   private func submitImmediatePrompt(
     _ prompt: QueuedPrompt,
     completion: ((Bool) -> Void)? = nil
@@ -488,12 +548,14 @@ final class AppModel: ObservableObject {
         text: prompt.text,
         attachments: prompt.attachments
       ))
+    awaitingAgentStart = true
     client.request(Self.promptCommand(message: prompt.rpcText, attachments: prompt.attachments)) {
       [weak self] result in
       switch result {
       case .success:
         completion?(true)
       case .failure(let error):
+        self?.awaitingAgentStart = false
         self?.appendSystemError(error.localizedDescription)
         completion?(false)
       }
@@ -539,6 +601,7 @@ final class AppModel: ObservableObject {
   }
 
   private func flushCompactionQueue(willRetry: Bool) {
+    guard !codexRotationInFlight else { return }
     let deferred = queuedPrompts.filter(\.waitsForCompaction)
     guard !deferred.isEmpty else { return }
 
@@ -590,9 +653,13 @@ final class AppModel: ObservableObject {
     return command
   }
 
+  var canReuseProcessForNewSession: Bool {
+    client.isRunning && !isBusy && !isLoadingConfiguration
+      && queuedPrompts.isEmpty && clientConnectedForCommands
+  }
+
   func newSession(completion: ((Bool) -> Void)? = nil) {
-    guard client.isRunning, !isBusy, !isLoadingConfiguration,
-      queuedPrompts.isEmpty, case .connected = connectionState
+    guard canReuseProcessForNewSession
     else {
       completion?(false)
       return
@@ -682,28 +749,23 @@ final class AppModel: ObservableObject {
   }
 
   func changeModel(to id: String) {
-    guard id != selectedModelId, let model = allModels.first(where: { $0.id == id }) else { return }
+    guard let model = allModels.first(where: { $0.id == id }) else { return }
+    if id == selectedModelId {
+      // Explicitly choosing the current remote model should also pin it for future sessions.
+      if thinkingPreferenceKey != nil { UserDefaults.standard.set(id, forKey: modelPreferenceKey) }
+      return
+    }
     client.request(["type": "set_model", "provider": model.provider, "modelId": model.modelId]) {
       [weak self] result in
       switch result {
       case .success:
         guard let self else { return }
         self.selectedModelId = id
-        UserDefaults.standard.set(id, forKey: Self.lastSelectedModelKey)
-        // The RPC process may have started before the settings sheet changed the file.
-        // Apply the saved per-model default explicitly so it also works in this process.
-        if let defaultLevel = self.modelDefaultThinkingLevels[id],
-          model.thinkingLevels.contains(defaultLevel)
-        {
-          self.client.request(["type": "set_thinking_level", "level": defaultLevel]) {
-            [weak self] result in
-            if case .failure(let error) = result {
-              self?.appendSystemError(error.localizedDescription)
-            }
-            self?.synchronizeThinkingConfiguration(expectedModelID: id)
-          }
-        } else {
-          self.synchronizeThinkingConfiguration(expectedModelID: id)
+        UserDefaults.standard.set(id, forKey: self.modelPreferenceKey)
+        // Pi's settings manager may still hold the defaults from process startup.
+        // Apply the latest per-model or global default explicitly in that case.
+        self.applySavedThinkingLevel(for: model.id) { [weak self] in
+          self?.synchronizeThinkingConfiguration(expectedModelID: id)
         }
       case .failure(let error): self?.appendSystemError(error.localizedDescription)
       }
@@ -711,12 +773,26 @@ final class AppModel: ObservableObject {
   }
 
   func changeThinkingLevel(to level: String) {
-    guard level != selectedThinkingLevel, thinkingLevels.contains(level) else { return }
+    guard thinkingLevels.contains(level) else { return }
+    if level == selectedThinkingLevel {
+      if let key = thinkingPreferenceKey {
+        var levels = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
+        levels[selectedModelId] = level
+        UserDefaults.standard.set(levels, forKey: key)
+      }
+      return
+    }
     client.request(["type": "set_thinking_level", "level": level]) { [weak self] result in
       switch result {
       case .success:
+        guard let self else { return }
+        if let key = self.thinkingPreferenceKey {
+          var levels = UserDefaults.standard.dictionary(forKey: key) as? [String: String] ?? [:]
+          levels[self.selectedModelId] = level
+          UserDefaults.standard.set(levels, forKey: key)
+        }
         // Pi may clamp a requested value to model capabilities. get_state is authoritative.
-        self?.synchronizeThinkingConfiguration(expectedModelID: self?.selectedModelId)
+        self.synchronizeThinkingConfiguration(expectedModelID: self.selectedModelId)
       case .failure(let error): self?.appendSystemError(error.localizedDescription)
       }
     }
@@ -735,6 +811,17 @@ final class AppModel: ObservableObject {
       applyModelPreferences()
     } catch {
       appendSystemError("保存模型显示设置失败：\(error.localizedDescription)")
+    }
+  }
+
+  func setGlobalDefaultThinkingLevel(_ level: String) {
+    guard PiModel.thinkingLevelOrder.contains(level) else { return }
+    do {
+      try PiSettingsStore.setDefaultThinkingLevel(level)
+      applyModelPreferences()
+      statusText = "全局默认思考等级已保存；将在切换模型或新建会话时生效"
+    } catch {
+      appendSystemError("保存全局默认思考等级失败：\(error.localizedDescription)")
     }
   }
 
@@ -801,6 +888,99 @@ final class AppModel: ObservableObject {
     )
   }
 
+  /// Recheck after the current RPC event finishes, then hand off an active run if needed.
+  func scheduleCodexAccountRotation() {
+    guard !codexRotationScheduled else { return }
+    codexRotationScheduled = true
+    Task { @MainActor [weak self] in
+      guard let self else { return }
+      self.codexRotationScheduled = false
+      self.rotateCodexAccountIfNeeded()
+    }
+  }
+
+  private func rotateCodexAccountIfNeeded() {
+    guard connectionState == .connected, client.isRunning,
+      !isLoadingConfiguration, !awaitingAgentStart, !isRewritingQueue,
+      submittingQueuedPrompts.isEmpty, !codexRotationInFlight,
+      selectedModelId.hasPrefix("openai-codex/"),
+      let usage = extensionUI?.usage(for: self), usage.gemini?.isActive != true,
+      let target = CodexAccountRotation.nextAccount(in: usage.accounts)
+    else { return }
+    // Repeated status events and failures must not create a rapid switch/retry loop.
+    let now = Date()
+    guard lastCodexRotationAttempt.map({ now.timeIntervalSince($0) >= 60 }) ?? true
+    else { return }
+    lastCodexRotationAttempt = now
+    let resume = isStreaming
+    let interrupt = isStreaming || isCompacting
+    codexRotationInFlight = true
+    isRewritingQueue = true
+    let generation = connectionGeneration
+    statusText = "5h 额度低于 5%，正在停止当前执行并切换到 \(target)…"
+    codexHandoff.start(
+      target: target, interrupt: interrupt,
+      request: { [weak self] command, completion in
+        self?.client.request(command, completion: completion)
+      },
+      preserveQueue: { [weak self] data in
+        guard let self else { return }
+        self.reconcileQueue(
+          steering: data["steering"] as? [String] ?? [],
+          followUp: data["followUp"] as? [String] ?? [])
+        for index in self.queuedPrompts.indices {
+          self.queuedPrompts[index].waitsForCompaction = true
+        }
+        self.latestQueueSnapshot = ([], [])
+      },
+      verifyAccount: { [weak self] in
+        guard let self else { return false }
+        return self.extensionUI?.usage(for: self).accounts.first(where: \.isActive)?.name == target
+      },
+      completion: { [weak self] result in
+        guard let self, self.connectionGeneration == generation else { return }
+        self.codexRotationInFlight = false
+        self.isRewritingQueue = false
+        self.statusText = ""
+        switch result {
+        case .success:
+          if resume {
+            // Keep the logical run active across the handoff, including for Telegram replies.
+            let text = "刚才因 Codex 账户额度不足中断，现已切换账户。请基于当前会话上下文继续完成尚未完成的任务；先检查被中断操作的实际结果，不要重复已完成的操作。"
+            self.submitImmediatePrompt(
+              QueuedPrompt(id: UUID(), text: text, rpcText: text, delivery: .steer, attachments: [])
+            ) { [weak self] accepted in
+              guard let self, self.connectionGeneration == generation else { return }
+              if accepted {
+                self.flushCompactionQueue(willRetry: true)
+              } else {
+                self.isStreaming = false
+                self.restoreCodexHandoffQueue()
+              }
+            }
+          } else {
+            self.flushCompactionQueue(willRetry: false)
+          }
+        case .failure(let error):
+          // Query actual state: clear_queue/abort may have failed while the agent is still running.
+          self.restoreCodexHandoffQueue()
+          self.loadState()
+          if !(error is CancellationError) {
+            self.appendSystemError("自动切换 Codex 账户失败：\(error.localizedDescription)")
+          }
+        }
+      })
+  }
+
+  private func restoreCodexHandoffQueue() {
+    let held = queuedPrompts.filter(\.waitsForCompaction)
+    guard !held.isEmpty else { return }
+    let text = held.map(\.text).joined(separator: "\n\n")
+    composerText = composerText.isEmpty ? text : composerText + "\n\n" + text
+    attachments.append(contentsOf: held.flatMap(\.attachments))
+    queuedPrompts.removeAll(where: \.waitsForCompaction)
+  }
+
   func switchCodexAccount(to accountName: String) {
     guard !isBusy else {
       statusText = "当前任务完成后才能切换 Codex 账户"
@@ -863,7 +1043,9 @@ final class AppModel: ObservableObject {
 
   func appendExtensionNotification(_ text: String) {
     messages.append(
-      ChatEntry(id: UUID().uuidString, kind: .system, title: "通知", text: text)
+      ChatEntry(
+        id: UUID().uuidString, kind: .system, title: "通知",
+        text: QuotaNotificationFormatter.format(text))
     )
   }
 
@@ -891,9 +1073,10 @@ final class AppModel: ObservableObject {
   // Only explicit model changes update the preference. Opening an older session must not
   // replace the model used for future new tasks with that session's historical model.
   static func preferredNewSessionModelID(
-    currentModelID: String, defaults: UserDefaults = .standard
+    currentModelID: String, defaults: UserDefaults = .standard,
+    preferenceKey: String = lastSelectedModelKey
   ) -> String? {
-    let saved = defaults.string(forKey: lastSelectedModelKey) ?? ""
+    let saved = defaults.string(forKey: preferenceKey) ?? ""
     let id = saved.isEmpty ? currentModelID : saved
     let parts = id.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
     guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
@@ -903,9 +1086,14 @@ final class AppModel: ObservableObject {
   private func selectPreferredModelForNewSession(
     generation: UUID, completion: (() -> Void)? = nil
   ) {
-    guard let id = Self.preferredNewSessionModelID(currentModelID: selectedModelId) else {
-      refreshAll(startupGeneration: generation)
+    let finish: () -> Void = { [weak self] in
+      guard let self, self.connectionGeneration == generation else { return }
+      self.refreshAll(startupGeneration: generation)
       completion?()
+    }
+    guard let id = Self.preferredNewSessionModelID(
+      currentModelID: selectedModelId, preferenceKey: modelPreferenceKey) else {
+      applySavedThinkingLevelForCurrentModel(generation: generation, completion: finish)
       return
     }
     let parts = id.split(separator: "/", maxSplits: 1)
@@ -916,8 +1104,39 @@ final class AppModel: ObservableObject {
       if case .failure(let error) = result {
         self.appendSystemError("无法为新任务选择上次使用的模型：\(error.localizedDescription)")
       }
-      self.refreshAll(startupGeneration: generation)
-      completion?()
+      self.applySavedThinkingLevelForCurrentModel(generation: generation, completion: finish)
+    }
+  }
+
+  private func applySavedThinkingLevelForCurrentModel(
+    generation: UUID, completion: @escaping () -> Void
+  ) {
+    client.request(["type": "get_state"]) { [weak self] result in
+      guard let self, self.connectionGeneration == generation else { return }
+      guard case .success(let response) = result,
+        let state = response["data"] as? PiRPCClient.JSON,
+        let model = state["model"] as? PiRPCClient.JSON,
+        let provider = model["provider"] as? String,
+        let modelID = model["id"] as? String
+      else {
+        completion()
+        return
+      }
+      self.applySavedThinkingLevel(for: "\(provider)/\(modelID)", completion: completion)
+    }
+  }
+
+  private func applySavedThinkingLevel(for modelID: String, completion: @escaping () -> Void) {
+    let preferences = PiSettingsStore.loadModelPreferences()
+    let remoteLevels = thinkingPreferenceKey.flatMap {
+      UserDefaults.standard.dictionary(forKey: $0) as? [String: String]
+    }
+    let level = remoteLevels?[modelID] ?? preferences.thinkingLevel(for: modelID)
+    client.request(["type": "set_thinking_level", "level": level]) { [weak self] result in
+      if case .failure(let error) = result {
+        self?.appendSystemError("应用默认思考等级失败：\(error.localizedDescription)")
+      }
+      completion()
     }
   }
 
@@ -936,7 +1155,9 @@ final class AppModel: ObservableObject {
         let data = response["data"] as? PiRPCClient.JSON
       else { return }
       self?.selectedThinkingLevel = data["thinkingLevel"] as? String ?? "off"
-      self?.isStreaming = data["isStreaming"] as? Bool ?? false
+      if self?.codexRotationInFlight != true {
+        self?.isStreaming = data["isStreaming"] as? Bool ?? false
+      }
       self?.isCompacting = data["isCompacting"] as? Bool ?? false
       self?.sessionName = data["sessionName"] as? String ?? ""
       let sessionPath = data["sessionFile"] as? String ?? ""
@@ -985,6 +1206,13 @@ final class AppModel: ObservableObject {
     transcriptLoadInFlightKey = nil
     loadedTranscriptKey = nil
     loadedTranscriptPath = nil
+  }
+
+  /// Another Pi process (e.g. Telegram) may append to the same JSONL session without
+  /// producing events on this model's RPC connection.
+  func refreshExternalTranscript(at path: String) {
+    guard currentSessionPath == path, canRestartSafely else { return }
+    loadCompleteTranscript(at: path)
   }
 
   private func loadCompleteTranscript(at path: String) {
@@ -1116,9 +1344,14 @@ final class AppModel: ObservableObject {
     }
   }
 
+  func refreshModelPreferences() {
+    applyModelPreferences()
+  }
+
   private func applyModelPreferences() {
     let preferences = PiSettingsStore.loadModelPreferences()
     modelDefaultThinkingLevels = preferences.thinkingLevels
+    globalDefaultThinkingLevel = preferences.defaultThinkingLevel
     compactionModelID = PiSettingsStore.compactionModelID()
     models = allModels.filter(preferences.includes)
   }
@@ -1174,9 +1407,10 @@ final class AppModel: ObservableObject {
     }
   }
 
-  nonisolated static func discoverSessions(for projectPath: String) -> [SessionItem] {
-    let root = FileManager.default.homeDirectoryForCurrentUser
+  nonisolated static func discoverSessions(
+    for projectPath: String, root: URL = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".pi/agent/sessions", isDirectory: true)
+  ) -> [SessionItem] {
     guard
       let enumerator = FileManager.default.enumerator(
         at: root,
@@ -1187,37 +1421,10 @@ final class AppModel: ObservableObject {
 
     var result: [SessionItem] = []
     for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-      guard let handle = try? FileHandle(forReadingFrom: url) else { continue }
-      let data = try? handle.read(upToCount: 262_144)
-      try? handle.close()
-      guard let data, let text = String(data: data, encoding: .utf8) else { continue }
-
-      let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-      guard let first = lines.first,
-        let headerData = String(first).data(using: .utf8),
-        let header = try? JSONSerialization.jsonObject(with: headerData) as? PiRPCClient.JSON,
-        header["type"] as? String == "session",
-        (header["cwd"] as? String).map({ URL(fileURLWithPath: $0).standardizedFileURL.path })
-          == projectPath
-      else { continue }
-
+      guard let preview = sessionPreview(inFile: url, projectPath: projectPath) else { continue }
+      let header = preview.header
+      let firstUserText = preview.text
       var title = (header["name"] as? String) ?? (header["sessionName"] as? String) ?? ""
-      var firstUserText: String?
-      for line in lines.dropFirst() {
-        guard let lineData = String(line).data(using: .utf8),
-          let entry = try? JSONSerialization.jsonObject(with: lineData) as? PiRPCClient.JSON,
-          entry["type"] as? String == "message",
-          let message = entry["message"] as? PiRPCClient.JSON,
-          message["role"] as? String == "user"
-        else { continue }
-        firstUserText = contentText(message["content"])
-          .trimmingCharacters(in: .whitespacesAndNewlines)
-          .replacingOccurrences(of: "\n", with: " ")
-        break
-      }
-      // 启动新任务时 Pi 可能立即写入会话头和配置记录。没有用户消息的文件
-      // 仍然只是草稿，不应进入会话列表。
-      guard let firstUserText else { continue }
       if title.isEmpty { title = firstUserText }
       if title.isEmpty { title = "未命名会话" }
       title = String(title.prefix(70))
@@ -1232,6 +1439,58 @@ final class AppModel: ObservableObject {
         ))
     }
     return result.sorted { $0.modifiedAt > $1.modifiedAt }
+  }
+
+  /// Read complete JSONL records: image attachments and UTF-8 characters can cross chunk boundaries.
+  /// Stop after the first user message; header-only drafts stay hidden.
+  nonisolated private static func sessionPreview(
+    inFile url: URL, projectPath: String
+  ) -> (header: PiRPCClient.JSON, text: String)? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    var header: PiRPCClient.JSON?
+    var pending = Data()
+    while true {
+      let chunk: Data
+      do {
+        chunk = try handle.read(upToCount: 262_144) ?? Data()
+      } catch {
+        return nil
+      }
+      let atEnd = chunk.isEmpty
+      var start = chunk.startIndex
+      while start < chunk.endIndex || (atEnd && !pending.isEmpty) {
+        let newline = chunk[start...].firstIndex(of: 0x0A)
+        let end = newline ?? chunk.endIndex
+        pending.append(contentsOf: chunk[start..<end])
+        start = newline.map { $0 + 1 } ?? chunk.endIndex
+        if newline == nil && !atEnd { break }
+        let line = pending
+        pending = Data()
+        if line.isEmpty { continue }
+        guard let entry = try? JSONSerialization.jsonObject(with: line) as? PiRPCClient.JSON
+        else {
+          if header == nil { return nil }
+          continue
+        }
+        if header == nil {
+          guard entry["type"] as? String == "session",
+            (entry["cwd"] as? String).map({ URL(fileURLWithPath: $0).standardizedFileURL.path })
+              == projectPath
+          else { return nil }
+          header = entry
+        } else if entry["type"] as? String == "message",
+          let message = entry["message"] as? PiRPCClient.JSON,
+          message["role"] as? String == "user", let header
+        {
+          return (header, contentText(message["content"])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: " "))
+        }
+      }
+      if atEnd { break }
+    }
+    return nil
   }
 
   nonisolated private static func latestUserMessageDate(in lines: [Substring]) -> Date? {
@@ -1254,7 +1513,9 @@ final class AppModel: ObservableObject {
     defer { try? handle.close() }
     guard let size = try? handle.seekToEnd() else { return nil }
 
-    let chunkSize: UInt64 = 1_048_576
+    // Most sessions have a recent user message near the tail. Avoid decoding a full
+    // megabyte (often containing tool output) just to find its timestamp.
+    let chunkSize: UInt64 = 65_536
     var end = size
     var suffix = Data()
     while end > 0 {
@@ -1309,7 +1570,9 @@ final class AppModel: ObservableObject {
     guard let type = event["type"] as? String else { return }
     switch type {
     case "agent_start":
+      awaitingAgentStart = false
       isStreaming = true
+      scheduleCodexAccountRotation()
       // 全新会话的 JSONL 路径通常在第一次请求开始时才创建。
       // 立即同步状态，确保工作区能把这个 RPC 进程与历史会话稳定关联。
       refreshSessionMetadata()
@@ -1319,10 +1582,11 @@ final class AppModel: ObservableObject {
       flushPendingMessageDeltas()
       flushConsumedPromptsIntoTranscript()
       flushPendingAssistantError()
-      isStreaming = false
+      // `abort` settles the old provider run, not the logical task being handed off.
+      if !codexRotationInFlight { isStreaming = false }
       activeAssistantId = nil
       activeThinkingId = nil
-      statusText = ""
+      if !codexRotationInFlight { statusText = "" }
       loadStats()
       refreshSessionMetadata()
     case "thinking_level_changed":
@@ -1760,11 +2024,20 @@ final class AppModel: ObservableObject {
   ) -> [ChatEntry] {
     var toolInputs: [String: String] = [:]
     var entries: [ChatEntry] = []
+    // One reverse pass avoids scanning the rest of the transcript for every failed retry.
+    var retriedBeforeNextUser = Array(repeating: false, count: messages.count)
+    var laterAssistant = false
+    for index in messages.indices.reversed() {
+      retriedBeforeNextUser[index] = laterAssistant
+      switch messages[index]["role"] as? String {
+      case "user": laterAssistant = false
+      case "assistant": laterAssistant = true
+      default: break
+      }
+    }
 
     for (messageIndex, message) in messages.enumerated() {
-      let hidesRetriedError =
-        isAssistantError(message)
-        && hasLaterAssistant(beforeNextUserAfter: messageIndex, in: messages)
+      let hidesRetriedError = isAssistantError(message) && retriedBeforeNextUser[messageIndex]
 
       if message["role"] as? String == "assistant",
         let blocks = message["content"] as? [PiRPCClient.JSON]
@@ -1918,20 +2191,6 @@ final class AppModel: ObservableObject {
 
   nonisolated private static func isAssistantError(_ message: PiRPCClient.JSON) -> Bool {
     message["role"] as? String == "assistant" && message["stopReason"] as? String == "error"
-  }
-
-  nonisolated private static func hasLaterAssistant(
-    beforeNextUserAfter index: Int, in messages: [PiRPCClient.JSON]
-  ) -> Bool {
-    guard index + 1 < messages.count else { return false }
-    for message in messages[(index + 1)...] {
-      switch message["role"] as? String {
-      case "user": return false
-      case "assistant": return true
-      default: continue
-      }
-    }
-    return false
   }
 
   nonisolated private static func assistantErrorText(

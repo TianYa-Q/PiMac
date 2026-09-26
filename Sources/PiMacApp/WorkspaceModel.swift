@@ -28,12 +28,16 @@ final class WorkspaceModel: ObservableObject {
   @Published private(set) var loadingSessionCatalogs: Set<String> = []
   @Published var selectedTabID: UUID?
   let extensionUI = ExtensionUIModel()
+  let telegram = TelegramControl()
 
   private static let savedProjectsKey = "workspaceProjectPaths"
   private static let activeProjectKey = "workspaceActiveProjectPath"
   private static let archivedSessionsKey = "workspaceArchivedSessionPaths"
   private static let sessionCatalogsKey = "workspaceSessionCatalogs"
   private static let composerDraftsKey = "workspaceComposerDrafts"
+  private static let lastSessionByProjectKey = "workspaceLastSessionByProject"
+  private static let lastClosedAtKey = "workspaceLastClosedAt"
+  private static let sessionRestoreInterval: TimeInterval = 5 * 60
   private static let maximumLiveProcesses = 4
   private static let idleProcessLifetime: Duration = .seconds(10 * 60)
   private var observations: [UUID: AnyCancellable] = [:]
@@ -42,7 +46,10 @@ final class WorkspaceModel: ObservableObject {
   private var composerDraftObservations: [UUID: AnyCancellable] = [:]
   private var selectedTabByProject: [String: UUID] = [:]
   private var sessionCatalogs: [String: [SessionItem]]
+  private var lastSessionByProject: [String: String]
+  private var sessionCatalogRefreshedAt: [String: Date] = [:]
   private var composerDrafts: [String: ComposerDraft]
+  private var composerDraftSaveTask: Task<Void, Never>?
   private var sessionCatalogGenerations: [String: UUID] = [:]
   private var lastUsedAt: [UUID: Date] = [:]
   private var idleProcessTasks: [UUID: Task<Void, Never>] = [:]
@@ -52,6 +59,8 @@ final class WorkspaceModel: ObservableObject {
     let defaults = UserDefaults.standard
     archivedSessionPaths = Set(defaults.stringArray(forKey: Self.archivedSessionsKey) ?? [])
     sessionCatalogs = Self.readSessionCatalogs(from: defaults)
+    lastSessionByProject =
+      defaults.dictionary(forKey: Self.lastSessionByProjectKey) as? [String: String] ?? [:]
     composerDrafts = Self.readComposerDrafts(from: defaults)
     let savedPaths = defaults.stringArray(forKey: Self.savedProjectsKey) ?? []
     let fallbackPath = defaults.string(forKey: "lastProjectPath")
@@ -60,15 +69,13 @@ final class WorkspaceModel: ObservableObject {
 
     let activePath = defaults.string(forKey: Self.activeProjectKey)
     if let project = projects.first(where: { $0.id == activePath }) ?? projects.first {
-      addTab(
-        model: AppModel(
-          startupProjectURL: project.url,
-          continueLastSession: true,
-          initialComposerText: composerDrafts[project.id]?.text ?? ""
-        ),
-        requestedSessionPath: nil,
-        isDraft: false
-      )
+      let restorePreviousSession = Self.shouldRestoreLastSession(
+        closedAt: defaults.object(forKey: Self.lastClosedAtKey) as? Date, now: .now)
+      if !restorePreviousSession {
+        lastSessionByProject.removeValue(forKey: project.id)
+        defaults.set(lastSessionByProject, forKey: Self.lastSessionByProjectKey)
+      }
+      openLastSessionTab(for: project, restorePreviousSession: restorePreviousSession)
     } else {
       addTab(
         model: AppModel(restoreLastProjectOnLaunch: false), requestedSessionPath: nil,
@@ -76,6 +83,14 @@ final class WorkspaceModel: ObservableObject {
     }
 
     for project in projects { refreshSessionCatalog(for: project.url) }
+    telegram.start(workspace: self)
+  }
+
+  var canRestartSafely: Bool {
+    telegram.canRestartSafely && tabs.allSatisfy { tab in
+      let model = tab.model
+      return model.canRestartSafely && !extensionUI.hasPendingRequests(from: model)
+    }
   }
 
   var selectedModel: AppModel? {
@@ -100,7 +115,7 @@ final class WorkspaceModel: ObservableObject {
   }
 
   func selectProject(_ project: WorkspaceProject) {
-    refreshSessionCatalog(for: project.url)
+    refreshSessionCatalog(for: project.url, ifStale: true)
     if let tabID = selectedTabByProject[project.id], tabs.contains(where: { $0.id == tabID }) {
       selectTab(tabID)
       return
@@ -111,15 +126,34 @@ final class WorkspaceModel: ObservableObject {
       selectTab(existing.id)
       return
     }
-    discardSelectedDraftIfEmpty()
+    // Switching projects must keep the previous project's selected draft/tab intact.
+    openLastSessionTab(for: project)
+  }
+
+  static func shouldRestoreLastSession(closedAt: Date?, now: Date) -> Bool {
+    guard let closedAt else { return false }
+    let elapsed = now.timeIntervalSince(closedAt)
+    return elapsed >= 0 && elapsed <= sessionRestoreInterval
+  }
+
+  private func openLastSessionTab(
+    for project: WorkspaceProject, restorePreviousSession: Bool = true
+  ) {
+    // Render the last selected transcript from disk while Pi starts in the background.
+    let savedPath = restorePreviousSession ? lastSessionByProject[project.id] : nil
+    let path = savedPath.flatMap {
+      !archivedSessionPaths.contains($0) && FileManager.default.fileExists(atPath: $0) ? $0 : nil
+    }
+    let draft = composerDrafts[project.id]
     addTab(
       model: AppModel(
         startupProjectURL: project.url,
-        continueLastSession: true,
-        initialComposerText: composerDrafts[project.id]?.text ?? ""
+        continueLastSession: restorePreviousSession && path == nil,
+        startupSessionPath: path,
+        initialComposerText: restorePreviousSession && draft?.sessionPath == path ? draft?.text ?? "" : ""
       ),
-      requestedSessionPath: nil,
-      isDraft: false
+      requestedSessionPath: path,
+      isDraft: !restorePreviousSession
     )
   }
 
@@ -142,8 +176,11 @@ final class WorkspaceModel: ObservableObject {
     projects.removeAll { $0.id == project.id }
     selectedTabByProject.removeValue(forKey: project.id)
     sessionCatalogs.removeValue(forKey: project.id)
+    sessionCatalogRefreshedAt.removeValue(forKey: project.id)
+    lastSessionByProject.removeValue(forKey: project.id)
+    UserDefaults.standard.set(lastSessionByProject, forKey: Self.lastSessionByProjectKey)
     composerDrafts.removeValue(forKey: project.id)
-    persistComposerDrafts()
+    flushComposerDrafts()
     sessionCatalogGenerations.removeValue(forKey: project.id)
     loadingSessionCatalogs.remove(project.id)
     persistProjects()
@@ -174,7 +211,7 @@ final class WorkspaceModel: ObservableObject {
       }
       // An idle RPC process can replace its active session in place. Busy sessions still get a
       // separate process so background work remains genuinely concurrent.
-      if tab.model.isProcessRunning, !tab.model.isBusy, tab.model.queuedPrompts.isEmpty,
+      if tab.model.canReuseProcessForNewSession,
         !extensionUI.hasPendingRequests(from: tab.model)
       {
         // Change the workspace selection state before waiting for Pi's new_session reply. AppModel
@@ -239,6 +276,17 @@ final class WorkspaceModel: ObservableObject {
     addProject(projectURL)
   }
 
+  /// Telegram uses separate RPC processes. Refresh the sidebar catalog and any desktop tab
+  /// showing the same persisted session after that process writes to disk.
+  func remoteSessionChanged(in projectURL: URL?, sessionPath: String) {
+    guard let projectURL else { return }
+    refreshSessionCatalog(for: projectURL)
+    guard !sessionPath.isEmpty else { return }
+    for tab in tabs where tab.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL {
+      tab.model.refreshExternalTranscript(at: sessionPath)
+    }
+  }
+
   func isLoadingSessions(in projectURL: URL) -> Bool {
     loadingSessionCatalogs.contains(projectURL.standardizedFileURL.path)
   }
@@ -278,6 +326,10 @@ final class WorkspaceModel: ObservableObject {
     archivedSessionPaths.insert(path)
     let projectPath = projectURL.standardizedFileURL.path
     sessionCatalogs[projectPath]?.removeAll { $0.path == path }
+    if lastSessionByProject[projectPath] == path {
+      lastSessionByProject.removeValue(forKey: projectPath)
+      UserDefaults.standard.set(lastSessionByProject, forKey: Self.lastSessionByProjectKey)
+    }
     persistArchivedSessions()
     persistSessionCatalogs()
 
@@ -325,7 +377,21 @@ final class WorkspaceModel: ObservableObject {
     })?.model
   }
 
+  func recordCloseTime() {
+    flushComposerDrafts()
+    UserDefaults.standard.set(Date.now, forKey: Self.lastClosedAtKey)
+  }
+
   func disconnectAll() {
+    telegram.stop()
+    if let selected = tabs.first(where: { $0.id == selectedTabID }),
+      selected.model.hasUserMessage,
+      let projectPath = selected.model.projectURL?.standardizedFileURL.path
+    {
+      let sessionPath = selected.model.currentSessionPath
+      if !sessionPath.isEmpty { rememberSession(sessionPath, in: projectPath) }
+    }
+    recordCloseTime()
     sessionObservations.removeAll()
     for task in idleProcessTasks.values { task.cancel() }
     idleProcessTasks.removeAll()
@@ -338,13 +404,27 @@ final class WorkspaceModel: ObservableObject {
     }
   }
 
+  static func sidebarUpdates(for model: AppModel) -> AnyPublisher<Void, Never> {
+    Publishers.MergeMany([
+      model.$projectURL.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+      model.$currentSessionPath.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+      model.$sessionName.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+      model.$isStreaming.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+      model.$isCompacting.removeDuplicates().map { _ in () }.eraseToAnyPublisher(),
+    ]).eraseToAnyPublisher()
+  }
+
   private func addTab(model: AppModel, requestedSessionPath: String?, isDraft: Bool) {
     model.extensionUI = extensionUI
     let tab = Tab(
       id: UUID(), model: model, requestedSessionPath: requestedSessionPath, createdAt: .now,
       isDraft: isDraft)
     tabs.append(tab)
-    observations[tab.id] = model.objectWillChange.sink { [weak self, weak model] _ in
+    // Transcript deltas, diagnostics and token counters are observed by the chat itself.
+    // Forward only sidebar metadata, not every token from every background process.
+    observations[tab.id] = Self.sidebarUpdates(for: model)
+    .receive(on: DispatchQueue.main)
+    .sink { [weak self, weak model] _ in
       guard let self, let model else { return }
       self.synchronizeProject(for: model)
       self.objectWillChange.send()
@@ -373,24 +453,47 @@ final class WorkspaceModel: ObservableObject {
       model.$composerText, model.$currentSessionPath
     )
     .dropFirst()
-    .sink { [weak self] _, _ in
+    .sink { [weak self] _, sessionPath in
       MainActor.assumeIsolated {
-        self?.persistComposerDraft(for: tab.id)
+        guard let self else { return }
+        self.persistComposerDraft(for: tab.id)
+        if self.selectedTabID == tab.id,
+          self.tabs.first(where: { $0.id == tab.id })?.isDraft == false,
+          !sessionPath.isEmpty,
+          let projectPath = model.projectURL?.standardizedFileURL.path
+        {
+          self.rememberSession(sessionPath, in: projectPath)
+        }
       }
     }
-    selectTab(tab.id)
+    // AppModel's initializer schedules its own connection; selecting a brand-new tab must not
+    // start a second RPC process before that deferred connection runs.
+    selectTab(tab.id, startProcessIfNeeded: false)
   }
 
-  private func selectTab(_ id: UUID) {
+  static func shouldDiscardDraftOnTabSwitch(from previousProject: URL?, to nextProject: URL?) -> Bool {
+    guard let previousProject, let nextProject else { return false }
+    return previousProject.standardizedFileURL.path == nextProject.standardizedFileURL.path
+  }
+
+  private func selectTab(_ id: UUID, startProcessIfNeeded: Bool = true) {
     let previousID = selectedTabID
-    if id != previousID { discardSelectedDraftIfEmpty(except: id) }
-    selectedTabID = id
     guard let selected = tabs.first(where: { $0.id == id }) else { return }
+    if id != previousID,
+      Self.shouldDiscardDraftOnTabSwitch(
+        from: tabs.first(where: { $0.id == previousID })?.model.projectURL,
+        to: selected.model.projectURL)
+    {
+      discardSelectedDraftIfEmpty(except: id)
+    }
+    selectedTabID = id
     persistComposerDraft(for: id)
+    // Commit pending editor changes when switching tabs.
+    flushComposerDrafts()
 
     idleProcessTasks.removeValue(forKey: id)?.cancel()
     lastUsedAt[id] = .now
-    if !selected.model.isProcessRunning {
+    if startProcessIfNeeded && !selected.model.isProcessRunning {
       selected.model.resumeProcess(
         sessionPath: selected.requestedSessionPath,
         continueLastSession: !selected.isDraft
@@ -400,6 +503,10 @@ final class WorkspaceModel: ObservableObject {
     if let path = selected.model.projectURL?.standardizedFileURL.path {
       selectedTabByProject[path] = id
       UserDefaults.standard.set(path, forKey: Self.activeProjectKey)
+      let sessionPath = selected.requestedSessionPath ?? selected.model.currentSessionPath
+      if !sessionPath.isEmpty && !selected.isDraft {
+        rememberSession(sessionPath, in: path)
+      }
     }
     if let previousID, previousID != id { scheduleProcessSuspension(for: previousID) }
     trimProcessPool()
@@ -491,8 +598,19 @@ final class WorkspaceModel: ObservableObject {
     }
   }
 
-  private func refreshSessionCatalog(for projectURL: URL) {
+  private func rememberSession(_ sessionPath: String, in projectPath: String) {
+    guard lastSessionByProject[projectPath] != sessionPath else { return }
+    lastSessionByProject[projectPath] = sessionPath
+    UserDefaults.standard.set(lastSessionByProject, forKey: Self.lastSessionByProjectKey)
+  }
+
+  private func refreshSessionCatalog(for projectURL: URL, ifStale: Bool = false) {
     let projectPath = projectURL.standardizedFileURL.path
+    if ifStale {
+      if loadingSessionCatalogs.contains(projectPath) { return }
+      if let refreshedAt = sessionCatalogRefreshedAt[projectPath],
+        Date.now.timeIntervalSince(refreshedAt) < 30 { return }
+    }
     let generation = UUID()
     sessionCatalogGenerations[projectPath] = generation
     loadingSessionCatalogs.insert(projectPath)
@@ -505,6 +623,7 @@ final class WorkspaceModel: ObservableObject {
         self.sessionCatalogGenerations[projectPath] == generation
       else { return }
       self.loadingSessionCatalogs.remove(projectPath)
+      self.sessionCatalogRefreshedAt[projectPath] = .now
       self.updateSessionCatalog(sessions, forPath: projectPath)
     }
   }
@@ -544,6 +663,18 @@ final class WorkspaceModel: ObservableObject {
       let sessionPath = tab.requestedSessionPath ?? (currentPath.isEmpty ? nil : currentPath)
       composerDrafts[projectPath] = ComposerDraft(sessionPath: sessionPath, text: text)
     }
+    composerDraftSaveTask?.cancel()
+    composerDraftSaveTask = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(400))
+      guard !Task.isCancelled else { return }
+      self?.persistComposerDrafts()
+      self?.composerDraftSaveTask = nil
+    }
+  }
+
+  private func flushComposerDrafts() {
+    composerDraftSaveTask?.cancel()
+    composerDraftSaveTask = nil
     persistComposerDrafts()
   }
 

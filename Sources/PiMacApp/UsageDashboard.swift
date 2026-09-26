@@ -154,13 +154,12 @@ enum UsageScanner {
       if let cached = index.files[path], cached.size == Int64(size), cached.modified == modified {
         continue
       }
-      // A file can be appended while we're reading it. Recheck metadata before caching it.
+      // A file can be appended while we're reading it. Keep the previous snapshot if the
+      // metadata changes mid-scan, then retry on the next pass instead of losing its totals.
       if let parsed = parseFile(url, size: Int64(size), modified: modified) {
         index.files[path] = parsed
-      } else {
-        index.files.removeValue(forKey: path)
+        changed = true
       }
-      changed = true
     }
     let removed = index.files.keys.filter { !seen.contains($0) }
     for path in removed { index.files.removeValue(forKey: path) }
@@ -172,14 +171,14 @@ enum UsageScanner {
     }
 
     let calendar = Calendar.current
+    let startDay = startDate.map { calendar.startOfDay(for: $0) }
     var snapshot = UsageSnapshot()
     var days: [Date: UsageDay] = [:]
     var models: [String: ModelUsage] = [:]
     var projects: [String: ProjectUsage] = [:]
     for file in index.files.values {
       var sessionIncluded = false
-      for bucket in file.buckets
-      where startDate.map({ bucket.day >= calendar.startOfDay(for: $0) }) ?? true {
+      for bucket in file.buckets where startDay.map({ bucket.day >= $0 }) ?? true {
         snapshot.totalTokens += bucket.tokens
         snapshot.inputTokens += bucket.input
         snapshot.outputTokens += bucket.output
@@ -233,10 +232,13 @@ enum UsageScanner {
     var project: String?
     var buckets: [String: UsageBucket] = [:]
     let calendar = Calendar.current
-    let formatter = ISO8601DateFormatter()
+    let fractionalFormatter = ISO8601DateFormatter()
+    fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let secondsFormatter = ISO8601DateFormatter()
+    let usageMarker = Data("\"usage\"".utf8)
     for line in data.split(separator: 0x0A) {
       // Most lines are user messages, tool calls or events; avoid JSON decoding those bodies.
-      if project != nil && !line.contains(Data("\"usage\"".utf8)) { continue }
+      if project != nil && !line.contains(usageMarker) { continue }
       guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
       else { continue }
       if project == nil {
@@ -248,7 +250,9 @@ enum UsageScanner {
         let message = record["message"] as? [String: Any],
         message["role"] as? String == "assistant",
         let usage = message["usage"] as? [String: Any],
-        let date = recordDate(record, message: message, formatter: formatter)
+        let date = recordDate(
+          record, message: message, fractionalFormatter: fractionalFormatter,
+          secondsFormatter: secondsFormatter)
       else { continue }
       let day = calendar.startOfDay(for: date)
       let model = message["model"] as? String ?? "未知模型"
@@ -290,13 +294,12 @@ enum UsageScanner {
   }
 
   private nonisolated static func recordDate(
-    _ record: [String: Any], message: [String: Any], formatter: ISO8601DateFormatter
+    _ record: [String: Any], message: [String: Any],
+    fractionalFormatter: ISO8601DateFormatter, secondsFormatter: ISO8601DateFormatter
   ) -> Date? {
     if let timestamp = record["timestamp"] as? String {
-      formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-      if let date = formatter.date(from: timestamp) { return date }
-      formatter.formatOptions = [.withInternetDateTime]
-      if let date = formatter.date(from: timestamp) { return date }
+      if let date = fractionalFormatter.date(from: timestamp) { return date }
+      if let date = secondsFormatter.date(from: timestamp) { return date }
     }
     if let timestamp = message["timestamp"] as? NSNumber {
       return Date(timeIntervalSince1970: timestamp.doubleValue / 1_000)

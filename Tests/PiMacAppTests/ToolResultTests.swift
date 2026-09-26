@@ -64,6 +64,24 @@ struct ToolResultTests {
   }
 
   @Test
+  func retryDetectionStopsAtNextUserEvenWithToolResultsBetweenRetries() {
+    let entries = AppModel.chatEntries(from: [
+      ["role": "assistant", "content": [], "stopReason": "error", "errorMessage": "retry"],
+      ["role": "toolResult", "content": []],
+      ["role": "assistant", "content": [["type": "text", "text": "recovered"]]],
+      ["role": "user", "content": "next prompt"],
+      ["role": "assistant", "content": [], "stopReason": "error", "errorMessage": "final"],
+      ["role": "toolResult", "content": []],
+      ["role": "user", "content": "another prompt"],
+      ["role": "assistant", "content": [["type": "text", "text": "new answer"]]],
+    ])
+
+    #expect(!entries.contains { $0.text == "retry" })
+    #expect(entries.contains { $0.text == "recovered" })
+    #expect(entries.contains { $0.text == "final" && $0.isError })
+  }
+
+  @Test
   func formatsBashCommandAndReadRange() {
     #expect(
       AppModel.toolInputText(

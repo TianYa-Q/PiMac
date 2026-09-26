@@ -4,6 +4,11 @@ import Foundation
 struct PiModelPreferences {
   var enabledModels: [String]?
   var thinkingLevels: [String: String]
+  var defaultThinkingLevel: String = "medium"
+
+  func thinkingLevel(for modelID: String) -> String {
+    thinkingLevels[modelID] ?? defaultThinkingLevel
+  }
 
   func includes(_ model: PiModel) -> Bool {
     guard let enabledModels, !enabledModels.isEmpty else { return true }
@@ -121,13 +126,14 @@ enum PiSettingsStore {
       .appendingPathComponent(".pi/agent/settings.json")
   }
 
-  static func loadModelPreferences() -> PiModelPreferences {
-    let settings = loadJSON()
+  static func loadModelPreferences(from url: URL = globalURL) -> PiModelPreferences {
+    let settings = loadJSON(from: url)
     let rawLevels = settings["modelThinkingLevels"] as? [String: Any] ?? [:]
     let levels = rawLevels.compactMapValues { $0 as? String }
     return PiModelPreferences(
       enabledModels: settings["enabledModels"] as? [String],
-      thinkingLevels: levels
+      thinkingLevels: levels,
+      defaultThinkingLevel: settings["defaultThinkingLevel"] as? String ?? "medium"
     )
   }
 
@@ -171,6 +177,12 @@ enum PiSettingsStore {
     }
   }
 
+  static func setDefaultThinkingLevel(_ level: String, at url: URL = globalURL) throws {
+    var settings = loadJSON(from: url)
+    settings["defaultThinkingLevel"] = level
+    try saveJSON(settings, to: url)
+  }
+
   static func setThinkingLevel(_ level: String?, for modelID: String) throws {
     var settings = loadJSON()
     var levels = (settings["modelThinkingLevels"] as? [String: Any]) ?? [:]
@@ -196,15 +208,15 @@ enum PiSettingsStore {
       .appendingPathComponent("extensions/pi-mac-compaction-model.ts")
   }
 
-  private static func loadJSON() -> [String: Any] {
-    guard let data = try? Data(contentsOf: globalURL),
+  private static func loadJSON(from url: URL = globalURL) -> [String: Any] {
+    guard let data = try? Data(contentsOf: url),
       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return [:] }
     return object
   }
 
-  private static func saveJSON(_ settings: [String: Any]) throws {
-    let directory = globalURL.deletingLastPathComponent()
+  private static func saveJSON(_ settings: [String: Any], to url: URL = globalURL) throws {
+    let directory = url.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let data = try JSONSerialization.data(
       withJSONObject: settings,
@@ -212,6 +224,6 @@ enum PiSettingsStore {
     )
     var terminated = data
     terminated.append(0x0A)
-    try terminated.write(to: globalURL, options: .atomic)
+    try terminated.write(to: url, options: .atomic)
   }
 }

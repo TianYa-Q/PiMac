@@ -51,6 +51,45 @@ struct TranscriptHistoryTests {
     #expect(model.messages.count == 1)
   }
 
+  @Test @MainActor
+  func externalSessionAppendRefreshesVisibleTranscriptWithoutSwitching() async throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: url) }
+    func append(_ id: String, _ text: String) throws {
+      let record: PiRPCClient.JSON = [
+        "type": "message", "id": id, "parentId": id == "first" ? NSNull() : "first",
+        "message": ["role": id == "first" ? "user" : "assistant", "content": text],
+      ]
+      let line = try JSONSerialization.data(withJSONObject: record) + Data("\n".utf8)
+      if FileManager.default.fileExists(atPath: url.path) {
+        let handle = try FileHandle(forWritingTo: url)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        try handle.write(contentsOf: line)
+      } else {
+        try line.write(to: url)
+      }
+    }
+    try append("first", "问题")
+    let model = AppModel(restoreLastProjectOnLaunch: false)
+    model.currentSessionPath = url.path
+    model.refreshExternalTranscript(at: url.path)
+    for _ in 0..<50 where model.messages.count < 1 {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(model.messages.count == 1)
+    try append("second", "来自 Telegram 的回复")
+    model.isStreaming = true
+    model.refreshExternalTranscript(at: url.path)
+    #expect(model.messages.count == 1)
+    model.isStreaming = false
+    model.refreshExternalTranscript(at: url.path)
+    for _ in 0..<50 where model.messages.count < 2 {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(model.messages.map(\.text) == ["问题", "来自 Telegram 的回复"])
+  }
+
   @Test
   func assistantThinkingRestoresAsSeparateCardsInContentOrder() {
     let messages: [PiRPCClient.JSON] = [

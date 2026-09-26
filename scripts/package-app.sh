@@ -47,5 +47,6 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$APP_DIR"
+SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
+codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"
 echo "已生成：$APP_DIR"

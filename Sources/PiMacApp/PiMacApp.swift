@@ -1,6 +1,46 @@
 import AppKit
 import SwiftUI
 
+/// Enabled only by scripts/dev.py; packaged apps never watch or relaunch themselves.
+@MainActor
+final class DevelopmentReloader: ObservableObject {
+  private let executable: URL?
+  private var originalModification: Date?
+  private var pendingSince: Date?
+  private var reloading = false
+
+  init() {
+    let path = ProcessInfo.processInfo.environment["PIMAC_DEV_RELOAD_PATH"]
+    let running = Bundle.main.executableURL?.standardizedFileURL
+    executable = path.flatMap { URL(fileURLWithPath: $0).standardizedFileURL == running ? running : nil }
+    originalModification = executable.flatMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
+  }
+
+  func check(workspace: WorkspaceModel) {
+    guard !reloading, let executable, let originalModification,
+      let modified = try? executable.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+      modified > originalModification
+    else { return }
+    if pendingSince == nil { pendingSince = .now; return }
+    guard let pendingSince, Date.now.timeIntervalSince(pendingSince) >= 2,
+      workspace.canRestartSafely
+    else { return }
+
+    // Wait for the old process to exit before exec-ing the new binary (Telegram long polling
+    // must not have two owners). Retain the development environment across the relaunch.
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "--", "\(ProcessInfo.processInfo.processIdentifier)", executable.path]
+    do {
+      try process.run()
+      reloading = true
+      NSApp.terminate(nil)
+    } catch {
+      NSLog("Pi Mac development reload failed: %@", String(describing: error))
+    }
+  }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     // SwiftPM 直接运行的可执行文件没有完整 .app 启动流程，AppKit 有时不会
@@ -43,11 +83,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct PiMacApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @StateObject private var workspace = WorkspaceModel()
+  @StateObject private var developmentReloader = DevelopmentReloader()
 
   var body: some Scene {
     WindowGroup {
       WorkspaceView()
         .environmentObject(workspace)
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+          developmentReloader.check(workspace: workspace)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+          workspace.recordCloseTime()
+        }
         .onDisappear { workspace.disconnectAll() }
     }
     .defaultSize(width: 1120, height: 760)

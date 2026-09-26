@@ -266,24 +266,31 @@ final class ExtensionUIModel: ObservableObject {
 
     if selectedSource == nil { selectedSource = source }
     applyUsageForSelectedSource()
+    if selectionIsCurrent && usageIsCurrent {
+      source.scheduleCodexAccountRotation()
+      if let selectedSource, selectedSource !== source {
+        selectedSource.scheduleCodexAccountRotation()
+      }
+    }
   }
 
-  private func applyUsageForSelectedSource() {
-    let selection = selectedSource.flatMap {
+  func usage(for source: AppModel?) -> (accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?) {
+    let selection = source.flatMap {
       sessionAccountSelections[ObjectIdentifier($0)]
     }
     // The first status event after a project switch can arrive from the process that was just
     // left while the new process is still starting. Keep the account currently shown (or use
     // the payload's account when bootstrapping) until the selected process reports its own
     // selection; never turn a valid shared quota snapshot into an empty card.
-    let fallbackActiveAccount =
-      codexAccounts.first(where: \.isActive)?.name
-      ?? usageSnapshot.accounts.first(where: \.isActive)?.name
+    let fallbackActiveAccount = source === selectedSource
+      ? (codexAccounts.first(where: \.isActive)?.name
+         ?? usageSnapshot.accounts.first(where: \.isActive)?.name)
+      : nil
     let activeAccount = selection?.activeAccount ?? fallbackActiveAccount
     let geminiIsActive =
       selection?.geminiIsActive
-      ?? geminiUsage?.isActive
-      ?? usageSnapshot.gemini?.isActive
+      ?? (source === selectedSource ? geminiUsage?.isActive : nil)
+      ?? (source === selectedSource ? usageSnapshot.gemini?.isActive : nil)
     let accounts = usageSnapshot.accounts.map { account in
       CodexAccountStatus(
         name: account.name,
@@ -308,10 +315,15 @@ final class ExtensionUIModel: ObservableObject {
       )
     }
 
-    if codexAccounts != accounts { codexAccounts = accounts }
-    if geminiUsage != gemini { geminiUsage = gemini }
-    if codexAccountsUpdatedAt != usageSnapshot.updatedAt {
-      codexAccountsUpdatedAt = usageSnapshot.updatedAt
+    return (accounts, gemini, usageSnapshot.updatedAt)
+  }
+
+  private func applyUsageForSelectedSource() {
+    let snapshot = usage(for: selectedSource)
+    if codexAccounts != snapshot.accounts { codexAccounts = snapshot.accounts }
+    if geminiUsage != snapshot.gemini { geminiUsage = snapshot.gemini }
+    if codexAccountsUpdatedAt != snapshot.updatedAt {
+      codexAccountsUpdatedAt = snapshot.updatedAt
     }
   }
 
