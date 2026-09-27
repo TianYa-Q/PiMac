@@ -19,6 +19,14 @@ final class TelegramControlTests: XCTestCase {
     XCTAssertEqual(defaults.string(forKey: "lastSelectedModelID"), "desktop/model")
   }
 
+  @MainActor
+  func testProjectListOnlyShowsNames() {
+    let projects = [WorkspaceProject(url: URL(fileURLWithPath: "/private/projects/first")),
+                    WorkspaceProject(url: URL(fileURLWithPath: "/private/projects/second"))]
+    XCTAssertEqual(TelegramControl.projectList(projects[...], start: 0), "1. first\n2. second")
+    XCTAssertEqual(TelegramControl.projectList(projects[1...], start: 1), "2. second")
+  }
+
   func testRemotePromptsWaitInFIFOOrderAndRespectQueueLimit() {
     var queue = TelegramPromptQueue<String>()
     XCTAssertEqual(queue.append("first", maxCount: 2), 1)
@@ -43,6 +51,107 @@ final class TelegramControlTests: XCTestCase {
     TelegramTokenStore.save("", defaults: defaults)
     XCTAssertEqual(TelegramTokenStore.load(defaults: defaults), "")
     XCTAssertNil(defaults.object(forKey: "telegram.botToken"))
+  }
+
+  func testUndeliveredRepliesSurviveReloadAndCanBeCleared() {
+    let suite = "PiMac.TelegramRepliesTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let reply = TelegramUnsentReply(id: UUID(), sessionPath: "/tmp/session.jsonl", text: "未送达的回复")
+
+    XCTAssertTrue(TelegramUnsentReplyStore.load(defaults: defaults).isEmpty)
+    let next = TelegramUnsentReply(id: UUID(), sessionPath: "/tmp/next.jsonl", text: "第二条")
+    TelegramUnsentReplyStore.save(["/tmp/project": [reply, next]], defaults: defaults)
+    XCTAssertEqual(TelegramUnsentReplyStore.load(defaults: defaults)["/tmp/project"], [reply, next])
+    TelegramUnsentReplyStore.save([:], defaults: defaults)
+    XCTAssertTrue(TelegramUnsentReplyStore.load(defaults: defaults).isEmpty)
+    XCTAssertNil(defaults.data(forKey: "telegram.unsentReplies"))
+  }
+
+  func testNewProjectFilesLinkedInReplyCanBeDeliveredWithoutPromptInstructions() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("telegram-output-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("report.txt")
+    try Data("ok".utf8).write(to: file)
+    let outside = FileManager.default.temporaryDirectory.appendingPathComponent("telegram-outside-\(UUID().uuidString)")
+    try Data("private".utf8).write(to: outside)
+    defer { try? FileManager.default.removeItem(at: outside) }
+    let link = root.appendingPathComponent("link.txt")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: outside)
+
+    let parsed = TelegramControl.outputFiles(in:
+      "已完成：[报告](report.txt)，路径 `report.txt`，以及 [网页](https://example.com)。")
+    XCTAssertEqual(parsed, ["report.txt"])
+    XCTAssertEqual(TelegramControl.outputFiles(in: "修改了 `Sources/AppModel.swift`"), [])
+    XCTAssertEqual(TelegramControl.outputFiles(in: "[下载](file://\(file.path))"), [file.path])
+    XCTAssertEqual(TelegramControl.outputFiles(in: "[报告](report%2Etxt)"), ["report.txt"])
+    XCTAssertEqual(try TelegramControl.validOutputFile("report.txt", projectPath: root.path,
+      modifiedSince: Date(timeIntervalSinceNow: -10)).path, file.path)
+    XCTAssertThrowsError(try TelegramControl.validOutputFile("report.txt", projectPath: root.path,
+      modifiedSince: Date(timeIntervalSinceNow: 10)))
+    XCTAssertThrowsError(try TelegramControl.validOutputFile("../\(outside.lastPathComponent)", projectPath: root.path))
+    XCTAssertThrowsError(try TelegramControl.validOutputFile(link.path, projectPath: root.path))
+    XCTAssertThrowsError(try TelegramControl.validOutputFile("missing.txt", projectPath: root.path))
+    XCTAssertEqual(TelegramControl.outputFiles(in: "普通文本 report.txt"), [])
+  }
+
+  func testGeneratedFileQueuePersists() {
+    let suite = "PiMac.TelegramFilesTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let file = TelegramPendingFile(id: UUID(), projectPath: "/tmp/project", filePath: "/tmp/project/report.pdf")
+    TelegramPendingFileStore.save([file], defaults: defaults)
+    XCTAssertEqual(TelegramPendingFileStore.load(defaults: defaults), [file])
+    TelegramPendingFileStore.save([], defaults: defaults)
+    XCTAssertTrue(TelegramPendingFileStore.load(defaults: defaults).isEmpty)
+  }
+
+  func testFailedCommandNoticesPersistWithKeyboardsAndPreserveOrder() {
+    let suite = "PiMac.TelegramNoticesTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let first = TelegramPendingNotice(
+      id: UUID(), text: "已排队（等待队列第 1 位）。",
+      keyboard: [[ ["text": "状态", "callback_data": "/status"] ]])
+    let second = TelegramPendingNotice(id: UUID(), text: "已切换模型", keyboard: nil)
+    XCTAssertTrue(TelegramPendingNoticeStore.load(defaults: defaults).isEmpty)
+    TelegramPendingNoticeStore.save([first, second], defaults: defaults)
+    XCTAssertEqual(TelegramPendingNoticeStore.load(defaults: defaults), [first, second])
+    TelegramPendingNoticeStore.save([second], defaults: defaults)
+    XCTAssertEqual(TelegramPendingNoticeStore.load(defaults: defaults), [second])
+    TelegramPendingNoticeStore.save([], defaults: defaults)
+    XCTAssertNil(defaults.data(forKey: "telegram.pendingNotices"))
+  }
+
+  func testUpdateCursorRestoresBacklogAfterFirstSuccessfulPollAndResetsForNewBot() throws {
+    let suite = "PiMac.TelegramCursorTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let now = Date(timeIntervalSince1970: 200)
+    XCTAssertNil(TelegramUpdateCursorStore.load(defaults: defaults))
+    XCTAssertNil(try update(date: 199).authorizedMessage(
+      userID: 42, since: TelegramUpdateCursorStore.earliestMessageDate(now: now, defaults: defaults)))
+
+    // Even a poll returning no updates stores 0: subsequent launches accept
+    // messages received while the app was closed.
+    TelegramUpdateCursorStore.save(0, defaults: defaults)
+    XCTAssertEqual(TelegramUpdateCursorStore.load(defaults: defaults), 0)
+    XCTAssertNotNil(try update(date: 199).authorizedMessage(
+      userID: 42, since: TelegramUpdateCursorStore.earliestMessageDate(now: now, defaults: defaults)))
+    TelegramUpdateCursorStore.save(123, defaults: defaults)
+    XCTAssertEqual(TelegramUpdateCursorStore.load(defaults: defaults), 123)
+    TelegramUpdateCursorStore.clear(defaults: defaults)
+    XCTAssertNil(TelegramUpdateCursorStore.load(defaults: defaults))
+  }
+
+  func testLegacyUndeliveredReplyMigratesToQueue() throws {
+    let suite = "PiMac.TelegramLegacyRepliesTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let reply = TelegramUnsentReply(id: UUID(), sessionPath: "/tmp/session.jsonl", text: "旧回复")
+    defaults.set(try JSONEncoder().encode(["/tmp/project": reply]), forKey: "telegram.unsentReplies")
+    XCTAssertEqual(TelegramUnsentReplyStore.load(defaults: defaults)["/tmp/project"], [reply])
   }
 
   private func update(
@@ -91,6 +200,48 @@ final class TelegramControlTests: XCTestCase {
     XCTAssertNil(try photoUpdate(type: "group").authorizedMessage(userID: 42, since: since))
     XCTAssertNil(try photoUpdate(bot: true).authorizedMessage(userID: 42, since: since))
     XCTAssertNil(try photoUpdate(date: 99).authorizedMessage(userID: 42, since: since))
+  }
+
+  func testDocumentRequiresAuthorizedPrivateSenderAndSanitizesFilename() throws {
+    func documentUpdate(user: Int64 = 42, chat: Int64 = 42,
+                        type: String = "private", date: Int = 200) throws -> TelegramUpdate {
+      let data = try JSONSerialization.data(withJSONObject: [
+        "update_id": 4,
+        "message": [
+          "date": date, "from": ["id": user, "is_bot": false],
+          "chat": ["id": chat, "type": type], "caption": "总结内容",
+          "document": ["file_id": "document-1", "file_size": 1234, "file_name": "../../报表\n2026.pdf"],
+        ],
+      ])
+      return try JSONDecoder().decode(TelegramUpdate.self, from: data)
+    }
+    let since = Date(timeIntervalSince1970: 100)
+    let message = try documentUpdate().authorizedMessage(userID: 42, since: since)
+    XCTAssertEqual(message?.document?.fileID, "document-1")
+    XCTAssertEqual(message?.document?.fileSize, 1234)
+    XCTAssertEqual(message?.caption, "总结内容")
+    XCTAssertNil(try documentUpdate(user: 43).authorizedMessage(userID: 42, since: since))
+    XCTAssertNil(try documentUpdate(chat: 43).authorizedMessage(userID: 42, since: since))
+    XCTAssertNil(try documentUpdate(type: "group").authorizedMessage(userID: 42, since: since))
+    XCTAssertNil(try documentUpdate(date: 99).authorizedMessage(userID: 42, since: since))
+    XCTAssertEqual(TelegramControl.safeDocumentName(message?.document?.fileName), "___2026.pdf")
+    XCTAssertEqual(TelegramControl.safeDocumentName("../.env"), "env")
+    XCTAssertEqual(TelegramControl.safeDocumentName("..\\evil.txt"), "_evil.txt")
+    XCTAssertEqual(TelegramControl.safeDocumentName(nil), "file")
+    XCTAssertEqual(TelegramControl.safeDocumentName(String(repeating: "a", count: 100) + ".pdf"),
+      String(repeating: "a", count: 60) + ".pdf")
+  }
+
+  @MainActor
+  func testRemoteFilePromptReferencesFileButImageRemainsInline() {
+    let file = PromptAttachment(url: URL(fileURLWithPath: "/tmp/pi-telegram-report.pdf"), mimeType: nil)
+    let image = PromptAttachment(url: URL(fileURLWithPath: "/tmp/pi-telegram-photo.jpg"), mimeType: "image/jpeg")
+    let prompt = AppModel.rpcText(for: "请分析", attachments: [file, image])
+    XCTAssertTrue(prompt.contains("<pi-mac-attached-files>"))
+    XCTAssertTrue(prompt.contains(file.url.path))
+    XCTAssertFalse(prompt.contains(image.url.path))
+    XCTAssertEqual(AppModel.rpcText(for: "请分析", attachments: [image]), "请分析")
+    XCTAssertEqual(AppModel.rpcText(for: "生成报告", attachments: []), "生成报告")
   }
 
   @MainActor
@@ -201,7 +352,7 @@ final class TelegramControlTests: XCTestCase {
   func testBotMenuRegistersSupportedCommands() {
     XCTAssertEqual(
       TelegramControl.botCommands.compactMap { $0["command"] },
-      ["projects", "sessions", "status", "model", "thinking", "usage", "accounts", "new", "compact", "stop", "last", "help"])
+      ["projects", "sessions", "status", "model", "thinking", "usage", "accounts", "new", "compact", "stop", "help"])
     XCTAssertTrue(TelegramControl.botCommands.allSatisfy { !$0["description", default: ""].isEmpty })
   }
 
@@ -209,7 +360,7 @@ final class TelegramControlTests: XCTestCase {
   func testHelpGroupsCommandsAndExplainsHowToStart() {
     let help = TelegramControl.help
     XCTAssertTrue(help.contains("先用 /projects 下方的按钮选项目，随后会自动显示会话状态"))
-    XCTAssertTrue(help.contains("发送文本或照片（可附说明）"))
+    XCTAssertTrue(help.contains("发送文本、照片或文件（可附说明）"))
     XCTAssertTrue(help.contains("/compact  空闲时压缩当前会话上下文"))
     XCTAssertTrue(help.contains("📁 项目与会话"))
     XCTAssertTrue(help.contains("⚙️ 设置与额度"))
@@ -217,7 +368,33 @@ final class TelegramControlTests: XCTestCase {
     for command in TelegramControl.botCommands.compactMap({ $0["command"] }) {
       XCTAssertTrue(help.contains("/\(command) "), "帮助缺少 /\(command)")
     }
+    XCTAssertTrue(help.contains("回传失败的回复会在后台自动重试"))
+    XCTAssertFalse(help.contains("/last"))
     XCTAssertTrue(help.contains("扩展确认仍需在 Mac 上完成"))
+  }
+
+  @MainActor
+  func testProgressStatusUsesOneCardAndReadableElapsedTime() {
+    XCTAssertEqual(TelegramControl.progressMessage(project: "demo", elapsedSeconds: 8),
+      "⏳ 「demo」正在执行 · 已用 8 秒\n任务完成后会单独发送回复。")
+    XCTAssertTrue(TelegramControl.progressMessage(project: "demo", elapsedSeconds: 125)
+      .contains("已用 2 分 5 秒"))
+  }
+
+  @MainActor
+  func testDisconnectedOrFailedSessionRetriesOnlyWhenIdle() {
+    XCTAssertTrue(TelegramControl.shouldRetryConnection(
+      .disconnected, isLoading: false, canRestart: true))
+    XCTAssertTrue(TelegramControl.shouldRetryConnection(
+      .failed("Pi 启动超时"), isLoading: false, canRestart: true))
+    XCTAssertFalse(TelegramControl.shouldRetryConnection(
+      .failed("Pi 启动超时"), isLoading: true, canRestart: true))
+    XCTAssertFalse(TelegramControl.shouldRetryConnection(
+      .failed("Pi 启动超时"), isLoading: false, canRestart: false))
+    XCTAssertFalse(TelegramControl.shouldRetryConnection(
+      .connecting, isLoading: false, canRestart: true))
+    XCTAssertFalse(TelegramControl.shouldRetryConnection(
+      .connected, isLoading: false, canRestart: true))
   }
 
   @MainActor
@@ -234,26 +411,38 @@ final class TelegramControlTests: XCTestCase {
     XCTAssertTrue(TelegramControl.allowedUpdates.contains("callback_query"))
   }
 
+  func testOnlyKnownFunctionalCardsCanBeEdited() {
+    let cards: Set<Int64> = [17]
+    XCTAssertTrue(TelegramControl.shouldEditCallback(messageID: 17, knownCards: cards, command: "/status"))
+    XCTAssertFalse(TelegramControl.shouldEditCallback(messageID: 18, knownCards: cards, command: "/status"))
+  }
+
   func testCallbackRequiresAllowlistedPrivateSenderAndKnownAction() throws {
     func callback(user: Int64 = 42, chat: Int64 = 42, type: String = "private",
-                  bot: Bool = false, command: String = "/projects") throws -> TelegramUpdate {
+                  bot: Bool = false, command: String = "/projects", messageID: Int64? = 17) throws -> TelegramUpdate {
       let data = try JSONSerialization.data(withJSONObject: [
         "update_id": 3,
         "callback_query": [
           "id": "callback-1", "from": ["id": user, "is_bot": bot],
-          "message": ["chat": ["id": chat, "type": type]], "data": command,
+          "message": ["message_id": messageID as Any? ?? NSNull(),
+                      "chat": ["id": chat, "type": type]], "data": command,
         ],
       ])
       return try JSONDecoder().decode(TelegramUpdate.self, from: data)
     }
     XCTAssertEqual(try callback().authorizedCallback(userID: 42)?.command, "/projects")
+    XCTAssertEqual(try callback().authorizedCallback(userID: 42)?.messageID, 17)
+    XCTAssertNil(try callback(messageID: nil).authorizedCallback(userID: 42)?.messageID)
     XCTAssertEqual(try callback(command: "select:2").authorizedCallback(userID: 42)?.id, "callback-1")
     XCTAssertEqual(try callback(command: "/projects 2").authorizedCallback(userID: 42)?.id, "callback-1")
     XCTAssertEqual(try callback(command: "/sessions").authorizedCallback(userID: 42)?.command, "/sessions")
     XCTAssertEqual(try callback(command: "/sessions 2").authorizedCallback(userID: 42)?.command, "/sessions 2")
-    let sessionAction = "session:\(UUID().uuidString)"
+    let identifier = TelegramControl.sessionIdentifier(project: "/tmp/project", path: "/tmp/session.jsonl")
+    let sessionAction = "session:\(identifier)"
     XCTAssertEqual(try callback(command: sessionAction).authorizedCallback(userID: 42)?.command, sessionAction)
     XCTAssertLessThanOrEqual(sessionAction.utf8.count, 64)
+    XCTAssertNil(try callback(command: "session:\(UUID().uuidString)").authorizedCallback(userID: 42))
+    XCTAssertNil(try callback(command: "/last").authorizedCallback(userID: 42))
     XCTAssertNil(try callback(command: "session:1").authorizedCallback(userID: 42))
     XCTAssertNil(try callback(command: "/sessions 0").authorizedCallback(userID: 42))
     XCTAssertNil(try callback(command: "/sessions -1").authorizedCallback(userID: 42))
@@ -301,6 +490,35 @@ final class TelegramControlTests: XCTestCase {
     XCTAssertEqual(TelegramControl.sessionListTitle(name: "", firstPrompt: nil), "新会话")
     XCTAssertEqual(TelegramControl.sessionListTitle(name: "", firstPrompt: "  "), "新会话")
     XCTAssertEqual(TelegramControl.sessionListTitle(name: String(repeating: "长", count: 200), firstPrompt: nil).count, 100)
+  }
+
+  func testSessionIdentifiersSurviveListRefreshAndAreScopedToProjectAndPath() {
+    let project = "/tmp/project"
+    let path = "/tmp/project/session.jsonl"
+    let id = TelegramControl.sessionIdentifier(project: project, path: path)
+    XCTAssertEqual(id, TelegramControl.sessionIdentifier(project: project, path: path))
+    XCTAssertEqual(id.count, 32)
+    XCTAssertNotEqual(id, TelegramControl.sessionIdentifier(project: "/tmp/other", path: path))
+    XCTAssertNotEqual(id, TelegramControl.sessionIdentifier(project: project, path: "/tmp/other.jsonl"))
+    let session = SessionItem(path: path, title: "旧会话", modifiedAt: .distantPast)
+    // No in-memory button mapping is needed: the same saved session resolves
+    // after building a new list or restarting the app.
+    XCTAssertEqual(TelegramControl.sessionForIdentifier(id, project: project,
+      sessions: [session])?.path, path)
+    XCTAssertNil(TelegramControl.sessionForIdentifier(id, project: "/tmp/other", sessions: [session]))
+  }
+
+  func testSessionChoicesIncludeProjectHistoryAndCurrentDraftWithoutDuplicates() {
+    let old = SessionItem(path: "/sessions/old.jsonl", title: "历史任务", modifiedAt: .distantPast)
+    let recent = SessionItem(path: "/sessions/recent.jsonl", title: "最近任务", modifiedAt: .now)
+    XCTAssertEqual(TelegramControl.sessionChoices([recent, old, recent],
+      currentPath: old.path, currentTitle: "当前会话").map(\.path), [recent.path, old.path])
+    let draft = TelegramControl.sessionChoices([recent, old],
+      currentPath: "/sessions/draft.jsonl", currentTitle: "当前草稿")
+    XCTAssertEqual(draft.map(\.path), ["/sessions/draft.jsonl", recent.path, old.path])
+    XCTAssertEqual(draft.first?.title, "当前草稿")
+    XCTAssertEqual(TelegramControl.sessionChoices([recent], currentPath: "",
+      currentTitle: "新会话").map(\.path), [recent.path])
   }
 
   @MainActor

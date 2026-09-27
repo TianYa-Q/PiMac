@@ -532,7 +532,8 @@ final class AppModel: ObservableObject {
       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
     else { completion(false); return }
     submitImmediatePrompt(
-      QueuedPrompt(id: UUID(), text: text, rpcText: text, delivery: .steer, attachments: attachments),
+      QueuedPrompt(id: UUID(), text: text, rpcText: Self.rpcText(for: text, attachments: attachments),
+        delivery: .steer, attachments: attachments),
       completion: completion)
   }
 
@@ -626,7 +627,7 @@ final class AppModel: ObservableObject {
     }
   }
 
-  nonisolated private static func rpcText(
+  nonisolated static func rpcText(
     for displayText: String, attachments: [PromptAttachment]
   ) -> String {
     let filePaths = attachments.filter { !$0.isImage }.map(\.url.path)
@@ -728,22 +729,34 @@ final class AppModel: ObservableObject {
     }
   }
 
-  func switchSession(path: String) {
-    guard !isBusy else {
-      statusText = "当前任务进行中，暂时不能切换会话"
+  func switchSession(path: String, completion: ((Bool) -> Void)? = nil) {
+    guard canReuseProcessForNewSession else {
+      statusText = "当前任务进行中或会话尚未就绪，暂时不能切换会话"
+      completion?(false)
       return
     }
+    let generation = UUID()
+    connectionGeneration = generation
+    isLoadingConfiguration = true
+    statusText = "正在切换会话…"
     client.request(["type": "switch_session", "sessionPath": path]) { [weak self] result in
-      guard let self else { return }
+      guard let self, self.connectionGeneration == generation else { return }
+      self.isLoadingConfiguration = false
+      self.statusText = ""
       switch result {
-      case .failure(let error): self.appendSystemError(error.localizedDescription)
+      case .failure(let error):
+        self.appendSystemError(error.localizedDescription)
+        completion?(false)
       case .success(let response):
         let cancelled = (response["data"] as? PiRPCClient.JSON)?["cancelled"] as? Bool ?? false
-        if !cancelled {
-          self.resetTranscriptLoading()
-          self.currentSessionPath = path
-          self.refreshAll()
-        }
+        guard !cancelled else { completion?(false); return }
+        self.resetTranscriptLoading()
+        self.currentSessionPath = path
+        self.messages.removeAll()
+        self.sessionName = ""
+        self.stats = nil
+        self.refreshAll()
+        completion?(true)
       }
     }
   }
