@@ -5,25 +5,21 @@ final class JSONLineDecoder {
   private var buffer = Data()
 
   func append(_ data: Data) -> [Data] {
-    buffer.append(data)
     var records: [Data] = []
-    var recordStart = buffer.startIndex
-
-    // Scan the newly completed buffer once. Removing each line from the front would shift the
-    // remaining bytes repeatedly and becomes quadratic when one pipe read contains many events.
-    for newlineIndex in buffer.indices where buffer[newlineIndex] == 0x0A {
-      var recordEnd = newlineIndex
-      if recordEnd > recordStart, buffer[buffer.index(before: recordEnd)] == 0x0D {
-        recordEnd = buffer.index(before: recordEnd)
+    // A get_messages response can span many pipe reads. Only scan the new bytes: rescanning
+    // the unfinished record on every read makes large JSONL records quadratic in size.
+    data.withUnsafeBytes { raw in
+      let bytes = raw.bindMemory(to: UInt8.self)
+      guard let base = bytes.baseAddress else { return }
+      var recordStart = 0
+      for index in 0..<bytes.count where bytes[index] == 0x0A {
+        buffer.append(base.advanced(by: recordStart), count: index - recordStart)
+        if buffer.last == 0x0D { buffer.removeLast() }
+        if !buffer.isEmpty { records.append(buffer) }
+        buffer = Data()
+        recordStart = index + 1
       }
-      if recordStart < recordEnd {
-        records.append(Data(buffer[recordStart..<recordEnd]))
-      }
-      recordStart = buffer.index(after: newlineIndex)
-    }
-
-    if recordStart > buffer.startIndex {
-      buffer.removeSubrange(buffer.startIndex..<recordStart)
+      buffer.append(base.advanced(by: recordStart), count: bytes.count - recordStart)
     }
     return records
   }

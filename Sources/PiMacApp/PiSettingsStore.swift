@@ -158,10 +158,11 @@ enum PiSettingsStore {
       at: extensionsDirectory,
       withIntermediateDirectories: true
     )
-    try Data(compactionExtensionSource.utf8).write(
-      to: compactionExtensionURL,
-      options: .atomic
-    )
+    let source = Data(compactionExtensionSource.utf8)
+    // Launching several RPC tabs should not atomically replace an unchanged extension each time.
+    if (try? Data(contentsOf: compactionExtensionURL)) != source {
+      try source.write(to: compactionExtensionURL, options: .atomic)
+    }
   }
 
   static func setCompactionModel(_ model: PiModel?) throws {

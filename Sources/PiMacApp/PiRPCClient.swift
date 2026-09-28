@@ -12,7 +12,20 @@ final class PiRPCClient {
   private var input: FileHandle?
   private var outputHandle: FileHandle?
   private var errorHandle: FileHandle?
-  private var pendingResponses: [String: (Result<JSON, Error>) -> Void] = [:]
+  private struct PendingResponse {
+    let command: String
+    let startedAt: Date
+    let completion: (Result<JSON, Error>) -> Void
+  }
+
+  private var pendingResponses: [String: PendingResponse] = [:]
+
+  var pendingRequestSummary: String {
+    let now = Date()
+    return pendingResponses.values.sorted { $0.startedAt < $1.startedAt }
+      .map { "\($0.command)（\(Int(now.timeIntervalSince($0.startedAt))) 秒）" }
+      .joined(separator: "、")
+  }
   private let readQueue = DispatchQueue(label: "com.jianfeng.pi-mac.rpc-reader")
   /// Identifies the current child process so data already queued by an old pipe cannot be
   /// decoded as output from its replacement.
@@ -78,7 +91,7 @@ final class PiRPCClient {
         self.process = nil
         let error = RPCError.processTerminated(process.terminationStatus)
         for response in self.pendingResponses.values {
-          response(.failure(error))
+          response.completion(.failure(error))
         }
         self.pendingResponses.removeAll()
         self.onTermination?(process.terminationStatus)
@@ -130,7 +143,9 @@ final class PiRPCClient {
     }
     data.append(0x0A)
     if let completion {
-      pendingResponses[id] = completion
+      pendingResponses[id] = PendingResponse(
+        command: payload["type"] as? String ?? "unknown", startedAt: Date(),
+        completion: completion)
     }
 
     do {
@@ -155,7 +170,7 @@ final class PiRPCClient {
       }
       DispatchQueue.main.async { [weak self] in
         guard self?.processGeneration == generation else { return }
-        self?.receive(event)
+        self?.receive(event, byteCount: data.count)
       }
     } catch {
       let text = String(decoding: data, as: UTF8.self)
@@ -166,11 +181,12 @@ final class PiRPCClient {
     }
   }
 
-  private func receive(_ event: JSON) {
+  private func receive(_ event: JSON, byteCount: Int) {
     let type = event["type"] as? String ?? "unknown"
     let id = event["id"] as? String
     if type == "response" {
-      onLog?("← response/\(event["command"] as? String ?? "unknown") [\(id ?? "无 ID")]")
+      let size = byteCount >= 1_000_000 ? "，\(byteCount) bytes" : ""
+      onLog?("← response/\(event["command"] as? String ?? "unknown") [\(id ?? "无 ID")]\(size)")
     } else if type != "message_update" && type != "tool_execution_update"
       && !(type == "extension_ui_request" && event["method"] as? String == "setStatus")
     {
@@ -182,12 +198,12 @@ final class PiRPCClient {
 
     if type == "response",
       let id = event["id"] as? String,
-      let completion = pendingResponses.removeValue(forKey: id)
+      let pending = pendingResponses.removeValue(forKey: id)
     {
       if event["success"] as? Bool == true {
-        completion(.success(event))
+        pending.completion(.success(event))
       } else {
-        completion(.failure(RPCError.commandFailed(event["error"] as? String ?? "未知错误")))
+        pending.completion(.failure(RPCError.commandFailed(event["error"] as? String ?? "未知错误")))
       }
       return
     }

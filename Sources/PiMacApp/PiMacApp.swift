@@ -92,9 +92,6 @@ struct PiMacApp: App {
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
           developmentReloader.check(workspace: workspace)
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-          workspace.recordCloseTime()
-        }
         .onDisappear { workspace.disconnectAll() }
     }
     .defaultSize(width: 1120, height: 760)

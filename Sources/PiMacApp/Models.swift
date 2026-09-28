@@ -47,6 +47,7 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
   var attachments: [PromptAttachment] = []
   var modelProvider: String? = nil
   var modelID: String? = nil
+  var timestamp: Date? = .now
 
   var modelLabel: String? {
     guard let modelID else { return nil }

@@ -2010,6 +2010,14 @@ private struct ChatEntryView: View, Equatable {
           }
           if entry.isRunning { ProgressView().controlSize(.mini) }
           Spacer()
+          if let timestamp = entry.timestamp {
+            Text(timestamp.formatted(date: .omitted, time: .standard))
+              .font(.caption2)
+              .monospacedDigit()
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+              .help(timestamp.formatted(date: .complete, time: .standard))
+          }
           if entry.kind == .assistant, !entry.text.isEmpty {
             Button(action: copyReply) {
               Image(systemName: copied ? "checkmark" : "doc.on.doc")

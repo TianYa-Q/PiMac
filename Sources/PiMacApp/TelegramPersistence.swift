@@ -52,6 +52,14 @@ struct TelegramPendingNotice: Codable, Equatable {
   let id: UUID
   let text: String
   let keyboard: [[[String: String]]]?
+  let sourceMessageID: Int64?
+
+  init(id: UUID, text: String, keyboard: [[[String: String]]]?, sourceMessageID: Int64? = nil) {
+    self.id = id
+    self.text = text
+    self.keyboard = keyboard
+    self.sourceMessageID = sourceMessageID
+  }
 }
 
 enum TelegramPendingNoticeStore {

@@ -36,7 +36,6 @@ final class WorkspaceModel: ObservableObject {
   private static let sessionCatalogsKey = "workspaceSessionCatalogs"
   private static let composerDraftsKey = "workspaceComposerDrafts"
   private static let lastSessionByProjectKey = "workspaceLastSessionByProject"
-  private static let lastClosedAtKey = "workspaceLastClosedAt"
   private static let sessionRestoreInterval: TimeInterval = 5 * 60
   private static let maximumLiveProcesses = 4
   private static let idleProcessLifetime: Duration = .seconds(10 * 60)
@@ -69,20 +68,31 @@ final class WorkspaceModel: ObservableObject {
 
     let activePath = defaults.string(forKey: Self.activeProjectKey)
     if let project = projects.first(where: { $0.id == activePath }) ?? projects.first {
-      let restorePreviousSession = Self.shouldRestoreLastSession(
-        closedAt: defaults.object(forKey: Self.lastClosedAtKey) as? Date, now: .now)
-      if !restorePreviousSession {
-        lastSessionByProject.removeValue(forKey: project.id)
-        defaults.set(lastSessionByProject, forKey: Self.lastSessionByProjectKey)
+      let now = Date.now
+      let cutoff = now.addingTimeInterval(-Self.sessionRestoreInterval)
+      let archivedPaths = archivedSessionPaths
+      Task { [weak self] in
+        let path = await Task.detached(priority: .utility) {
+          AppModel.mostRecentConversationSession(
+            for: project.id, since: cutoff, now: now, archivedPaths: archivedPaths)
+        }.value
+        guard let self, self.selectedTabID == nil,
+          self.projects.contains(where: { $0.id == project.id })
+        else { return }
+        if let path {
+          self.openSession(path: path, in: project.url)
+        } else {
+          self.newSession(in: project.url)
+        }
       }
-      openLastSessionTab(for: project, restorePreviousSession: restorePreviousSession)
     } else {
       addTab(
         model: AppModel(restoreLastProjectOnLaunch: false), requestedSessionPath: nil,
         isDraft: false)
     }
 
-    for project in projects { refreshSessionCatalog(for: project.url) }
+    // Cached catalogs are immediately available for the sidebar. Refresh a project when it is
+    // selected (or its active RPC session loads), not every saved project during app launch.
     telegram.start(workspace: self)
   }
 
@@ -130,30 +140,21 @@ final class WorkspaceModel: ObservableObject {
     openLastSessionTab(for: project)
   }
 
-  static func shouldRestoreLastSession(closedAt: Date?, now: Date) -> Bool {
-    guard let closedAt else { return false }
-    let elapsed = now.timeIntervalSince(closedAt)
-    return elapsed >= 0 && elapsed <= sessionRestoreInterval
-  }
-
-  private func openLastSessionTab(
-    for project: WorkspaceProject, restorePreviousSession: Bool = true
-  ) {
-    // Render the last selected transcript from disk while Pi starts in the background.
-    let savedPath = restorePreviousSession ? lastSessionByProject[project.id] : nil
-    let path = savedPath.flatMap {
+  private func openLastSessionTab(for project: WorkspaceProject) {
+    // Project switching retains its last selected session; the five-minute rule applies to launch.
+    let path = lastSessionByProject[project.id].flatMap {
       !archivedSessionPaths.contains($0) && FileManager.default.fileExists(atPath: $0) ? $0 : nil
     }
     let draft = composerDrafts[project.id]
     addTab(
       model: AppModel(
         startupProjectURL: project.url,
-        continueLastSession: restorePreviousSession && path == nil,
+        continueLastSession: path == nil,
         startupSessionPath: path,
-        initialComposerText: restorePreviousSession && draft?.sessionPath == path ? draft?.text ?? "" : ""
+        initialComposerText: draft?.sessionPath == path ? draft?.text ?? "" : ""
       ),
       requestedSessionPath: path,
-      isDraft: !restorePreviousSession
+      isDraft: false
     )
   }
 
@@ -377,11 +378,6 @@ final class WorkspaceModel: ObservableObject {
     })?.model
   }
 
-  func recordCloseTime() {
-    flushComposerDrafts()
-    UserDefaults.standard.set(Date.now, forKey: Self.lastClosedAtKey)
-  }
-
   func disconnectAll() {
     telegram.stop()
     if let selected = tabs.first(where: { $0.id == selectedTabID }),
@@ -391,7 +387,7 @@ final class WorkspaceModel: ObservableObject {
       let sessionPath = selected.model.currentSessionPath
       if !sessionPath.isEmpty { rememberSession(sessionPath, in: projectPath) }
     }
-    recordCloseTime()
+    flushComposerDrafts()
     sessionObservations.removeAll()
     for task in idleProcessTasks.values { task.cancel() }
     idleProcessTasks.removeAll()

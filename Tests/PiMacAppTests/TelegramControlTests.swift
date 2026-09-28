@@ -27,6 +27,27 @@ final class TelegramControlTests: XCTestCase {
     XCTAssertEqual(TelegramControl.projectList(projects[1...], start: 1), "2. second")
   }
 
+  @MainActor
+  func testQuotedSessionSticksForFollowingUnquotedTextAndImages() {
+    let suite = "PiMac.TelegramRoutingTests.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    var sessions = TelegramMessageSessionStore(defaults: defaults)
+    let project3 = TelegramMessageSessionStore.Location(
+      project: "/projects/three", sessionPath: "/sessions/three.jsonl")
+    let project2 = TelegramMessageSessionStore.Location(
+      project: "/projects/two", sessionPath: "/sessions/two.jsonl")
+    sessions.remember(10, location: project3, defaults: defaults)
+    sessions.remember(20, location: project2, defaults: defaults)
+    let pinned = TelegramControl.routeLocation(replyToID: 10, sessions: sessions, active: nil)
+    XCTAssertEqual(pinned, project3)
+    // Attachment and text messages share the same route when neither quotes a message.
+    XCTAssertEqual(TelegramControl.routeLocation(replyToID: nil, sessions: sessions, active: pinned), project3)
+    XCTAssertEqual(TelegramControl.routeLocation(replyToID: 20, sessions: sessions, active: pinned), project2)
+    XCTAssertNil(TelegramControl.routeLocation(replyToID: 999, sessions: sessions, active: pinned))
+    XCTAssertNil(TelegramControl.routeLocation(replyToID: nil, sessions: sessions, active: nil))
+  }
+
   func testRemotePromptsWaitInFIFOOrderAndRespectQueueLimit() {
     var queue = TelegramPromptQueue<String>()
     XCTAssertEqual(queue.append("first", maxCount: 2), 1)
@@ -113,11 +134,12 @@ final class TelegramControlTests: XCTestCase {
     defer { defaults.removePersistentDomain(forName: suite) }
     let first = TelegramPendingNotice(
       id: UUID(), text: "已排队（等待队列第 1 位）。",
-      keyboard: [[ ["text": "状态", "callback_data": "/status"] ]])
+      keyboard: [[ ["text": "状态", "callback_data": "/status"] ]], sourceMessageID: 123)
     let second = TelegramPendingNotice(id: UUID(), text: "已切换模型", keyboard: nil)
     XCTAssertTrue(TelegramPendingNoticeStore.load(defaults: defaults).isEmpty)
     TelegramPendingNoticeStore.save([first, second], defaults: defaults)
     XCTAssertEqual(TelegramPendingNoticeStore.load(defaults: defaults), [first, second])
+    XCTAssertEqual(TelegramPendingNoticeStore.load(defaults: defaults).first?.sourceMessageID, 123)
     TelegramPendingNoticeStore.save([second], defaults: defaults)
     XCTAssertEqual(TelegramPendingNoticeStore.load(defaults: defaults), [second])
     TelegramPendingNoticeStore.save([], defaults: defaults)
@@ -166,6 +188,52 @@ final class TelegramControlTests: XCTestCase {
       ],
     ])
     return try JSONDecoder().decode(TelegramUpdate.self, from: data)
+  }
+
+  func testReplyMetadataDecodesOnlyForAuthorizedPrivateMessages() throws {
+    let json = #"{"update_id":5,"message":{"message_id":102,"reply_to_message":{"message_id":99},"date":200,"from":{"id":42,"is_bot":false},"chat":{"id":42,"type":"private"},"text":"继续"}}"#
+    let update = try JSONDecoder().decode(TelegramUpdate.self, from: Data(json.utf8))
+    let message = try XCTUnwrap(update.authorizedMessage(userID: 42,
+      since: Date(timeIntervalSince1970: 100)))
+    XCTAssertEqual(message.messageID, 102)
+    XCTAssertEqual(message.replyToMessage?.messageID, 99)
+    XCTAssertNil(update.authorizedMessage(userID: 43, since: .distantPast))
+  }
+
+  func testReplyAssociationsPersistAreBoundedAndCanBeReset() throws {
+    let name = "telegram-replies-\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+    defer { defaults.removePersistentDomain(forName: name) }
+    let location = TelegramMessageSessionStore.Location(
+      project: "/tmp/project-a", sessionPath: "/tmp/session-a.jsonl")
+    var store = TelegramMessageSessionStore(defaults: defaults)
+    store.remember(100, location: location, defaults: defaults)
+    XCTAssertEqual(TelegramMessageSessionStore(defaults: defaults)[100], location)
+    for id in 101...103 {
+      store.remember(Int64(id), location: location, defaults: defaults, maxCount: 3)
+    }
+    XCTAssertNil(store[100])
+    XCTAssertEqual(store[103], location)
+    XCTAssertEqual(store.entries.count, 3)
+    store.clear(defaults: defaults)
+    XCTAssertNil(TelegramMessageSessionStore(defaults: defaults)[103])
+  }
+
+  func testReplyTargetMustBelongToOriginalProject() throws {
+    let url = FileManager.default.temporaryDirectory
+      .appendingPathComponent("telegram-target-\(UUID().uuidString).jsonl")
+    defer { try? FileManager.default.removeItem(at: url) }
+    try Data("""
+      {"type":"session","cwd":"/tmp/project-a"}
+      {"type":"message","message":{"role":"user","content":"hello"}}
+
+      """.utf8).write(to: url)
+    let root = url.deletingLastPathComponent()
+    XCTAssertTrue(AppModel.sessionExists(at: url.path, for: "/tmp/project-a", root: root))
+    XCTAssertFalse(AppModel.sessionExists(at: url.path, for: "/tmp/project-b", root: root))
+    XCTAssertFalse(AppModel.sessionExists(at: url.path + ".missing", for: "/tmp/project-a", root: root))
+    XCTAssertFalse(AppModel.sessionExists(at: url.path, for: "/tmp/project-a",
+      root: root.appendingPathComponent("other")))
   }
 
   func testOnlyAllowlistedPrivateSenderIsAuthorized() throws {
@@ -374,11 +442,32 @@ final class TelegramControlTests: XCTestCase {
   }
 
   @MainActor
-  func testProgressStatusUsesOneCardAndReadableElapsedTime() {
-    XCTAssertEqual(TelegramControl.progressMessage(project: "demo", elapsedSeconds: 8),
-      "⏳ 「demo」正在执行 · 已用 8 秒\n任务完成后会单独发送回复。")
-    XCTAssertTrue(TelegramControl.progressMessage(project: "demo", elapsedSeconds: 125)
-      .contains("已用 2 分 5 秒"))
+  func testRunningStatusContainsSessionModelAndUsageInsteadOfOnlyElapsedTime() {
+    let status = TelegramControl.statusMessage(
+      project: "demo", session: "任务", sessionPath: "/tmp/session-abcdef123456.jsonl",
+      connection: .connected, busy: true, loading: false, detail: "正在执行工具",
+      model: "openai/codex", thinking: "high", contextPercent: 42, account: "work")
+    XCTAssertTrue(status.contains("💬 会话  任务 · #abcdef123456"))
+    XCTAssertTrue(status.contains("🤖 模型  openai/codex"))
+    XCTAssertTrue(status.contains("🧠 推理强度  high"))
+    XCTAssertTrue(status.contains("👤 Codex 账户  work"))
+    XCTAssertTrue(status.contains("📊 上下文  42%"))
+    XCTAssertTrue(status.contains("⚡ 正在执行"))
+    XCTAssertTrue(status.contains("ℹ️ 正在执行工具"))
+  }
+
+  @MainActor
+  func testProgressElapsedStartsAtSubmissionAndKeepsUpdating() {
+    let start = Date(timeIntervalSince1970: 1000)
+    XCTAssertEqual(TelegramControl.progressElapsed(startedAt: start, now: start), "0 分 0 秒")
+    XCTAssertEqual(TelegramControl.progressElapsed(startedAt: start,
+      now: start.addingTimeInterval(8)), "0 分 8 秒")
+    XCTAssertEqual(TelegramControl.progressElapsed(startedAt: start,
+      now: start.addingTimeInterval(98)), "1 分 38 秒")
+    XCTAssertEqual(TelegramControl.progressElapsed(startedAt: start,
+      now: start.addingTimeInterval(3661)), "1 小时 1 分 1 秒")
+    XCTAssertEqual(TelegramControl.progressElapsed(startedAt: start,
+      now: start.addingTimeInterval(-1)), "0 分 0 秒")
   }
 
   @MainActor

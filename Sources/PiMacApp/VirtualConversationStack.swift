@@ -123,10 +123,9 @@ struct VirtualConversationStack<Row: View>: View {
                 )
               }
             }
-            // Measure intrinsic content BEFORE imposing the cached height. This keeps
-            // the document geometry deterministic while measurements are reconciled.
-            .frame(height: max(1, block.height - spacing), alignment: .topLeading)
-            .clipped()
+            // Cached heights position recycled rows, but a mounted row must use its
+            // intrinsic height. Streaming text and expanded details can outgrow the
+            // cache before the next measurement; a fixed frame would clip their tail.
             .padding(.bottom, spacing)
         } else {
           Color.clear.frame(height: block.height)
