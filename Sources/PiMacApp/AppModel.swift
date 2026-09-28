@@ -52,7 +52,7 @@ final class AppModel: ObservableObject {
   var onTelegramLifecycleEvent: ((String) -> Void)?
 
   private static let lastProjectPathKey = "lastProjectPath"
-  private static let defaultModelKey = "defaultNewSessionModelID"
+  nonisolated private static let defaultModelKey = "defaultNewSessionModelID"
 
   private let client = PiRPCClient()
   private var codexRotationScheduled = false

@@ -3,7 +3,7 @@ import Foundation
 /// Local diagnostic timeline. Never include message text, credentials or Telegram API URLs.
 @MainActor
 enum TelegramDeliveryLog {
-  static let url = FileManager.default.homeDirectoryForCurrentUser
+  nonisolated static let url = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent("Library/Application Support/PiMac/Logs/telegram-delivery.log")
   private static let maxBytes: UInt64 = 1_000_000
   private static let formatter = ISO8601DateFormatter()
