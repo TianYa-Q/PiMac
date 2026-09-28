@@ -194,6 +194,11 @@ struct ContentView: View {
   @State private var initialScrollGeneration = 0
   @State private var conversationBottomIsVisible = false
   @State private var visibleSessionCount = 10
+  @State private var sessionSearchText = ""
+  @State private var sessionSearchExpanded = false
+  @FocusState private var sessionSearchFocused: Bool
+  @State private var sessionSearchResults: [SessionSearchResult] = []
+  @State private var isSearchingSessions = false
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
 
   var body: some View {
@@ -261,6 +266,40 @@ struct ContentView: View {
     }
     .onChange(of: app.projectURL?.standardizedFileURL.path) {
       visibleSessionCount = 10
+      sessionSearchText = ""
+      sessionSearchResults = []
+      sessionSearchExpanded = false
+      sessionSearchFocused = false
+    }
+    .onChange(of: sessionSearchFocused) {
+      if sessionSearchFocused { composerFocused = false }
+    }
+    .onChange(of: sessionSearchText) {
+      isSearchingSessions = !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        .isEmpty
+      sessionSearchResults = []
+    }
+    .task(id: sessionSearchKey) {
+      let query = sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !query.isEmpty else {
+        sessionSearchResults = []
+        isSearchingSessions = false
+        return
+      }
+      isSearchingSessions = true
+      do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+      let sessions = allSessions
+      let search = Task.detached(priority: .userInitiated) {
+        SessionSearch.results(for: query, in: sessions)
+      }
+      let results = await withTaskCancellationHandler {
+        await search.value
+      } onCancel: {
+        search.cancel()
+      }
+      guard !Task.isCancelled else { return }
+      sessionSearchResults = results
+      isSearchingSessions = false
     }
     .onChange(of: tabID) {
       app.refreshModelPreferences()
@@ -277,39 +316,54 @@ struct ContentView: View {
   private var redesignedSidebar: some View {
     let sessions = allSessions
     let visibleSessions = Array(sessions.prefix(visibleSessionCount))
+    let searching = !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     return VStack(spacing: 0) {
-      VStack(alignment: .leading, spacing: 7) {
+      VStack(alignment: .leading, spacing: 0) {
         HStack(spacing: 9) {
-          HStack(spacing: 7) {
-            Text("Pi Mac").font(.headline)
-            HStack(spacing: 4) {
-              Circle().fill(app.connectionState.color).frame(width: 6, height: 6)
-              Text("Pi \(app.connectionState.label)").lineLimit(1)
+          Image(systemName: "terminal")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 28, height: 28)
+            .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 8))
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Pi Mac")
+              .font(.system(size: 16, weight: .bold, design: .rounded))
+            HStack(spacing: 9) {
+              sidebarStatus("Pi", state: app.connectionState)
+              TelegramConnectionBadge(control: workspace.telegram)
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
           }
-          Spacer()
+          Spacer(minLength: 0)
           Button {
             showingSettings = true
           } label: {
             Image(systemName: "gearshape")
+              .font(.system(size: 15, weight: .medium))
+              .frame(width: 28, height: 28)
+              .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
+          .foregroundStyle(.secondary)
           .help("设置")
+          .accessibilityLabel("设置")
         }
-
-        TelegramConnectionBadge(control: workspace.telegram)
+        .padding(.bottom, 12)
 
         HStack(spacing: 4) {
           mainPageButton(.conversation, title: "对话", icon: "bubble.left.and.bubble.right")
           mainPageButton(.usage, title: "用量", icon: "chart.bar.xaxis")
         }
-        .padding(3)
-        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 9))
+        .padding(4)
+        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 12))
+        .padding(.bottom, 12)
 
-        HStack {
-          Text("项目").font(.caption.bold()).foregroundStyle(.secondary)
+        HStack(spacing: 6) {
+          Text("项目")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+          Text("\(workspace.projects.count)")
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.tertiary)
           Spacer()
           if !workspace.projects.isEmpty {
             Button {
@@ -317,20 +371,27 @@ struct ContentView: View {
                 projectsCollapsed.toggle()
               }
             } label: {
-              Image(
-                systemName: projectsCollapsed ? "rectangle.grid.1x2" : "rectangle.grid.1x2.fill")
+              Image(systemName: projectsCollapsed ? "list.bullet" : "square.grid.2x2")
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(projectsCollapsed ? "展开项目" : "折叠为图标")
+            .help(projectsCollapsed ? "展开项目列表" : "折叠为图标")
+            .accessibilityLabel(projectsCollapsed ? "展开项目列表" : "折叠为图标")
           }
           Button {
             choosingProject = true
           } label: {
             Image(systemName: "plus")
+              .frame(width: 28, height: 28)
+              .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
           .help("添加项目")
+          .accessibilityLabel("添加项目")
         }
+        .foregroundStyle(.secondary)
+        .padding(.bottom, 3)
 
         if workspace.projects.isEmpty {
           Button("添加项目…", systemImage: "folder.badge.plus") { choosingProject = true }
@@ -354,50 +415,97 @@ struct ContentView: View {
         }
 
         if app.projectURL != nil {
-          SidebarHoverRegion { newChatHovered in
+          Button {
+            guard let projectURL = app.projectURL else { return }
+            workspace.newSession(in: projectURL)
+          } label: {
+            HStack(spacing: 9) {
+              Image(systemName: "square.and.pencil")
+                .font(.system(size: 14, weight: .semibold))
+              Text("新聊天")
+                .font(.callout.weight(.semibold))
+              Spacer()
+              Image(systemName: "plus")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.accentColor.opacity(0.65))
+            }
+            .foregroundStyle(Color.accentColor)
+            .padding(.horizontal, 13)
+            .frame(height: 40)
+            .background(Color.accentColor.opacity(0.11), in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+          }
+          .buttonStyle(.plain)
+          .help("在当前项目新建聊天")
+          .padding(.top, 8)
+          .padding(.bottom, 10)
+
+          HStack {
+            Text("会话")
+              .font(.caption.bold())
+              .foregroundStyle(.secondary)
+            Spacer()
             Button {
-              guard let projectURL = app.projectURL else { return }
-              workspace.newSession(in: projectURL)
-            } label: {
-              HStack(spacing: 8) {
-                Image(systemName: "square.and.pencil")
-                  .font(.system(size: 13, weight: .semibold))
-                  .foregroundStyle(
-                    newChatHovered ? Color.accentColor : Color.secondary
-                  )
-                  .frame(width: 26, height: 26)
-                  .background(
-                    newChatHovered ? Color.accentColor.opacity(0.10) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 7)
-                  )
-                Text("新聊天")
-                  .font(.callout.weight(.medium))
-                Spacer()
+              if sessionSearchExpanded {
+                closeSessionSearch()
+              } else {
+                sessionSearchExpanded = true
+                sessionSearchFocused = true
               }
-              .padding(.horizontal, 7)
-              .padding(.vertical, 4)
-              .contentShape(RoundedRectangle(cornerRadius: 10))
+            } label: {
+              Image(systemName: sessionSearchExpanded ? "xmark" : "magnifyingglass")
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .background {
-              let hovered = newChatHovered
-              RoundedRectangle(cornerRadius: 10)
-                .fill(hovered ? Color.accentColor.opacity(0.12) : Color.clear)
-                .overlay {
-                  RoundedRectangle(cornerRadius: 10)
-                    .strokeBorder(
-                      hovered ? Color.accentColor.opacity(0.20) : Color.clear, lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(hovered ? 0.08 : 0), radius: 4, y: 1)
-            }
+            .foregroundStyle(.secondary)
+            .help(sessionSearchExpanded ? "关闭搜索" : "搜索聊天记录")
+            .accessibilityLabel(sessionSearchExpanded ? "关闭搜索" : "搜索聊天记录")
           }
 
-          Text("会话")
-            .font(.caption.bold())
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+          if sessionSearchExpanded {
+            HStack(spacing: 6) {
+              Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+              TextField("搜索聊天记录", text: $sessionSearchText)
+                .textFieldStyle(.plain)
+                .focused($sessionSearchFocused)
+                .accessibilityLabel("搜索聊天记录")
+                .onExitCommand { closeSessionSearch() }
+              if !sessionSearchText.isEmpty {
+                Button {
+                  sessionSearchText = ""
+                } label: {
+                  Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("清除搜索")
+              }
+            }
+            .font(.callout)
+            .padding(8)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+          }
 
-          if visibleSessions.isEmpty, let projectURL = app.projectURL,
+          if searching {
+            if isSearchingSessions {
+              ProgressView("正在搜索…")
+                .controlSize(.small)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+            } else if sessionSearchResults.isEmpty {
+              ContentUnavailableView.search(text: sessionSearchText)
+                .controlSize(.small)
+            } else {
+              ScrollView {
+                LazyVStack(spacing: 3) {
+                  ForEach(sessionSearchResults) { result in
+                    redesignedSessionRow(result.session, snippet: result.snippet)
+                  }
+                }
+                .padding(.vertical, 6)
+              }
+            }
+          } else if visibleSessions.isEmpty, let projectURL = app.projectURL,
             workspace.isLoadingSessions(in: projectURL)
           {
             HStack(spacing: 8) {
@@ -444,17 +552,37 @@ struct ContentView: View {
     .background(Color(nsColor: .controlBackgroundColor).opacity(0.52))
   }
 
+  private func closeSessionSearch() {
+    sessionSearchFocused = false
+    sessionSearchText = ""
+    sessionSearchExpanded = false
+  }
+
+  private func sidebarStatus(_ name: String, state: ConnectionState) -> some View {
+    HStack(spacing: 5) {
+      Circle().fill(state.color).frame(width: 6, height: 6)
+      Text(name).foregroundStyle(.primary)
+      Text(state == .connected ? "在线" : state == .connecting ? "连接中" : "离线")
+        .foregroundStyle(.secondary)
+    }
+    .font(.caption2.weight(.medium))
+    .lineLimit(1)
+    .help("\(name) \(state.label)")
+    .accessibilityLabel("\(name) \(state.label)")
+  }
+
   private func mainPageButton(_ page: MainPage, title: String, icon: String) -> some View {
     Button {
       withAnimation(.easeOut(duration: 0.14)) { selectedPage = page }
     } label: {
       Label(title, systemImage: icon)
-        .font(.caption.weight(.medium))
+        .font(.callout.weight(selectedPage == page ? .semibold : .medium))
+        .foregroundStyle(selectedPage == page ? Color.primary : Color.secondary)
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 6)
+        .frame(height: 30)
         .background(
           selectedPage == page ? Color(nsColor: .controlBackgroundColor) : Color.clear,
-          in: RoundedRectangle(cornerRadius: 7)
+          in: RoundedRectangle(cornerRadius: 9)
         )
         .contentShape(Rectangle())
     }
@@ -466,12 +594,16 @@ struct ContentView: View {
     return Button {
       workspace.selectProject(project)
     } label: {
-      projectIcon(project, size: 34)
+      projectIcon(project, size: 30)
         .padding(3)
         .background(
-          selected ? Color.accentColor.opacity(0.18) : Color.clear,
-          in: RoundedRectangle(cornerRadius: 11)
+          selected ? Color.accentColor.opacity(0.13) : Color.clear,
+          in: RoundedRectangle(cornerRadius: 12)
         )
+        .overlay {
+          RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(selected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+        }
     }
     .buttonStyle(.plain)
     .help(project.name)
@@ -483,22 +615,18 @@ struct ContentView: View {
   }
 
   private func projectIcon(_ project: WorkspaceProject, size: CGFloat) -> some View {
-    let palette: [(Color, Color)] = [
-      (.blue, .cyan), (.purple, .pink), (.orange, .red), (.green, .teal), (.indigo, .purple),
-      (.mint, .blue),
+    let palette: [Color] = [
+      .teal, .indigo, .orange, .green, .purple, .blue,
     ]
     let scalarTotal = project.name.unicodeScalars.reduce(0) { $0 + Int($1.value) }
-    let colors = palette[scalarTotal % palette.count]
+    let color = palette[scalarTotal % palette.count]
     let initial = String(project.name.prefix(1)).uppercased()
     return ZStack {
       RoundedRectangle(cornerRadius: size * 0.26)
-        .fill(
-          LinearGradient(
-            colors: [colors.0, colors.1], startPoint: .topLeading, endPoint: .bottomTrailing))
+        .fill(color.opacity(0.2))
       Text(initial)
-        .font(.system(size: size * 0.44, weight: .bold, design: .rounded))
-        .foregroundStyle(.white)
-        .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
+        .font(.system(size: size * 0.48, weight: .bold, design: .rounded))
+        .foregroundStyle(color)
     }
     .frame(width: size, height: size)
   }
@@ -538,7 +666,13 @@ struct ContentView: View {
     }
   }
 
-  private func redesignedSessionRow(_ session: SessionItem) -> some View {
+  private var sessionSearchKey: String {
+    let sessions = allSessions
+    return
+      "\(app.projectURL?.standardizedFileURL.path ?? "")|\(sessionSearchText)|\(sessions.count)|\(sessions.first?.path ?? "")|\(sessions.first?.modifiedAt.timeIntervalSince1970 ?? 0)"
+  }
+
+  private func redesignedSessionRow(_ session: SessionItem, snippet: String? = nil) -> some View {
     let selected = workspace.isSelectedSession(path: session.path)
     let running = workspace.model(forSessionPath: session.path)?.isBusy == true
     return SidebarHoverRegion { hovered in
@@ -558,6 +692,12 @@ struct ContentView: View {
                 .font(.callout)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
+              if let snippet {
+                Text(snippet)
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+                  .lineLimit(2)
+              }
               SessionRelativeTime(date: session.modifiedAt)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -1310,16 +1450,22 @@ private struct TelegramConnectionBadge: View {
   @ObservedObject var control: TelegramControl
 
   var body: some View {
-    HStack(spacing: 4) {
+    HStack(spacing: 5) {
       Circle()
         .fill(control.enabled ? control.connectionState.color : Color.secondary)
         .frame(width: 6, height: 6)
-      Text("Telegram \(control.enabled ? control.connectionState.label : "未启用")")
-        .lineLimit(1)
+      Text("Telegram").foregroundStyle(.primary)
+      Text(
+        control.enabled
+          ? (control.connectionState == .connected ? "在线" : "离线") : "未启用"
+      )
+      .foregroundStyle(.secondary)
     }
-    .font(.caption2)
-    .foregroundStyle(.secondary)
+    .font(.caption2.weight(.medium))
+    .lineLimit(1)
     .help(control.status)
+    .accessibilityLabel(
+      "Telegram \(control.enabled ? control.connectionState.label : "未启用")")
   }
 }
 
@@ -1434,7 +1580,15 @@ private struct ComposerTextView: NSViewRepresentable {
       }
     }
     if isFocused, textView.window?.firstResponder !== textView {
-      DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
+      // Focus can move to another editor before this async request runs (e.g. the search box).
+      // Never reclaim it based on an outdated SwiftUI update.
+      DispatchQueue.main.async { [weak textView, weak coordinator = context.coordinator] in
+        guard let textView, coordinator?.isFocused == true,
+          let window = textView.window, window.firstResponder !== textView,
+          !(window.firstResponder is NSTextView)
+        else { return }
+        window.makeFirstResponder(textView)
+      }
     }
   }
 
@@ -1501,6 +1655,9 @@ private struct ComposerTextView: NSViewRepresentable {
     var onPasteImage: ((Data, String) -> [String])?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+      // AppKit may ask every view to handle a key equivalent. Only intercept paste when
+      // this editor is actually the first responder; otherwise ⌘V belongs to the search field.
+      guard window?.firstResponder === self else { return false }
       let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
       if modifiers.contains(.command),
         !modifiers.contains(.shift),
@@ -2504,7 +2661,7 @@ private struct ModelSettingsView: View {
       HStack {
         VStack(alignment: .leading, spacing: 3) {
           Text("模型与思考等级").font(.title2.bold())
-          Text("全局默认写入 defaultThinkingLevel；单个模型默认写入 modelThinkingLevels。")
+          Text("默认模型用于新建会话；临时切换模型不会修改默认值。")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -2526,6 +2683,37 @@ private struct ModelSettingsView: View {
           .buttonStyle(.borderedProminent)
       }
       .padding(20)
+
+      Divider()
+
+      HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 3) {
+          Text("默认模型").font(.callout.weight(.medium))
+          Text("新建会话时使用；不会改变已有会话的模型。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        Picker(
+          "默认模型",
+          selection: Binding(
+            get: { app.defaultModelID },
+            set: { app.setDefaultModel($0) }
+          )
+        ) {
+          Text("未指定 · 由 Pi 决定").tag(nil as String?)
+          if let id = app.defaultModelID, !app.allModels.contains(where: { $0.id == id }) {
+            Text("\(id)（不可用）").tag(Optional(id))
+          }
+          ForEach(app.allModels) { model in
+            Text("\(model.name) · \(model.provider)").tag(Optional(model.id))
+          }
+        }
+        .labelsHidden()
+        .frame(width: 260)
+      }
+      .padding(.horizontal, 20)
+      .padding(.vertical, 14)
 
       Divider()
 
@@ -2594,7 +2782,7 @@ private struct ModelSettingsView: View {
         .padding(.horizontal, 20)
       }
     }
-    .frame(width: 700, height: 560)
+    .frame(width: 700, height: 640)
   }
 
   private func modelRow(_ model: PiModel) -> some View {

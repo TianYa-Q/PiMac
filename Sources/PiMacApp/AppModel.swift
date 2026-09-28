@@ -17,6 +17,7 @@ final class AppModel: ObservableObject {
   @Published var modelDefaultThinkingLevels: [String: String] = [:]
   @Published var globalDefaultThinkingLevel = "medium"
   @Published var compactionModelID: String?
+  @Published var defaultModelID: String? = UserDefaults.standard.string(forKey: "defaultNewSessionModelID")
   @Published var selectedModelId = "" {
     didSet {
       scheduleCodexAccountRotation()
@@ -51,7 +52,7 @@ final class AppModel: ObservableObject {
   var onTelegramLifecycleEvent: ((String) -> Void)?
 
   private static let lastProjectPathKey = "lastProjectPath"
-  private static let lastSelectedModelKey = "lastSelectedModelID"
+  private static let defaultModelKey = "defaultNewSessionModelID"
 
   private let client = PiRPCClient()
   private var codexRotationScheduled = false
@@ -110,7 +111,7 @@ final class AppModel: ObservableObject {
     restoreLastProjectOnLaunch: Bool = true,
     initialComposerText: String = "",
     remembersDesktopProject: Bool = true,
-    modelPreferenceKey: String = "lastSelectedModelID",
+    modelPreferenceKey: String = "defaultNewSessionModelID",
     thinkingPreferenceKey: String? = nil
   ) {
     self.remembersDesktopProject = remembersDesktopProject
@@ -709,6 +710,7 @@ final class AppModel: ObservableObject {
     stats = nil
     currentSessionPath = ""
     resetTranscriptLoading()
+    extensionUI?.sessionWillChange(for: self)
 
     let restorePreviousSession = { [weak self] in
       guard let self else { return }
@@ -719,6 +721,7 @@ final class AppModel: ObservableObject {
       self.loadedTranscriptKey = previousLoadedTranscriptKey
       self.loadedTranscriptPath = previousLoadedTranscriptPath
       self.transcriptLoadInFlightKey = nil
+      self.extensionUI?.cancelSessionChange(for: self)
       self.isLoadingConfiguration = false
       self.connectionState = .connected
       self.statusText = ""
@@ -746,35 +749,66 @@ final class AppModel: ObservableObject {
     }
   }
 
-  func switchSession(path: String, completion: ((Bool) -> Void)? = nil) {
+  func switchSession(
+    path: String, in project: URL? = nil, completion: ((Bool) -> Void)? = nil
+  ) {
     guard canReuseProcessForNewSession else {
       statusText = "当前任务进行中或会话尚未就绪，暂时不能切换会话"
       completion?(false)
       return
     }
+    let previousProject = projectURL
+    let previousSessions = sessions
+    let previousPath = currentSessionPath
+    let previousMessages = messages
+    let previousName = sessionName
+    let previousStats = stats
     let generation = UUID()
     connectionGeneration = generation
     isLoadingConfiguration = true
     statusText = "正在切换会话…"
+    resetTranscriptLoading()
+    if let project, project.standardizedFileURL != projectURL?.standardizedFileURL {
+      projectURL = project.standardizedFileURL
+      sessions = []
+    }
+    currentSessionPath = path
+    messages.removeAll()
+    sessionName = ""
+    stats = nil
+    // Show persisted history without waiting for Pi's switch_session and configuration RPCs.
+    loadCompleteTranscript(at: path)
     client.request(["type": "switch_session", "sessionPath": path]) { [weak self] result in
       guard let self, self.connectionGeneration == generation else { return }
       self.isLoadingConfiguration = false
       self.statusText = ""
       switch result {
       case .failure(let error):
+        self.resetTranscriptLoading()
+        self.projectURL = previousProject
+        self.sessions = previousSessions
+        self.currentSessionPath = previousPath
+        self.messages = previousMessages
+        self.sessionName = previousName
+        self.stats = previousStats
         self.appendSystemError(error.localizedDescription)
         completion?(false)
       case .success(let response):
         let cancelled = (response["data"] as? PiRPCClient.JSON)?["cancelled"] as? Bool ?? false
         guard !cancelled else {
+          self.resetTranscriptLoading()
+          self.projectURL = previousProject
+          self.sessions = previousSessions
+          self.currentSessionPath = previousPath
+          self.messages = previousMessages
+          self.sessionName = previousName
+          self.stats = previousStats
           completion?(false)
           return
         }
-        self.resetTranscriptLoading()
-        self.currentSessionPath = path
-        self.messages.removeAll()
-        self.sessionName = ""
-        self.stats = nil
+        if let project, self.remembersDesktopProject {
+          UserDefaults.standard.set(project.standardizedFileURL.path, forKey: Self.lastProjectPathKey)
+        }
         self.refreshAll()
         completion?(true)
       }
@@ -794,7 +828,9 @@ final class AppModel: ObservableObject {
       case .success:
         guard let self else { return }
         self.selectedModelId = id
-        UserDefaults.standard.set(id, forKey: self.modelPreferenceKey)
+        if self.thinkingPreferenceKey != nil {
+          UserDefaults.standard.set(id, forKey: self.modelPreferenceKey)
+        }
         // Pi's settings manager may still hold the defaults from process startup.
         // Apply the latest per-model or global default explicitly in that case.
         self.applySavedThinkingLevel(for: model.id) { [weak self] in
@@ -845,6 +881,13 @@ final class AppModel: ObservableObject {
     } catch {
       appendSystemError("保存模型显示设置失败：\(error.localizedDescription)")
     }
+  }
+
+  func setDefaultModel(_ modelID: String?) {
+    if let modelID, !allModels.contains(where: { $0.id == modelID }) { return }
+    UserDefaults.standard.set(modelID, forKey: Self.defaultModelKey)
+    defaultModelID = modelID
+    statusText = "默认模型已保存；将在新建会话时生效"
   }
 
   func setGlobalDefaultThinkingLevel(_ level: String) {
@@ -1105,14 +1148,14 @@ final class AppModel: ObservableObject {
     }
   }
 
-  // Only explicit model changes update the preference. Opening an older session must not
-  // replace the model used for future new tasks with that session's historical model.
+  // Desktop defaults are configured in model settings, never by session model changes.
+  // Telegram keeps its independent last-selection behavior.
   static func preferredNewSessionModelID(
     currentModelID: String, defaults: UserDefaults = .standard,
-    preferenceKey: String = lastSelectedModelKey
+    preferenceKey: String = defaultModelKey
   ) -> String? {
     let saved = defaults.string(forKey: preferenceKey) ?? ""
-    let id = saved.isEmpty ? currentModelID : saved
+    let id = saved.isEmpty && preferenceKey != defaultModelKey ? currentModelID : saved
     let parts = id.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
     guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
     return id
@@ -1139,7 +1182,7 @@ final class AppModel: ObservableObject {
     ]) { [weak self] result in
       guard let self, self.connectionGeneration == generation else { return }
       if case .failure(let error) = result {
-        self.appendSystemError("无法为新任务选择上次使用的模型：\(error.localizedDescription)")
+        self.appendSystemError("无法为新任务选择默认模型：\(error.localizedDescription)")
       }
       self.applySavedThinkingLevelForCurrentModel(generation: generation, completion: finish)
     }
@@ -1393,6 +1436,7 @@ final class AppModel: ObservableObject {
     modelDefaultThinkingLevels = preferences.thinkingLevels
     globalDefaultThinkingLevel = preferences.defaultThinkingLevel
     compactionModelID = PiSettingsStore.compactionModelID()
+    defaultModelID = UserDefaults.standard.string(forKey: Self.defaultModelKey)
     models = allModels.filter(preferences.includes)
   }
 

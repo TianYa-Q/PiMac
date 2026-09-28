@@ -5,11 +5,12 @@ import Testing
 
 @MainActor
 struct NewSessionModelTests {
-  @Test func newTasksUseLastExplicitSelectionEvenFromAnotherSession() {
+  @Test func newTasksUseConfiguredDefaultInsteadOfLastSelection() {
     let suite = "PiMacApp.NewSessionModelTests.\(UUID())"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
-    defaults.set("openai-codex/gpt-6-sol", forKey: "lastSelectedModelID")
+    defaults.set("other/last", forKey: "lastSelectedModelID")
+    defaults.set("openai-codex/gpt-6-sol", forKey: "defaultNewSessionModelID")
 
     #expect(
       AppModel.preferredNewSessionModelID(
@@ -18,17 +19,27 @@ struct NewSessionModelTests {
     )
   }
 
-  @Test func newTasksKeepCurrentModelBeforeFirstExplicitSelection() {
+  @Test func unsetDefaultDoesNotReuseCurrentOrLegacySelection() {
     let suite = "PiMacApp.NewSessionModelTests.\(UUID())"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set("other/last", forKey: "lastSelectedModelID")
 
     #expect(
       AppModel.preferredNewSessionModelID(
         currentModelID: "openai-codex/gpt-6-sol", defaults: defaults
-      ) == "openai-codex/gpt-6-sol"
+      ) == nil
     )
     #expect(AppModel.preferredNewSessionModelID(currentModelID: "", defaults: defaults) == nil)
   }
 
+  @Test func malformedDefaultIsIgnored() {
+    let suite = "PiMacApp.NewSessionModelTests.\(UUID())"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    for value in ["", "model", "/model", "provider/"] {
+      defaults.set(value, forKey: "defaultNewSessionModelID")
+      #expect(AppModel.preferredNewSessionModelID(currentModelID: "other/model", defaults: defaults) == nil)
+    }
+  }
 }

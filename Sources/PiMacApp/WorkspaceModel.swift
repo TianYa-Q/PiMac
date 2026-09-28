@@ -38,7 +38,6 @@ final class WorkspaceModel: ObservableObject {
   private static let lastSessionByProjectKey = "workspaceLastSessionByProject"
   private static let sessionRestoreInterval: TimeInterval = 5 * 60
   private static let maximumLiveProcesses = 4
-  private static let idleProcessLifetime: Duration = .seconds(10 * 60)
   private var observations: [UUID: AnyCancellable] = [:]
   private var streamingObservations: [UUID: AnyCancellable] = [:]
   private var sessionObservations: [UUID: AnyCancellable] = [:]
@@ -127,26 +126,47 @@ final class WorkspaceModel: ObservableObject {
 
   func selectProject(_ project: WorkspaceProject) {
     refreshSessionCatalog(for: project.url, ifStale: true)
-    if let tabID = selectedTabByProject[project.id], tabs.contains(where: { $0.id == tabID }) {
-      selectTab(tabID)
+    if let tabID = selectedTabByProject[project.id], let tab = tabs.first(where: {
+      $0.id == tabID && $0.model.projectURL?.standardizedFileURL.path == project.id
+    }) {
+      selectProjectTab(tab, in: project)
       return
     }
     if let existing = tabs.last(where: {
       $0.model.projectURL?.standardizedFileURL.path == project.id
     }) {
-      selectTab(existing.id)
+      selectProjectTab(existing, in: project)
       return
     }
-    // Switching projects must keep the previous project's selected draft/tab intact.
+    // A saved conversation can replace the selected idle process; a draft with input stays put.
     openLastSessionTab(for: project)
+  }
+
+  private func selectProjectTab(_ tab: Tab, in project: WorkspaceProject) {
+    let path = tab.requestedSessionPath ?? tab.model.currentSessionPath
+    if tab.id != selectedTabID, !tab.model.isProcessRunning, !path.isEmpty,
+      reusableTab() != nil
+    {
+      openSession(path: path, in: project.url)
+    } else {
+      selectTab(tab.id)
+    }
   }
 
   private func openLastSessionTab(for project: WorkspaceProject) {
     // Project switching retains its last selected session; the five-minute rule applies to launch.
     let path = lastSessionByProject[project.id].flatMap {
       !archivedSessionPaths.contains($0) && FileManager.default.fileExists(atPath: $0) ? $0 : nil
-    }
+    } ?? sessionCatalogs[project.id]?
+      .filter {
+        !archivedSessionPaths.contains($0.path) && FileManager.default.fileExists(atPath: $0.path)
+      }
+      .max(by: { $0.modifiedAt < $1.modifiedAt })?.path
     let draft = composerDrafts[project.id]
+    if let path {
+      openSession(path: path, in: project.url)
+      return
+    }
     addTab(
       model: AppModel(
         startupProjectURL: project.url,
@@ -214,6 +234,7 @@ final class WorkspaceModel: ObservableObject {
       // An idle RPC process can replace its active session in place. Busy sessions still get a
       // separate process so background work remains genuinely concurrent.
       if tab.model.canReuseProcessForNewSession,
+        !tab.model.hasUnsubmittedInput,
         !extensionUI.hasPendingRequests(from: tab.model)
       {
         // Change the workspace selection state before waiting for Pi's new_session reply. AppModel
@@ -251,15 +272,80 @@ final class WorkspaceModel: ObservableObject {
 
   func openSession(path: String, in projectURL: URL) {
     if archivedSessionPaths.remove(path) != nil { persistArchivedSessions() }
+    let projectPath = projectURL.standardizedFileURL.path
+    var suspendedTarget: Tab?
     if let existing = tabs.first(where: {
-      $0.requestedSessionPath == path || $0.model.currentSessionPath == path
+      $0.model.projectURL?.standardizedFileURL.path == projectPath
+        && ($0.requestedSessionPath == path || $0.model.currentSessionPath == path)
     }) {
-      existing.model.refreshSessionMetadata()
-      selectTab(existing.id)
+      if existing.id != selectedTabID, !existing.model.isProcessRunning,
+        !existing.model.hasUnsubmittedInput, reusableTab() != nil
+      {
+        // Keep the suspended tab until Pi confirms the switch, so a rejected switch
+        // still leaves its saved transcript available. No second process is started.
+        suspendedTarget = existing
+      } else {
+        existing.model.refreshSessionMetadata()
+        selectTab(existing.id)
+        return
+      }
+    }
+    // A thread is a persisted JSONL conversation, not a dedicated Pi process. switch_session
+    // also rebuilds Pi's runtime for the target cwd, so this works across projects too.
+    if let tab = reusableTab() {
+      let previousProjectPath = tab.model.projectURL?.standardizedFileURL.path
+      let previousPath = tab.requestedSessionPath ?? tab.model.currentSessionPath
+      let previousCreatedAt = tab.createdAt
+      let previousIsDraft = tab.isDraft
+      let savedDraft = composerDrafts[projectPath]
+      if let previousProjectPath, previousProjectPath != projectPath {
+        if !previousPath.isEmpty && !previousIsDraft {
+          rememberSession(previousPath, in: previousProjectPath)
+        }
+        if selectedTabByProject[previousProjectPath] == tab.id {
+          selectedTabByProject.removeValue(forKey: previousProjectPath)
+        }
+      }
+      if let index = tabs.firstIndex(where: { $0.id == tab.id }) {
+        tabs[index].requestedSessionPath = path
+        tabs[index].createdAt = .now
+        tabs[index].isDraft = false
+      }
+      tab.model.switchSession(path: path, in: projectURL) {
+        [weak self, weak model = tab.model] switched in
+        guard let self, let model,
+          let index = self.tabs.firstIndex(where: { $0.model === model })
+        else { return }
+        if !switched {
+          self.tabs[index].requestedSessionPath = previousPath.isEmpty ? nil : previousPath
+          self.tabs[index].createdAt = previousCreatedAt
+          self.tabs[index].isDraft = previousIsDraft
+          if self.selectedTabID == self.tabs[index].id {
+            model.composerText = ""
+            if self.selectedTabByProject[projectPath] == tab.id {
+              self.selectedTabByProject.removeValue(forKey: projectPath)
+            }
+            if let previousProjectPath {
+              self.selectedTabByProject[previousProjectPath] = tab.id
+              UserDefaults.standard.set(previousProjectPath, forKey: Self.activeProjectKey)
+            }
+          }
+        } else if let suspendedTarget {
+          self.observations.removeValue(forKey: suspendedTarget.id)
+          self.streamingObservations.removeValue(forKey: suspendedTarget.id)
+          self.sessionObservations.removeValue(forKey: suspendedTarget.id)
+          self.composerDraftObservations.removeValue(forKey: suspendedTarget.id)
+          self.idleProcessTasks.removeValue(forKey: suspendedTarget.id)?.cancel()
+          self.lastUsedAt.removeValue(forKey: suspendedTarget.id)
+          suspendedTarget.model.disconnect()
+          self.tabs.removeAll { $0.id == suspendedTarget.id }
+        }
+      }
+      if savedDraft?.sessionPath == path { tab.model.composerText = savedDraft?.text ?? "" }
+      selectTab(tab.id)
       return
     }
     discardSelectedDraftIfEmpty()
-    let projectPath = projectURL.standardizedFileURL.path
     let savedDraft = composerDrafts[projectPath]
     addTab(
       model: AppModel(
@@ -428,10 +514,10 @@ final class WorkspaceModel: ObservableObject {
         self.objectWillChange.send()
       }
     lastUsedAt[tab.id] = .now
-    streamingObservations[tab.id] = Publishers.CombineLatest(
-      model.$isStreaming, model.$isCompacting
+    streamingObservations[tab.id] = Publishers.CombineLatest3(
+      model.$isStreaming, model.$isCompacting, model.$isLoadingConfiguration
     )
-    .map { $0 || $1 }
+    .map { $0 || $1 || $2 }
     .removeDuplicates()
     .dropFirst()
     .sink { [weak self] isBusy in
@@ -443,7 +529,10 @@ final class WorkspaceModel: ObservableObject {
       .dropFirst()
       .sink { [weak self, weak model] sessions in
         Task { @MainActor [weak self, weak model] in
-          guard let self, let projectURL = model?.projectURL else { return }
+          guard let self, let model, let projectURL = model.projectURL else { return }
+          // Switching projects temporarily clears the model's old catalog. Keep the target
+          // project's cached sidebar entries until its own discovery finishes.
+          if sessions.isEmpty && model.isLoadingConfiguration { return }
           self.updateSessionCatalog(sessions, for: projectURL)
         }
       }
@@ -524,18 +613,18 @@ final class WorkspaceModel: ObservableObject {
 
   private func scheduleProcessSuspension(for id: UUID) {
     idleProcessTasks.removeValue(forKey: id)?.cancel()
-    guard id != selectedTabID,
-      let tab = tabs.first(where: { $0.id == id }),
-      tab.model.isProcessRunning,
-      !tab.model.isBusy,
-      tab.model.queuedPrompts.isEmpty,
-      !extensionUI.hasPendingRequests(from: tab.model)
-    else { return }
+    // Keep only the selected process and processes with active work. Historical threads
+    // remain in the session catalog and can be opened in the selected process later.
+    suspendProcess(for: id)
+  }
 
-    idleProcessTasks[id] = Task { @MainActor [weak self] in
-      try? await Task.sleep(for: Self.idleProcessLifetime)
-      guard !Task.isCancelled else { return }
-      self?.suspendProcess(for: id)
+  private func reusableTab() -> Tab? {
+    tabs.first { tab in
+      tab.id == selectedTabID
+        && tab.model.isProcessRunning
+        && tab.model.canReuseProcessForNewSession
+        && !tab.model.hasUnsubmittedInput
+        && !extensionUI.hasPendingRequests(from: tab.model)
     }
   }
 
@@ -561,7 +650,7 @@ final class WorkspaceModel: ObservableObject {
     idleProcessTasks.removeValue(forKey: id)?.cancel()
     guard id != selectedTabID,
       let tab = tabs.first(where: { $0.id == id }),
-      !tab.model.isBusy,
+      tab.model.canRestartSafely,
       tab.model.queuedPrompts.isEmpty,
       !extensionUI.hasPendingRequests(from: tab.model)
     else { return }

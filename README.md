@@ -19,7 +19,7 @@ A native macOS [Pi coding agent](https://github.com/badlogic/pi-mono) client bui
 - Attach images and files by dragging, selecting, or pasting, and send image content over RPC
 - Switch models and thinking levels
 - Check Pi and extension package versions in Settings, then install available updates with one click
-- Run multiple sessions concurrently in independent background RPC processes
+- Reuse an idle Pi RPC process when switching saved sessions, even across projects; run concurrent tasks in separate processes and stop inactive processes while retaining their saved conversations
 - Create, name, and open persistent sessions; on relaunch, reopen the current project's most recently active conversation if you sent a message or received a text reply within the past five minutes, otherwise start a new session
 - View compaction, token, cost, and context usage statistics
 - Support select, confirm, input, and editor dialogs provided by Pi extensions
@@ -74,7 +74,7 @@ cd PiMac
 swift run PiMac
 ```
 
-For development, run `python3 scripts/dev.py` instead: it rebuilds on Swift source changes and relaunches Pi Mac after a successful build once all desktop and Telegram sessions are idle, with no queued prompts or extension dialogs. Failed builds do not restart the app. Ctrl-C stops watching but leaves the app running. Normal and packaged runs do not auto-restart.
+For development, run `python3 scripts/dev.py` instead: it rebuilds on Swift source changes and relaunches Pi Mac after a successful build once all desktop and Telegram sessions are idle, with no queued prompts or extension dialogs. Failed builds do not restart the app. Ctrl-C stops watching but leaves the app running; quit any existing Pi Mac instances before starting the watcher again. The script refuses to start a second watcher or app instance instead of terminating potentially busy sessions. Normal and packaged runs do not auto-restart.
 
 With the full Xcode installation, you can also open `Package.swift` directly.
 

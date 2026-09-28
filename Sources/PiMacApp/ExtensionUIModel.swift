@@ -36,6 +36,15 @@ final class ExtensionUIModel: ObservableObject {
   private weak var selectedSource: AppModel?
   private var usageSnapshot = UsageSnapshot(accounts: [], gemini: nil, updatedAt: nil)
   private var sessionAccountSelections: [ObjectIdentifier: SessionAccountSelection] = [:]
+  private var awaitingSessionStatus: Set<ObjectIdentifier> = []
+
+  func sessionWillChange(for source: AppModel) {
+    awaitingSessionStatus.insert(ObjectIdentifier(source))
+  }
+
+  func cancelSessionChange(for source: AppModel) {
+    awaitingSessionStatus.remove(ObjectIdentifier(source))
+  }
 
   func selectSource(_ source: AppModel?) {
     selectedSource = source
@@ -117,6 +126,7 @@ final class ExtensionUIModel: ObservableObject {
   }
 
   func removeRequests(from source: AppModel) {
+    awaitingSessionStatus.remove(ObjectIdentifier(source))
     sessionAccountSelections.removeValue(forKey: ObjectIdentifier(source))
     if selectedSource === source { selectSource(nil) }
 
@@ -186,6 +196,7 @@ final class ExtensionUIModel: ObservableObject {
       Date(timeIntervalSince1970: $0 / 1_000)
     }
     let sourceID = ObjectIdentifier(source)
+    let isFirstStatusAfterSessionChange = awaitingSessionStatus.remove(sourceID) != nil
     let active = payload["activeAccount"] as? String
     let defaultAccount = payload["defaultAccount"] as? String
     let accounts = rawAccounts.compactMap { raw -> CodexAccountStatus? in
@@ -245,13 +256,13 @@ final class ExtensionUIModel: ObservableObject {
     }
 
     // Quotas, reset times, visibility, and errors are application-wide. A newly started Pi
-    // process always publishes an initial quota payload while opening a task. If a shared
-    // snapshot already exists, that first payload must only establish this session's selected
-    // account; otherwise merely creating/selecting a task makes the quota card appear refreshed.
-    // Subsequent payloads from the process are real periodic or user-requested refreshes.
+    // process publishes an initial quota payload while opening a task, including when an
+    // existing process is reused for a new session. That payload only establishes this session's
+    // selected account; it must not replace an existing application-wide quota snapshot.
+    // Subsequent payloads from the process are periodic or user-requested refreshes.
     let mayUpdateUsage =
       usageSnapshot.accounts.isEmpty && usageSnapshot.gemini == nil
-      || !isInitialStatusFromSource
+      || (!isInitialStatusFromSource && !isFirstStatusAfterSessionChange)
     let usageIsCurrent =
       updatedAt.map { incoming in
         usageSnapshot.updatedAt.map { incoming >= $0 } ?? true

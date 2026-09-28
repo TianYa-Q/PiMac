@@ -57,6 +57,27 @@ struct ExtensionUIModelTests {
   }
 
   @Test
+  func newSessionOnReusedProcessDoesNotRefreshSharedQuota() throws {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    ui.selectSource(source)
+    ui.handle(
+      try statusEvent(activeAccount: "X", updatedAt: 1_000, remainingPercent: 10), from: source)
+
+    ui.sessionWillChange(for: source)
+    ui.handle(
+      try statusEvent(activeAccount: "Y", updatedAt: 2_000, remainingPercent: 90), from: source)
+    #expect(ui.codexAccounts.first(where: \.isActive)?.name == "Y")
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 10)
+    #expect(ui.codexAccountsUpdatedAt == Date(timeIntervalSince1970: 1))
+
+    ui.handle(
+      try statusEvent(activeAccount: "Y", updatedAt: 3_000, remainingPercent: 30), from: source)
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 30)
+    #expect(ui.codexAccountsUpdatedAt == Date(timeIntervalSince1970: 3))
+  }
+
+  @Test
   func remoteUsageUsesRemoteSelectionAndSharedQuota() throws {
     let ui = ExtensionUIModel()
     let desktop = AppModel(restoreLastProjectOnLaunch: false)
