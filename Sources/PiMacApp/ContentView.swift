@@ -239,7 +239,9 @@ struct ContentView: View {
       if case .success(let urls) = result { addAttachmentsAtSelection(urls) }
     }
     .sheet(isPresented: $showingSettings) {
-      SettingsView(path: app.piPath, projectURL: app.projectURL, telegram: workspace.telegram) { app.piPath = $0 }
+      SettingsView(path: app.piPath, projectURL: app.projectURL, telegram: workspace.telegram) {
+        app.piPath = $0
+      }
     }
     .sheet(isPresented: $showingModelSettings) {
       ModelSettingsView()
@@ -353,40 +355,41 @@ struct ContentView: View {
 
         if app.projectURL != nil {
           SidebarHoverRegion { newChatHovered in
-          Button {
-            guard let projectURL = app.projectURL else { return }
-            workspace.newSession(in: projectURL)
-          } label: {
-            HStack(spacing: 8) {
-              Image(systemName: "square.and.pencil")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(
-                  newChatHovered ? Color.accentColor : Color.secondary
-                )
-                .frame(width: 26, height: 26)
-                .background(
-                  newChatHovered ? Color.accentColor.opacity(0.10) : Color.clear,
-                  in: RoundedRectangle(cornerRadius: 7)
-                )
-              Text("新聊天")
-                .font(.callout.weight(.medium))
-              Spacer()
-            }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .contentShape(RoundedRectangle(cornerRadius: 10))
-          }
-          .buttonStyle(.plain)
-          .background {
-            let hovered = newChatHovered
-            RoundedRectangle(cornerRadius: 10)
-              .fill(hovered ? Color.accentColor.opacity(0.12) : Color.clear)
-              .overlay {
-                RoundedRectangle(cornerRadius: 10)
-                  .strokeBorder(hovered ? Color.accentColor.opacity(0.20) : Color.clear, lineWidth: 1)
+            Button {
+              guard let projectURL = app.projectURL else { return }
+              workspace.newSession(in: projectURL)
+            } label: {
+              HStack(spacing: 8) {
+                Image(systemName: "square.and.pencil")
+                  .font(.system(size: 13, weight: .semibold))
+                  .foregroundStyle(
+                    newChatHovered ? Color.accentColor : Color.secondary
+                  )
+                  .frame(width: 26, height: 26)
+                  .background(
+                    newChatHovered ? Color.accentColor.opacity(0.10) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 7)
+                  )
+                Text("新聊天")
+                  .font(.callout.weight(.medium))
+                Spacer()
               }
-              .shadow(color: .black.opacity(hovered ? 0.08 : 0), radius: 4, y: 1)
-          }
+              .padding(.horizontal, 7)
+              .padding(.vertical, 4)
+              .contentShape(RoundedRectangle(cornerRadius: 10))
+            }
+            .buttonStyle(.plain)
+            .background {
+              let hovered = newChatHovered
+              RoundedRectangle(cornerRadius: 10)
+                .fill(hovered ? Color.accentColor.opacity(0.12) : Color.clear)
+                .overlay {
+                  RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(
+                      hovered ? Color.accentColor.opacity(0.20) : Color.clear, lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(hovered ? 0.08 : 0), radius: 4, y: 1)
+            }
           }
 
           Text("会话")
@@ -539,69 +542,71 @@ struct ContentView: View {
     let selected = workspace.isSelectedSession(path: session.path)
     let running = workspace.model(forSessionPath: session.path)?.isBusy == true
     return SidebarHoverRegion { hovered in
-    ZStack(alignment: .trailing) {
-      Button {
-        guard let projectURL = app.projectURL else { return }
-        workspace.openSession(path: session.path, in: projectURL)
-      } label: {
-        HStack(spacing: 9) {
-          Image(systemName: selected ? "bubble.left.fill" : "bubble.left")
-            .foregroundStyle(
-              running ? Color.orange : selected ? Color.accentColor : Color.secondary
-            )
-            .frame(width: 17)
-          VStack(alignment: .leading, spacing: 2) {
-            Text(session.title)
-              .font(.callout)
-              .lineLimit(2)
-              .frame(maxWidth: .infinity, alignment: .leading)
-            SessionRelativeTime(date: session.modifiedAt)
-              .font(.caption2)
-              .foregroundStyle(.secondary)
-          }
-        }
-        .padding(.leading, 9)
-        .padding(.trailing, 38)
-        .padding(.vertical, 7)
-        .contentShape(Rectangle())
-      }
-      .buttonStyle(.plain)
-
-      if hovered {
+      ZStack(alignment: .trailing) {
         Button {
           guard let projectURL = app.projectURL else { return }
-          workspace.archiveSession(path: session.path, in: projectURL)
+          workspace.openSession(path: session.path, in: projectURL)
         } label: {
-          Image(systemName: "archivebox")
-            .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(.secondary)
-            .frame(width: 26, height: 26)
-            .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+          HStack(spacing: 9) {
+            Image(systemName: selected ? "bubble.left.fill" : "bubble.left")
+              .foregroundStyle(
+                running ? Color.orange : selected ? Color.accentColor : Color.secondary
+              )
+              .frame(width: 17)
+            VStack(alignment: .leading, spacing: 2) {
+              Text(session.title)
+                .font(.callout)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+              SessionRelativeTime(date: session.modifiedAt)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+          }
+          .padding(.leading, 9)
+          .padding(.trailing, 38)
+          .padding(.vertical, 7)
+          .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(running)
-        .help(running ? "任务运行时不能归档" : "归档会话")
-        .padding(.trailing, 6)
-        .transition(.opacity)
-      }
-    }
-    .background {
-      RoundedRectangle(cornerRadius: 9)
-        .fill(
-          selected ? Color.accentColor.opacity(0.11)
-            : hovered ? Color.primary.opacity(0.055) : Color.clear
-        )
-        .overlay {
-          RoundedRectangle(cornerRadius: 9)
-            .strokeBorder(
-              hovered ? (selected ? Color.accentColor.opacity(0.17) : Color.primary.opacity(0.07))
-                : Color.clear,
-              lineWidth: 1
-            )
+
+        if hovered {
+          Button {
+            guard let projectURL = app.projectURL else { return }
+            workspace.archiveSession(path: session.path, in: projectURL)
+          } label: {
+            Image(systemName: "archivebox")
+              .font(.system(size: 12, weight: .medium))
+              .foregroundStyle(.secondary)
+              .frame(width: 26, height: 26)
+              .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+          }
+          .buttonStyle(.plain)
+          .disabled(running)
+          .help(running ? "任务运行时不能归档" : "归档会话")
+          .padding(.trailing, 6)
+          .transition(.opacity)
         }
-        .shadow(color: .black.opacity(hovered ? 0.07 : 0), radius: 4, y: 1)
-    }
-    .contentShape(RoundedRectangle(cornerRadius: 9))
+      }
+      .background {
+        RoundedRectangle(cornerRadius: 9)
+          .fill(
+            selected
+              ? Color.accentColor.opacity(0.11)
+              : hovered ? Color.primary.opacity(0.055) : Color.clear
+          )
+          .overlay {
+            RoundedRectangle(cornerRadius: 9)
+              .strokeBorder(
+                hovered
+                  ? (selected ? Color.accentColor.opacity(0.17) : Color.primary.opacity(0.07))
+                  : Color.clear,
+                lineWidth: 1
+              )
+          }
+          .shadow(color: .black.opacity(hovered ? 0.07 : 0), radius: 4, y: 1)
+      }
+      .contentShape(RoundedRectangle(cornerRadius: 9))
     }
   }
 
@@ -2651,7 +2656,8 @@ private struct SettingsView: View {
   let telegram: TelegramControl
   let save: (String) -> Void
 
-  init(path: String, projectURL: URL?, telegram: TelegramControl, save: @escaping (String) -> Void) {
+  init(path: String, projectURL: URL?, telegram: TelegramControl, save: @escaping (String) -> Void)
+  {
     _path = State(initialValue: path)
     _versions = StateObject(
       wrappedValue: VersionManagerModel(piPath: path, projectURL: projectURL))

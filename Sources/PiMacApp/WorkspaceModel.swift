@@ -97,10 +97,11 @@ final class WorkspaceModel: ObservableObject {
   }
 
   var canRestartSafely: Bool {
-    telegram.canRestartSafely && tabs.allSatisfy { tab in
-      let model = tab.model
-      return model.canRestartSafely && !extensionUI.hasPendingRequests(from: model)
-    }
+    telegram.canRestartSafely
+      && tabs.allSatisfy { tab in
+        let model = tab.model
+        return model.canRestartSafely && !extensionUI.hasPendingRequests(from: model)
+      }
   }
 
   var selectedModel: AppModel? {
@@ -283,7 +284,8 @@ final class WorkspaceModel: ObservableObject {
     guard let projectURL else { return }
     refreshSessionCatalog(for: projectURL)
     guard !sessionPath.isEmpty else { return }
-    for tab in tabs where tab.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL {
+    for tab in tabs
+    where tab.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL {
       tab.model.refreshExternalTranscript(at: sessionPath)
     }
   }
@@ -419,12 +421,12 @@ final class WorkspaceModel: ObservableObject {
     // Transcript deltas, diagnostics and token counters are observed by the chat itself.
     // Forward only sidebar metadata, not every token from every background process.
     observations[tab.id] = Self.sidebarUpdates(for: model)
-    .receive(on: DispatchQueue.main)
-    .sink { [weak self, weak model] _ in
-      guard let self, let model else { return }
-      self.synchronizeProject(for: model)
-      self.objectWillChange.send()
-    }
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self, weak model] _ in
+        guard let self, let model else { return }
+        self.synchronizeProject(for: model)
+        self.objectWillChange.send()
+      }
     lastUsedAt[tab.id] = .now
     streamingObservations[tab.id] = Publishers.CombineLatest(
       model.$isStreaming, model.$isCompacting
@@ -467,7 +469,9 @@ final class WorkspaceModel: ObservableObject {
     selectTab(tab.id, startProcessIfNeeded: false)
   }
 
-  static func shouldDiscardDraftOnTabSwitch(from previousProject: URL?, to nextProject: URL?) -> Bool {
+  static func shouldDiscardDraftOnTabSwitch(from previousProject: URL?, to nextProject: URL?)
+    -> Bool
+  {
     guard let previousProject, let nextProject else { return false }
     return previousProject.standardizedFileURL.path == nextProject.standardizedFileURL.path
   }
@@ -605,7 +609,10 @@ final class WorkspaceModel: ObservableObject {
     if ifStale {
       if loadingSessionCatalogs.contains(projectPath) { return }
       if let refreshedAt = sessionCatalogRefreshedAt[projectPath],
-        Date.now.timeIntervalSince(refreshedAt) < 30 { return }
+        Date.now.timeIntervalSince(refreshedAt) < 30
+      {
+        return
+      }
     }
     let generation = UUID()
     sessionCatalogGenerations[projectPath] = generation

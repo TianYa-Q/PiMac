@@ -93,15 +93,21 @@ struct TranscriptHistoryTests {
   @Test
   func assistantThinkingRestoresAsSeparateCardsInContentOrder() {
     let messages: [PiRPCClient.JSON] = [
-      ["role": "assistant", "provider": "test", "model": "reasoner", "content": [
-        ["type": "thinking", "thinking": "先分析"],
-        ["type": "thinking", "thinking": "再验证"],
-        ["type": "text", "text": "答案"],
-        ["type": "toolCall", "id": "call-1", "name": "bash", "arguments": ["command": "pwd"]],
-      ]],
-      ["role": "toolResult", "toolCallId": "call-1", "toolName": "bash", "content": [
-        ["type": "text", "text": "结果"]
-      ]],
+      [
+        "role": "assistant", "provider": "test", "model": "reasoner",
+        "content": [
+          ["type": "thinking", "thinking": "先分析"],
+          ["type": "thinking", "thinking": "再验证"],
+          ["type": "text", "text": "答案"],
+          ["type": "toolCall", "id": "call-1", "name": "bash", "arguments": ["command": "pwd"]],
+        ],
+      ],
+      [
+        "role": "toolResult", "toolCallId": "call-1", "toolName": "bash",
+        "content": [
+          ["type": "text", "text": "结果"]
+        ],
+      ],
       ["role": "assistant", "content": [["type": "text", "text": "完成"]]],
     ]
     let entries = AppModel.chatEntries(from: messages)
@@ -117,14 +123,24 @@ struct TranscriptHistoryTests {
     defer { try? FileManager.default.removeItem(at: url) }
     let records: [PiRPCClient.JSON] = [
       ["type": "session", "id": "session"],
-      ["type": "message", "id": "user", "parentId": NSNull(),
-       "message": ["role": "user", "content": "问题"]],
-      ["type": "message", "id": "abandoned", "parentId": "user",
-       "message": ["role": "assistant", "content": [["type": "thinking", "thinking": "废弃"]]]],
-      ["type": "message", "id": "answer", "parentId": "user",
-       "message": ["role": "assistant", "content": [
-         ["type": "thinking", "thinking": "保留的思考"],
-         ["type": "text", "text": "回答"]]]],
+      [
+        "type": "message", "id": "user", "parentId": NSNull(),
+        "message": ["role": "user", "content": "问题"],
+      ],
+      [
+        "type": "message", "id": "abandoned", "parentId": "user",
+        "message": ["role": "assistant", "content": [["type": "thinking", "thinking": "废弃"]]],
+      ],
+      [
+        "type": "message", "id": "answer", "parentId": "user",
+        "message": [
+          "role": "assistant",
+          "content": [
+            ["type": "thinking", "thinking": "保留的思考"],
+            ["type": "text", "text": "回答"],
+          ],
+        ],
+      ],
     ]
     let text = try records.map {
       String(decoding: try JSONSerialization.data(withJSONObject: $0), as: UTF8.self)

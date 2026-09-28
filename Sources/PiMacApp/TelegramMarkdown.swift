@@ -21,7 +21,8 @@ enum TelegramMarkdown {
       } else {
         var content = line[...]
         if content.hasPrefix("#"), let end = content.firstIndex(where: { $0 != "#" }),
-          content[end] == " " {
+          content[end] == " "
+        {
           content = content[content.index(after: end)...]
           result.append("<b>\(inline(content))</b>")
         } else {
@@ -38,23 +39,32 @@ enum TelegramMarkdown {
     var cursor = content.startIndex
     while cursor < content.endIndex {
       let tail = content[cursor...]
-      if tail.hasPrefix("\\"), let next = content.index(cursor, offsetBy: 1, limitedBy: content.endIndex), next < content.endIndex {
+      if tail.hasPrefix("\\"),
+        let next = content.index(cursor, offsetBy: 1, limitedBy: content.endIndex),
+        next < content.endIndex
+      {
         result += escape(String(content[next]))
         cursor = content.index(after: next)
         continue
       }
       if tail.hasPrefix("["), let close = tail.firstIndex(of: "]"),
         close < content.endIndex, content[content.index(after: close)...].hasPrefix("("),
-        let end = content[content.index(close, offsetBy: 2)...].firstIndex(of: ")") {
+        let end = content[content.index(close, offsetBy: 2)...].firstIndex(of: ")")
+      {
         let urlText = String(content[content.index(close, offsetBy: 2)..<end])
-        if let url = URL(string: urlText), ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.host != nil {
-          result += "<a href=\"\(escape(urlText))\">\(inline(content[content.index(after: cursor)..<close]))</a>"
+        if let url = URL(string: urlText),
+          ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.host != nil
+        {
+          result +=
+            "<a href=\"\(escape(urlText))\">\(inline(content[content.index(after: cursor)..<close]))</a>"
           cursor = content.index(after: end)
           continue
         }
       }
       var matched = false
-      for (marker, tag) in [("**", "b"), ("__", "b"), ("~~", "s"), ("`", "code"), ("*", "i"), ("_", "i")] {
+      for (marker, tag) in [
+        ("**", "b"), ("__", "b"), ("~~", "s"), ("`", "code"), ("*", "i"), ("_", "i"),
+      ] {
         guard tail.hasPrefix(marker),
           let start = content.index(cursor, offsetBy: marker.count, limitedBy: content.endIndex),
           start < content.endIndex,

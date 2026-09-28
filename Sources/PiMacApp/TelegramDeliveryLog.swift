@@ -8,15 +8,21 @@ enum TelegramDeliveryLog {
   private static let maxBytes: UInt64 = 1_000_000
   private static let formatter = ISO8601DateFormatter()
 
-  static func record(_ event: String, task: UUID, sessionPath: String,
-    details: String = "", destination: URL = url) {
+  static func record(
+    _ event: String, task: UUID, sessionPath: String,
+    details: String = "", destination: URL = url
+  ) {
     let session = URL(fileURLWithPath: sessionPath).deletingPathExtension().lastPathComponent
-    let line = "\(formatter.string(from: .now)) task=\(task.uuidString) session=\(session) \(event) \(details)\n"
+    let line =
+      "\(formatter.string(from: .now)) task=\(task.uuidString) session=\(session) \(event) \(details)\n"
     do {
-      try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(),
+      try FileManager.default.createDirectory(
+        at: destination.deletingLastPathComponent(),
         withIntermediateDirectories: true)
-      if let size = (try? FileManager.default.attributesOfItem(atPath: destination.path))?[.size] as? NSNumber,
-        size.uint64Value >= maxBytes {
+      if let size = (try? FileManager.default.attributesOfItem(atPath: destination.path))?[.size]
+        as? NSNumber,
+        size.uint64Value >= maxBytes
+      {
         let old = destination.appendingPathExtension("old")
         try? FileManager.default.removeItem(at: old)
         try FileManager.default.moveItem(at: destination, to: old)

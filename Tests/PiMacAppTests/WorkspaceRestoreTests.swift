@@ -17,9 +17,12 @@ struct WorkspaceRestoreTests {
   @Test func defaultSessionSearchOnlyVisitsTheActiveProject() {
     let root = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".pi/agent/sessions", isDirectory: true)
-    #expect(AppModel.sessionSearchRoot(
-      for: "/Users/example/work", root: root).lastPathComponent == "--Users-example-work--")
-    let customRoot = FileManager.default.temporaryDirectory.appendingPathComponent("imported-sessions")
+    #expect(
+      AppModel.sessionSearchRoot(
+        for: "/Users/example/work", root: root
+      ).lastPathComponent == "--Users-example-work--")
+    let customRoot = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "imported-sessions")
     #expect(AppModel.sessionSearchRoot(for: "/Users/example/work", root: customRoot) == customRoot)
   }
 
@@ -37,14 +40,18 @@ struct WorkspaceRestoreTests {
       data.append(0x0A)
       return data
     }
-    func session(_ name: String, projectPath: String = project,
-      messages: [(String, TimeInterval, Any)]) throws -> String {
+    func session(
+      _ name: String, projectPath: String = project,
+      messages: [(String, TimeInterval, Any)]
+    ) throws -> String {
       var data = try record(["type": "session", "cwd": projectPath])
       for (role, age, content) in messages {
-        data.append(try record([
-          "type": "message", "timestamp": ISO8601DateFormatter().string(from: now.addingTimeInterval(age)),
-          "message": ["role": role, "content": content],
-        ]))
+        data.append(
+          try record([
+            "type": "message",
+            "timestamp": ISO8601DateFormatter().string(from: now.addingTimeInterval(age)),
+            "message": ["role": role, "content": content],
+          ]))
       }
       let url = root.appendingPathComponent("\(name).jsonl")
       try data.write(to: url)
@@ -52,29 +59,45 @@ struct WorkspaceRestoreTests {
     }
 
     _ = try session("old", messages: [("user", -301, "old")])
-    #expect(AppModel.mostRecentConversationSession(
-      for: project, since: cutoff, now: now, root: root) == nil)
+    #expect(
+      AppModel.mostRecentConversationSession(
+        for: project, since: cutoff, now: now, root: root) == nil)
     _ = try session("boundary", messages: [("user", -300, "just in time")])
-    let boundary = try #require(AppModel.mostRecentConversationSession(
-      for: project, since: cutoff, now: now, root: root))
+    let boundary = try #require(
+      AppModel.mostRecentConversationSession(
+        for: project, since: cutoff, now: now, root: root))
     #expect(boundary.hasSuffix("/boundary.jsonl"))
     _ = try session("user", messages: [("user", -200, "question")])
-    let user = try #require(AppModel.mostRecentConversationSession(
-      for: project, since: cutoff, now: now, root: root))
+    let user = try #require(
+      AppModel.mostRecentConversationSession(
+        for: project, since: cutoff, now: now, root: root))
     #expect(user.hasSuffix("/user.jsonl"))
-    _ = try session("reply", messages: [("user", -1000, "question"),
-      ("assistant", -30, [["type": "text", "text": "answer"]])])
-    let reply = try #require(AppModel.mostRecentConversationSession(
-      for: project, since: cutoff, now: now, root: root))
+    _ = try session(
+      "reply",
+      messages: [
+        ("user", -1000, "question"),
+        ("assistant", -30, [["type": "text", "text": "answer"]]),
+      ])
+    let reply = try #require(
+      AppModel.mostRecentConversationSession(
+        for: project, since: cutoff, now: now, root: root))
     #expect(reply.hasSuffix("/reply.jsonl"))
-    _ = try session("tool", messages: [("user", -1000, "question"),
-      ("assistant", -10, [["type": "toolCall", "name": "bash"]])])
+    _ = try session(
+      "tool",
+      messages: [
+        ("user", -1000, "question"),
+        ("assistant", -10, [["type": "toolCall", "name": "bash"]]),
+      ])
     _ = try session("other-project", projectPath: "/tmp/other", messages: [("user", -2, "hi")])
-    #expect(AppModel.mostRecentConversationSession(
-      for: project, since: cutoff, now: now, root: root) == reply)
-    #expect(AppModel.mostRecentConversationSession(
-      for: project, since: cutoff, now: now, archivedPaths: [reply], root: root) == user)
-    #expect(AppModel.mostRecentConversationSession(
-      for: project, since: cutoff, now: now, archivedPaths: [reply, user, boundary], root: root) == nil)
+    #expect(
+      AppModel.mostRecentConversationSession(
+        for: project, since: cutoff, now: now, root: root) == reply)
+    #expect(
+      AppModel.mostRecentConversationSession(
+        for: project, since: cutoff, now: now, archivedPaths: [reply], root: root) == user)
+    #expect(
+      AppModel.mostRecentConversationSession(
+        for: project, since: cutoff, now: now, archivedPaths: [reply, user, boundary], root: root)
+        == nil)
   }
 }

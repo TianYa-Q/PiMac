@@ -19,10 +19,13 @@ struct SessionDiscoveryTests {
     let header = try record(["type": "session", "cwd": project])
     let user = try record([
       "type": "message", "timestamp": "2026-01-02T10:00:00Z",
-      "message": ["role": "user", "content": [
-        ["type": "text", "text": "刚刚的会话"],
-        ["type": "image", "data": String(repeating: "a", count: 600_000)],
-      ]],
+      "message": [
+        "role": "user",
+        "content": [
+          ["type": "text", "text": "刚刚的会话"],
+          ["type": "image", "data": String(repeating: "a", count: 600_000)],
+        ],
+      ],
     ])
     try (header + user).write(to: root.appendingPathComponent("image.jsonl"))
     let config = try record([

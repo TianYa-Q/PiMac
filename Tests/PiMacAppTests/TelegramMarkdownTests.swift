@@ -1,4 +1,5 @@
 import XCTest
+
 @testable import PiMacApp
 
 final class TelegramMarkdownTests: XCTestCase {

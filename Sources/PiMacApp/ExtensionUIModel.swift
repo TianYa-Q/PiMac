@@ -274,7 +274,9 @@ final class ExtensionUIModel: ObservableObject {
     }
   }
 
-  func usage(for source: AppModel?) -> (accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?) {
+  func usage(for source: AppModel?) -> (
+    accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?
+  ) {
     let selection = source.flatMap {
       sessionAccountSelections[ObjectIdentifier($0)]
     }
@@ -282,9 +284,10 @@ final class ExtensionUIModel: ObservableObject {
     // left while the new process is still starting. Keep the account currently shown (or use
     // the payload's account when bootstrapping) until the selected process reports its own
     // selection; never turn a valid shared quota snapshot into an empty card.
-    let fallbackActiveAccount = source === selectedSource
+    let fallbackActiveAccount =
+      source === selectedSource
       ? (codexAccounts.first(where: \.isActive)?.name
-         ?? usageSnapshot.accounts.first(where: \.isActive)?.name)
+        ?? usageSnapshot.accounts.first(where: \.isActive)?.name)
       : nil
     let activeAccount = selection?.activeAccount ?? fallbackActiveAccount
     let geminiIsActive =

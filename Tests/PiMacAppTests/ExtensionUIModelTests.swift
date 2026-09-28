@@ -62,11 +62,15 @@ struct ExtensionUIModelTests {
     let desktop = AppModel(restoreLastProjectOnLaunch: false)
     let remote = AppModel(restoreLastProjectOnLaunch: false)
     ui.selectSource(desktop)
-    ui.handle(try statusEvent(activeAccount: "X", updatedAt: 1_000, remainingPercent: 10), from: desktop)
+    ui.handle(
+      try statusEvent(activeAccount: "X", updatedAt: 1_000, remainingPercent: 10), from: desktop)
     #expect(ui.usage(for: remote).accounts.first(where: \.isActive) == nil)
-    ui.handle(try statusEvent(activeAccount: "Y", updatedAt: 2_000, remainingPercent: 90), from: remote)
+    ui.handle(
+      try statusEvent(activeAccount: "Y", updatedAt: 2_000, remainingPercent: 90), from: remote)
     #expect(ui.usage(for: remote).accounts.first(where: \.isActive)?.name == "Y")
-    #expect(ui.usage(for: remote).accounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 10)
+    #expect(
+      ui.usage(for: remote).accounts.first(where: { $0.name == "X" })?.primary?.remainingPercent
+        == 10)
     #expect(ui.codexAccounts.first(where: \.isActive)?.name == "X")
   }
 

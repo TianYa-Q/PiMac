@@ -14,7 +14,8 @@ enum QuotaNotificationFormatter {
         let colon = parts[0].firstIndex(where: { $0 == ":" || $0 == "：" })
       else { return text }
       let name = String(parts[0][..<colon]).trimmingCharacters(in: .whitespaces)
-      let first = String(parts[0][parts[0].index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+      let first = String(parts[0][parts[0].index(after: colon)...]).trimmingCharacters(
+        in: .whitespaces)
       guard !name.isEmpty,
         let short = window(first, expected: "5h", label: "5 小时"),
         let long = window(parts[1], expected: "7d", label: "7 天")

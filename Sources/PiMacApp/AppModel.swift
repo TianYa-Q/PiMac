@@ -21,7 +21,8 @@ final class AppModel: ObservableObject {
     didSet {
       scheduleCodexAccountRotation()
       if oldValue != selectedModelId {
-        onTelegramLifecycleEvent?("model_changed from=\(oldValue.isEmpty ? "none" : oldValue) to=\(selectedModelId)")
+        onTelegramLifecycleEvent?(
+          "model_changed from=\(oldValue.isEmpty ? "none" : oldValue) to=\(selectedModelId)")
       }
     }
   }
@@ -276,8 +277,10 @@ final class AppModel: ObservableObject {
 
   func resumeProcess(sessionPath: String?, continueLastSession: Bool) {
     guard !client.isRunning, let projectURL else { return }
-    let targetPath = sessionPath ?? (currentSessionPath.isEmpty
-      ? pendingStartupSessionPath : currentSessionPath)
+    let targetPath =
+      sessionPath
+      ?? (currentSessionPath.isEmpty
+        ? pendingStartupSessionPath : currentSessionPath)
     connect(
       to: projectURL,
       continueLastSession: targetPath == nil ? continueLastSession : false,
@@ -540,9 +543,13 @@ final class AppModel: ObservableObject {
     guard clientConnectedForCommands, client.isRunning, !isLoadingConfiguration,
       !isBusy, queuedPrompts.isEmpty,
       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
-    else { completion(false); return }
+    else {
+      completion(false)
+      return
+    }
     submitImmediatePrompt(
-      QueuedPrompt(id: UUID(), text: text, rpcText: Self.rpcText(for: text, attachments: attachments),
+      QueuedPrompt(
+        id: UUID(), text: text, rpcText: Self.rpcText(for: text, attachments: attachments),
         delivery: .steer, attachments: attachments),
       completion: completion)
   }
@@ -759,7 +766,10 @@ final class AppModel: ObservableObject {
         completion?(false)
       case .success(let response):
         let cancelled = (response["data"] as? PiRPCClient.JSON)?["cancelled"] as? Bool ?? false
-        guard !cancelled else { completion?(false); return }
+        guard !cancelled else {
+          completion?(false)
+          return
+        }
         self.resetTranscriptLoading()
         self.currentSessionPath = path
         self.messages.removeAll()
@@ -1116,8 +1126,10 @@ final class AppModel: ObservableObject {
       self.refreshAll(startupGeneration: generation)
       completion?()
     }
-    guard let id = Self.preferredNewSessionModelID(
-      currentModelID: selectedModelId, preferenceKey: modelPreferenceKey) else {
+    guard
+      let id = Self.preferredNewSessionModelID(
+        currentModelID: selectedModelId, preferenceKey: modelPreferenceKey)
+    else {
       applySavedThinkingLevelForCurrentModel(generation: generation, completion: finish)
       return
     }
@@ -1442,13 +1454,16 @@ final class AppModel: ObservableObject {
       .appendingPathComponent(".pi/agent/sessions", isDirectory: true)
     guard root.standardizedFileURL == defaultRoot.standardizedFileURL else { return root }
     let path = URL(fileURLWithPath: projectPath).standardizedFileURL.path
-    let name = "--" + path.dropFirst().replacingOccurrences(of: "/", with: "-")
+    let name =
+      "--"
+      + path.dropFirst().replacingOccurrences(of: "/", with: "-")
       .replacingOccurrences(of: ":", with: "-") + "--"
     return root.appendingPathComponent(name, isDirectory: true)
   }
 
   nonisolated static func discoverSessions(
-    for projectPath: String, root: URL = FileManager.default.homeDirectoryForCurrentUser
+    for projectPath: String,
+    root: URL = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".pi/agent/sessions", isDirectory: true)
   ) -> [SessionItem] {
     guard
@@ -1535,9 +1550,12 @@ final class AppModel: ObservableObject {
           let message = entry["message"] as? PiRPCClient.JSON,
           message["role"] as? String == "user", let header
         {
-          return (header, contentText(message["content"])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\n", with: " "))
+          return (
+            header,
+            contentText(message["content"])
+              .trimmingCharacters(in: .whitespacesAndNewlines)
+              .replacingOccurrences(of: "\n", with: " ")
+          )
         }
       }
       if atEnd { break }
@@ -1551,15 +1569,18 @@ final class AppModel: ObservableObject {
     root: URL = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent(".pi/agent/sessions", isDirectory: true)
   ) -> String? {
-    guard let enumerator = FileManager.default.enumerator(
-      at: sessionSearchRoot(for: projectPath, root: root),
-      includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-      options: [.skipsHiddenFiles])
+    guard
+      let enumerator = FileManager.default.enumerator(
+        at: sessionSearchRoot(for: projectPath, root: root),
+        includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+        options: [.skipsHiddenFiles])
     else { return nil }
     var newest: (path: String, date: Date)?
     for case let url as URL in enumerator where url.pathExtension == "jsonl" {
       guard !archivedPaths.contains(url.path),
-        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+        let values = try? url.resourceValues(forKeys: [
+          .contentModificationDateKey, .isRegularFileKey,
+        ]),
         values.isRegularFile == true,
         let modified = values.contentModificationDate, modified >= cutoff,
         sessionPreview(inFile: url, projectPath: projectPath) != nil,
@@ -1580,8 +1601,10 @@ final class AppModel: ObservableObject {
         record["type"] as? String == "message",
         let message = record["message"] as? PiRPCClient.JSON,
         let role = message["role"] as? String,
-        role == "user" || (includeAssistant && role == "assistant" &&
-          !contentText(message["content"]).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        role == "user"
+          || (includeAssistant && role == "assistant"
+            && !contentText(message["content"]).trimmingCharacters(in: .whitespacesAndNewlines)
+              .isEmpty)
       else { continue }
       if let date = recordDate(record) { return date }
     }
@@ -1594,7 +1617,9 @@ final class AppModel: ObservableObject {
     latestMessageDate(inFile: url, includeAssistant: false)
   }
 
-  nonisolated private static func latestMessageDate(inFile url: URL, includeAssistant: Bool) -> Date? {
+  nonisolated private static func latestMessageDate(inFile url: URL, includeAssistant: Bool)
+    -> Date?
+  {
     guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
     defer { try? handle.close() }
     guard let size = try? handle.seekToEnd() else { return nil }
@@ -1694,8 +1719,11 @@ final class AppModel: ObservableObject {
       scheduleStreamingStatsRefresh()
     case "message_end":
       if let message = event["message"] as? PiRPCClient.JSON,
-        message["role"] as? String == "assistant" {
-        onTelegramLifecycleEvent?("message_end model=\(message["provider"] as? String ?? "unknown")/\(message["model"] as? String ?? "unknown") stop=\(message["stopReason"] as? String ?? "unknown")")
+        message["role"] as? String == "assistant"
+      {
+        onTelegramLifecycleEvent?(
+          "message_end model=\(message["provider"] as? String ?? "unknown")/\(message["model"] as? String ?? "unknown") stop=\(message["stopReason"] as? String ?? "unknown")"
+        )
       }
       handleMessageEnd(event)
     case "tool_execution_start", "tool_execution_update", "tool_execution_end":
@@ -2160,12 +2188,13 @@ final class AppModel: ObservableObject {
         var currentText = ""
         func flushBlock() {
           guard let kind = currentKind, !currentText.isEmpty else { return }
-          entries.append(ChatEntry(
-            id: UUID().uuidString, kind: kind,
-            title: kind == .thinking ? "思考过程" : "Pi", text: currentText,
-            modelProvider: provider, modelID: modelID,
-            timestamp: messageDate(message)
-          ))
+          entries.append(
+            ChatEntry(
+              id: UUID().uuidString, kind: kind,
+              title: kind == .thinking ? "思考过程" : "Pi", text: currentText,
+              modelProvider: provider, modelID: modelID,
+              timestamp: messageDate(message)
+            ))
         }
         for block in blocks {
           let kind: ChatEntryKind
@@ -2195,10 +2224,11 @@ final class AppModel: ObservableObject {
         }
         flushBlock()
         if !hidesRetriedError, let errorText = assistantErrorText(message) {
-          entries.append(ChatEntry(
-            id: UUID().uuidString, kind: .system, title: "错误",
-            text: errorText, isError: true, timestamp: messageDate(message)
-          ))
+          entries.append(
+            ChatEntry(
+              id: UUID().uuidString, kind: .system, title: "错误",
+              text: errorText, isError: true, timestamp: messageDate(message)
+            ))
         }
         continue
       }

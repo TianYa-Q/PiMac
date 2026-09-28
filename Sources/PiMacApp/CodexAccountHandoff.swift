@@ -31,10 +31,16 @@ final class CodexAccountHandoff {
 
     func switchAccount() {
       guard self.operation == id else { return }
-      guard !self.cancelled else { finish(.failure(CancellationError())); return }
+      guard !self.cancelled else {
+        finish(.failure(CancellationError()))
+        return
+      }
       request(["type": "prompt", "message": "/accounts switch \(target)"]) { result in
         guard self.operation == id else { return }
-        if self.cancelled { finish(.failure(CancellationError())); return }
+        if self.cancelled {
+          finish(.failure(CancellationError()))
+          return
+        }
         switch result {
         case .failure(let error): finish(.failure(error))
         case .success:
@@ -47,7 +53,10 @@ final class CodexAccountHandoff {
       }
     }
 
-    guard interrupt else { switchAccount(); return }
+    guard interrupt else {
+      switchAccount()
+      return
+    }
     request(["type": "clear_queue"]) { result in
       guard self.operation == id else { return }
       switch result {
@@ -55,7 +64,10 @@ final class CodexAccountHandoff {
       case .success(let response):
         guard let data = response["data"] as? PiRPCClient.JSON,
           data["steering"] is [String], data["followUp"] is [String]
-        else { finish(.failure(HandoffError.invalidQueue)); return }
+        else {
+          finish(.failure(HandoffError.invalidQueue))
+          return
+        }
         preserveQueue(data)
         // Even after manual cancellation, finish stopping the interrupted operation.
         request(["type": "abort"]) { result in

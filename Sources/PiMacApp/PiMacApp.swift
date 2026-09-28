@@ -12,16 +12,24 @@ final class DevelopmentReloader: ObservableObject {
   init() {
     let path = ProcessInfo.processInfo.environment["PIMAC_DEV_RELOAD_PATH"]
     let running = Bundle.main.executableURL?.standardizedFileURL
-    executable = path.flatMap { URL(fileURLWithPath: $0).standardizedFileURL == running ? running : nil }
-    originalModification = executable.flatMap { try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }
+    executable = path.flatMap {
+      URL(fileURLWithPath: $0).standardizedFileURL == running ? running : nil
+    }
+    originalModification = executable.flatMap {
+      try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
   }
 
   func check(workspace: WorkspaceModel) {
     guard !reloading, let executable, let originalModification,
-      let modified = try? executable.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+      let modified = try? executable.resourceValues(forKeys: [.contentModificationDateKey])
+        .contentModificationDate,
       modified > originalModification
     else { return }
-    if pendingSince == nil { pendingSince = .now; return }
+    if pendingSince == nil {
+      pendingSince = .now
+      return
+    }
     guard let pendingSince, Date.now.timeIntervalSince(pendingSince) >= 2,
       workspace.canRestartSafely
     else { return }
@@ -30,7 +38,10 @@ final class DevelopmentReloader: ObservableObject {
     // must not have two owners). Retain the development environment across the relaunch.
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/sh")
-    process.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "--", "\(ProcessInfo.processInfo.processIdentifier)", executable.path]
+    process.arguments = [
+      "-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "--",
+      "\(ProcessInfo.processInfo.processIdentifier)", executable.path,
+    ]
     do {
       try process.run()
       reloading = true

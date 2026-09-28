@@ -24,8 +24,10 @@ import Testing
     defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
     try FileManager.default.createDirectory(
       at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try Data(#"{"defaultThinkingLevel":"low","modelThinkingLevels":{"a/b":"high"},"theme":"dark"}"#.utf8)
-      .write(to: url)
+    try Data(
+      #"{"defaultThinkingLevel":"low","modelThinkingLevels":{"a/b":"high"},"theme":"dark"}"#.utf8
+    )
+    .write(to: url)
 
     let original = PiSettingsStore.loadModelPreferences(from: url)
     #expect(original.thinkingLevel(for: "a/b") == "high")
