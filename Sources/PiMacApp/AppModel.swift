@@ -10,14 +10,25 @@ final class AppModel: ObservableObject {
     didSet { if connectionState == .connected { scheduleCodexAccountRotation() } }
   }
   @Published var projectURL: URL?
-  @Published var messages: [ChatEntry] = []
+  @Published var messages: [ChatEntry] = [] {
+    didSet { cachedConversationTurns = nil }
+  }
+  private var cachedConversationTurns: [ConversationTurn]?
+
+  var conversationTurns: [ConversationTurn] {
+    if let cachedConversationTurns { return cachedConversationTurns }
+    let turns = ConversationTurn.group(messages)
+    cachedConversationTurns = turns
+    return turns
+  }
   /// Models shown in the composer. `allModels` also contains models hidden by Pi's enabledModels setting.
   @Published var models: [PiModel] = []
   @Published var allModels: [PiModel] = []
   @Published var modelDefaultThinkingLevels: [String: String] = [:]
   @Published var globalDefaultThinkingLevel = "medium"
   @Published var compactionModelID: String?
-  @Published var defaultModelID: String? = UserDefaults.standard.string(forKey: "defaultNewSessionModelID")
+  @Published var defaultModelID: String? = UserDefaults.standard.string(
+    forKey: "defaultNewSessionModelID")
   @Published var selectedModelId = "" {
     didSet {
       scheduleCodexAccountRotation()
@@ -29,6 +40,36 @@ final class AppModel: ObservableObject {
   }
   @Published var thinkingLevels = ["off"]
   @Published var selectedThinkingLevel = "off"
+  @Published private(set) var fastModeEnabled = false
+  @Published private(set) var fastModeAvailable = false
+  @Published private(set) var isChangingFastMode = false
+  @Published private(set) var outputTokensPerSecond: Double?
+  private var outputSpeedTracker = OutputSpeedTracker()
+  private var lastOutputSpeedPublish: TimeInterval = 0
+
+  var supportsFastMode: Bool {
+    selectedModel.map {
+      ($0.provider == "openai-codex" && $0.api != "pi-virtual")
+        || ($0.provider == "openai" && $0.api == "openai-responses")
+    } ?? false
+  }
+
+  var accountUsageProvider: AccountUsageProvider? {
+    guard let model = selectedModel, model.api != "pi-virtual" else { return nil }
+    return AccountUsageProvider(rawValue: model.provider)
+  }
+
+  var supportsAccountSwitch: Bool {
+    guard let provider = accountUsageProvider else { return false }
+    // The v1 extension only reported legacy Codex accounts, without capabilities.
+    return provider == .legacyCodex || extensionUI?.supportsAccountSwitch(for: self) == true
+  }
+
+  var supportsAccountRotation: Bool {
+    supportsAccountSwitch
+      && (accountUsageProvider == .legacyCodex
+        || extensionUI?.managesSelectedAuth(for: self) == true)
+  }
   @Published var isStreaming = false {
     didSet { if !isStreaming { scheduleCodexAccountRotation() } }
   }
@@ -54,7 +95,7 @@ final class AppModel: ObservableObject {
   private static let lastProjectPathKey = "lastProjectPath"
   nonisolated private static let defaultModelKey = "defaultNewSessionModelID"
 
-  private let client = PiRPCClient()
+  private let client: PiRPCClient
   private var codexRotationScheduled = false
   @Published private(set) var codexRotationInFlight = false
   private let codexHandoff = CodexAccountHandoff()
@@ -67,8 +108,8 @@ final class AppModel: ObservableObject {
   private var activeThinkingId: String?
   private var activeCompactionId: String?
   private var sessionLoadGeneration = UUID()
-  private var isRewritingQueue = false
-  private var awaitingAgentStart = false
+  @Published private var isRewritingQueue = false
+  @Published private(set) var awaitingAgentStart = false
   private var submittingQueuedPrompts: [UUID: Int] = [:]
   private var consumedPromptsAwaitingDisplay: [QueuedPrompt] = []
   private var pendingAssistantError: String?
@@ -87,6 +128,10 @@ final class AppModel: ObservableObject {
   private var connectionGeneration = UUID() {
     didSet {
       codexHandoff.reset()
+      fastModeAvailable = false
+      isChangingFastMode = false
+      outputSpeedTracker.reset()
+      outputTokensPerSecond = nil
       codexRotationInFlight = false
       lastCodexRotationAttempt = nil
     }
@@ -112,12 +157,15 @@ final class AppModel: ObservableObject {
     initialComposerText: String = "",
     remembersDesktopProject: Bool = true,
     modelPreferenceKey: String = "defaultNewSessionModelID",
-    thinkingPreferenceKey: String? = nil
+    thinkingPreferenceKey: String? = nil,
+    rpcClient: PiRPCClient = PiRPCClient()
   ) {
+    self.client = rpcClient
     self.remembersDesktopProject = remembersDesktopProject
     self.pendingStartupSessionPath = startupSessionPath
     self.modelPreferenceKey = modelPreferenceKey
     self.thinkingPreferenceKey = thinkingPreferenceKey
+    fastModeEnabled = UserDefaults.standard.bool(forKey: modelPreferenceKey + ".fastMode")
     // The workspace already knows the target project when constructing a tab. Publish it
     // synchronously so persistent chrome (project/session sidebar) never observes a temporary
     // nil project while the RPC connection is deferred to the next main-actor turn.
@@ -215,7 +263,8 @@ final class AppModel: ObservableObject {
       try client.start(
         piPath: piPath,
         workingDirectory: projectURL,
-        continueLastSession: continueLastSession
+        continueLastSession: continueLastSession,
+        fastMode: fastModeEnabled
       )
       if remembersDesktopProject {
         UserDefaults.standard.set(projectURL.path, forKey: Self.lastProjectPathKey)
@@ -251,7 +300,7 @@ final class AppModel: ObservableObject {
   }
 
   var isProcessRunning: Bool { client.isRunning }
-  var isBusy: Bool { isStreaming || isCompacting || codexRotationInFlight }
+  var isBusy: Bool { isStreaming || isCompacting || codexRotationInFlight || isChangingFastMode }
   var canRestartSafely: Bool {
     !isBusy && !awaitingAgentStart && !isLoadingConfiguration && queuedPrompts.isEmpty
       && submittingQueuedPrompts.isEmpty && !isRewritingQueue
@@ -368,7 +417,7 @@ final class AppModel: ObservableObject {
   func sendPrompt(delivery: QueuedPromptDelivery = .steer) {
     let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty || !attachments.isEmpty, client.isRunning,
-      !isLoadingConfiguration, case .connected = connectionState
+      !isLoadingConfiguration, !isRewritingQueue, case .connected = connectionState
     else { return }
     let sentAttachments = attachments
     composerText = ""
@@ -434,15 +483,43 @@ final class AppModel: ObservableObject {
     }
   }
 
+  func queuedPromptMoveTarget(id: UUID, direction: Int) -> UUID? {
+    guard !isRewritingQueue, submittingQueuedPrompts.isEmpty,
+      let index = queuedPrompts.firstIndex(where: { $0.id == id }),
+      direction == -1 || direction == 1
+    else { return nil }
+    let prompt = queuedPrompts[index]
+    let candidates =
+      direction < 0
+      ? Array(queuedPrompts[..<index].reversed())
+      : Array(queuedPrompts.dropFirst(index + 1))
+    return candidates.first {
+      $0.delivery == prompt.delivery && $0.waitsForCompaction == prompt.waitsForCompaction
+    }?.id
+  }
+
+  func moveQueuedPrompt(id: UUID, direction: Int) {
+    guard let destination = queuedPromptMoveTarget(id: id, direction: direction) else { return }
+    dequeuePrompt(id: id, swappingWith: destination)
+  }
+
   private func dequeuePrompt(
-    id: UUID, onRemoved: ((QueuedPrompt) -> Void)? = nil
+    id: UUID, swappingWith destination: UUID? = nil,
+    onRemoved: ((QueuedPrompt) -> Void)? = nil
   ) {
     guard let target = queuedPrompts.first(where: { $0.id == id }),
       !isRewritingQueue, submittingQueuedPrompts[id] == nil
     else { return }
     if target.waitsForCompaction {
-      queuedPrompts.removeAll { $0.id == id }
-      onRemoved?(target)
+      if let destination,
+        let sourceIndex = queuedPrompts.firstIndex(where: { $0.id == id }),
+        let destinationIndex = queuedPrompts.firstIndex(where: { $0.id == destination })
+      {
+        queuedPrompts.swapAt(sourceIndex, destinationIndex)
+      } else if destination == nil {
+        queuedPrompts.removeAll { $0.id == id }
+        onRemoved?(target)
+      }
       return
     }
     isRewritingQueue = true
@@ -474,13 +551,20 @@ final class AppModel: ObservableObject {
         }
         values.remove(at: index)
         if prompt.delivery == .steer { steering = values } else { followUp = values }
-        if prompt.id == target.id {
+        if prompt.id == target.id && destination == nil {
           removedTarget = prompt
         } else {
           stillQueued.append(prompt)
         }
       }
 
+      // Only move messages that clear_queue confirmed are still pending.
+      if let destination,
+        let sourceIndex = stillQueued.firstIndex(where: { $0.id == id }),
+        let destinationIndex = stillQueued.firstIndex(where: { $0.id == destination })
+      {
+        stillQueued.swapAt(sourceIndex, destinationIndex)
+      }
       self.queuedPrompts = stillQueued
       if let removedTarget { onRemoved?(removedTarget) }
       let remotePrompts = stillQueued.filter { !$0.waitsForCompaction }
@@ -490,6 +574,11 @@ final class AppModel: ObservableObject {
         return
       }
 
+      // Use the reconstructed queue if Pi does not emit queue_update during requeueing.
+      self.latestQueueSnapshot = (
+        remotePrompts.filter { $0.delivery == .steer }.map(\.rpcText),
+        remotePrompts.filter { $0.delivery == .followUp }.map(\.rpcText)
+      )
       var remaining = remotePrompts.count
       for prompt in remotePrompts {
         self.sendQueuedPrompt(prompt) { [weak self] requeueResult in
@@ -568,14 +657,20 @@ final class AppModel: ObservableObject {
         attachments: prompt.attachments
       ))
     awaitingAgentStart = true
+    let generation = connectionGeneration
     client.request(Self.promptCommand(message: prompt.rpcText, attachments: prompt.attachments)) {
       [weak self] result in
+      guard let self, self.connectionGeneration == generation else {
+        completion?(false)
+        return
+      }
       switch result {
-      case .success:
+      case .success(let response):
+        self.applyPromptDisposition(response)
         completion?(true)
       case .failure(let error):
-        self?.awaitingAgentStart = false
-        self?.appendSystemError(error.localizedDescription)
+        self.awaitingAgentStart = false
+        self.appendSystemError(error.localizedDescription)
         completion?(false)
       }
     }
@@ -591,8 +686,9 @@ final class AppModel: ObservableObject {
     }
     let submittedAtGeneration = queueSnapshotGeneration
     submittingQueuedPrompts[submitted.id] = submittedAtGeneration
+    let generation = connectionGeneration
     sendQueuedPrompt(submitted) { [weak self] result in
-      guard let self else { return }
+      guard let self, self.connectionGeneration == generation else { return }
       self.submittingQueuedPrompts.removeValue(forKey: submitted.id)
       switch result {
       case .success:
@@ -616,7 +712,32 @@ final class AppModel: ObservableObject {
   ) {
     var command = Self.promptCommand(message: prompt.rpcText, attachments: prompt.attachments)
     command["streamingBehavior"] = prompt.delivery.rawValue
-    client.request(command, completion: completion)
+    let generation = connectionGeneration
+    client.request(command) { [weak self] result in
+      guard let self, self.connectionGeneration == generation else {
+        completion?(.failure(RPCError.cancelled))
+        return
+      }
+      if case .success(let response) = result {
+        self.applyPromptDisposition(response, queuedPromptID: prompt.id)
+      }
+      completion?(result)
+    }
+  }
+
+  /// Acceptance is per input, not per run: handled commands/inputs never promise
+  /// agent_start or agent_settled. Missing disposition preserves older Pi behavior.
+  func applyPromptDisposition(_ response: PiRPCClient.JSON, queuedPromptID: UUID? = nil) {
+    let disposition = (response["data"] as? PiRPCClient.JSON)?["disposition"] as? String
+    if let id = queuedPromptID, disposition == "handled" || disposition == "started" {
+      if let prompt = queuedPrompts.first(where: { $0.id == id }), disposition == "started" {
+        consumedPromptsAwaitingDisplay.append(prompt)
+      }
+      queuedPrompts.removeAll { $0.id == id }
+      consumedPromptsAwaitingDisplay.removeAll { $0.id == id && disposition == "handled" }
+    } else if queuedPromptID == nil, disposition == "handled" || disposition == "queued" {
+      awaitingAgentStart = false
+    }
   }
 
   private func flushCompactionQueue(willRetry: Bool) {
@@ -807,7 +928,8 @@ final class AppModel: ObservableObject {
           return
         }
         if let project, self.remembersDesktopProject {
-          UserDefaults.standard.set(project.standardizedFileURL.path, forKey: Self.lastProjectPathKey)
+          UserDefaults.standard.set(
+            project.standardizedFileURL.path, forKey: Self.lastProjectPathKey)
         }
         self.refreshAll()
         completion?(true)
@@ -979,7 +1101,7 @@ final class AppModel: ObservableObject {
     guard connectionState == .connected, client.isRunning,
       !isLoadingConfiguration, !awaitingAgentStart, !isRewritingQueue,
       submittingQueuedPrompts.isEmpty, !codexRotationInFlight,
-      selectedModelId.hasPrefix("openai-codex/"),
+      supportsAccountRotation,
       let usage = extensionUI?.usage(for: self), usage.gemini?.isActive != true,
       let target = CodexAccountRotation.nextAccount(in: usage.accounts)
     else { return }
@@ -1022,7 +1144,8 @@ final class AppModel: ObservableObject {
         case .success:
           if resume {
             // Keep the logical run active across the handoff, including for Telegram replies.
-            let text = "刚才因 Codex 账户额度不足中断，现已切换账户。请基于当前会话上下文继续完成尚未完成的任务；先检查被中断操作的实际结果，不要重复已完成的操作。"
+            let text =
+              "刚才因 OpenAI / Codex 账户额度不足中断，现已切换账户。请基于当前会话上下文继续完成尚未完成的任务；先检查被中断操作的实际结果，不要重复已完成的操作。"
             self.submitImmediatePrompt(
               QueuedPrompt(id: UUID(), text: text, rpcText: text, delivery: .steer, attachments: [])
             ) { [weak self] accepted in
@@ -1058,6 +1181,10 @@ final class AppModel: ObservableObject {
   }
 
   func switchCodexAccount(to accountName: String) {
+    guard supportsAccountSwitch else {
+      statusText = "当前账户扩展未报告此提供商的切换能力，请升级 account-usage"
+      return
+    }
     guard !isBusy else {
       statusText = "当前任务完成后才能切换 Codex 账户"
       return
@@ -1066,6 +1193,18 @@ final class AppModel: ObservableObject {
       "/accounts switch \(accountName)",
       progress: "正在切换到 \(accountName)…"
     )
+  }
+
+  func changeFastMode(to enabled: Bool) {
+    guard canRestartSafely, supportsFastMode, fastModeAvailable else { return }
+    isChangingFastMode = true
+    let generation = connectionGeneration
+    client.request(["type": "prompt", "message": "/pimac-fast \(enabled ? "on" : "off")"]) {
+      [weak self] result in
+      guard let self, generation == self.connectionGeneration else { return }
+      self.isChangingFastMode = false
+      if case .failure(let error) = result { self.appendSystemError(error.localizedDescription) }
+    }
   }
 
   func refreshCodexAccounts() {
@@ -1079,11 +1218,11 @@ final class AppModel: ObservableObject {
   private func runExtensionCommand(_ message: String, progress: String) {
     guard client.isRunning else { return }
     statusText = progress
+    let generation = connectionGeneration
     client.request(["type": "prompt", "message": message]) { [weak self] result in
-      self?.statusText = ""
-      if case .failure(let error) = result {
-        self?.appendSystemError(error.localizedDescription)
-      }
+      guard let self, self.connectionGeneration == generation else { return }
+      self.statusText = ""
+      if case .failure(let error) = result { self.appendSystemError(error.localizedDescription) }
     }
   }
 
@@ -1091,8 +1230,9 @@ final class AppModel: ObservableObject {
     guard !isBusy else { return }
     isCompacting = true
     statusText = "正在压缩上下文…"
+    let generation = connectionGeneration
     client.request(["type": "compact"]) { [weak self] result in
-      guard let self else { return }
+      guard let self, self.connectionGeneration == generation else { return }
       self.isCompacting = false
       self.statusText = ""
       switch result {
@@ -1280,10 +1420,13 @@ final class AppModel: ObservableObject {
     guard currentSessionPath == path, !complete.isEmpty else { return }
     loadedTranscriptKey = cacheKey
     loadedTranscriptPath = path
-    messages = complete
+    TranscriptCache.shared.insert(complete, at: path, key: cacheKey)
+    if messages != complete { messages = complete }
   }
 
   private func resetTranscriptLoading() {
+    outputSpeedTracker.reset()
+    outputTokensPerSecond = nil
     transcriptLoadGeneration += 1
     transcriptLoadInFlightKey = nil
     loadedTranscriptKey = nil
@@ -1297,24 +1440,55 @@ final class AppModel: ObservableObject {
     loadCompleteTranscript(at: path)
   }
 
+  /// Mirror display data only: the desktop RPC process does not own the remote run.
+  func applyRemoteSessionSnapshot(from source: AppModel) {
+    guard source !== self, !currentSessionPath.isEmpty,
+      currentSessionPath == source.currentSessionPath,
+      projectURL?.standardizedFileURL == source.projectURL?.standardizedFileURL,
+      canRestartSafely
+    else { return }
+    if !source.messages.isEmpty {
+      // Invalidate pending disk reads and suppress stale snapshots from our own RPC context.
+      resetTranscriptLoading()
+      loadedTranscriptPath = currentSessionPath
+      loadedTranscriptKey = Self.transcriptCacheKey(at: currentSessionPath)
+      if messages != source.messages { messages = source.messages }
+    }
+    if let remoteStats = source.stats { stats = remoteStats }
+    sessionName = source.sessionName
+  }
+
   private func loadCompleteTranscript(at path: String) {
     // get_state and get_messages normally finish almost together during startup. Both request the
     // complete JSONL transcript, so coalesce them and cache the parsed version while the file is
     // unchanged instead of parsing a large session two or three times.
     let key = Self.transcriptCacheKey(at: path)
     guard transcriptLoadInFlightKey != key, loadedTranscriptKey != key else { return }
+    if let cached = TranscriptCache.shared.entries(at: path, key: key) {
+      // Invalidate any older read before applying a synchronous cache hit.
+      transcriptLoadGeneration += 1
+      transcriptLoadInFlightKey = nil
+      applyCompleteTranscript(cached, at: path, cacheKey: key)
+      return
+    }
     transcriptLoadGeneration += 1
     let generation = transcriptLoadGeneration
     transcriptLoadInFlightKey = key
     Task { @MainActor [weak self] in
-      let complete = await Task.detached(priority: .userInitiated) {
-        Self.loadTranscript(at: path)
+      let (complete, finalKey) = await Task.detached(priority: .userInitiated) {
+        let entries = Self.loadTranscript(at: path)
+        return (entries, Self.transcriptCacheKey(at: path))
       }.value
       guard let self else { return }
       if self.transcriptLoadInFlightKey == key { self.transcriptLoadInFlightKey = nil }
       guard generation == self.transcriptLoadGeneration,
         self.currentSessionPath == path, !complete.isEmpty
       else { return }
+      // Do not retain a snapshot if another process appended while it was being read.
+      guard finalKey == key else {
+        self.loadCompleteTranscript(at: path)
+        return
+      }
       self.applyCompleteTranscript(complete, at: path, cacheKey: key)
     }
   }
@@ -1364,10 +1538,17 @@ final class AppModel: ObservableObject {
             modelId: id,
             name: raw["name"] as? String ?? id,
             reasoning: reasoning,
+            api: raw["api"] as? String,
             thinkingLevels: reasoning ? levels : ["off"]
           )
         }
         self.applyModelPreferences()
+        let unmatched = PiSettingsStore.loadModelPreferences().unmatchedPatterns(in: self.allModels)
+        if !unmatched.isEmpty {
+          self.appendSystemError(
+            "以下 enabledModels 配置未匹配可用模型：\(unmatched.joined(separator: "、"))。请检查登录状态或在模型设置中更新；不会自动删除配置。"
+          )
+        }
         self.isLoadingConfiguration = false
         if startupGeneration != nil { self.connectionState = .connected }
         self.statusText = ""
@@ -1661,6 +1842,10 @@ final class AppModel: ObservableObject {
     latestMessageDate(inFile: url, includeAssistant: false)
   }
 
+  nonisolated static func latestConversationMessageDate(inFile url: URL) -> Date? {
+    latestMessageDate(inFile: url, includeAssistant: true)
+  }
+
   nonisolated private static func latestMessageDate(inFile url: URL, includeAssistant: Bool)
     -> Date?
   {
@@ -1725,6 +1910,16 @@ final class AppModel: ObservableObject {
   /// RPC 事件种类较多，这里只把会影响原生界面的状态集中映射，避免视图层理解协议细节。
   private func handle(_ event: PiRPCClient.JSON) {
     guard let type = event["type"] as? String else { return }
+    if type == "agent_start" { outputSpeedTracker.reset() }
+    let now = ProcessInfo.processInfo.systemUptime
+    outputSpeedTracker.consume(event, now: now)
+    if type != "message_update" || now - lastOutputSpeedPublish >= 0.2 {
+      let speed = outputSpeedTracker.tokensPerSecond.map { ($0 * 10).rounded() / 10 }
+      if outputTokensPerSecond != speed {
+        outputTokensPerSecond = speed
+        lastOutputSpeedPublish = now
+      }
+    }
     switch type {
     case "agent_start":
       awaitingAgentStart = false
@@ -1791,7 +1986,15 @@ final class AppModel: ObservableObject {
     case "extension_error":
       appendSystemError(event["error"] as? String ?? "扩展执行失败")
     case "extension_ui_request":
-      extensionUI?.handle(event, from: self)
+      if event["method"] as? String == "setStatus", event["statusKey"] as? String == "pimac-fast",
+        let status = event["statusText"] as? String, ["on", "off"].contains(status)
+      {
+        fastModeAvailable = true
+        fastModeEnabled = status == "on"
+        UserDefaults.standard.set(fastModeEnabled, forKey: modelPreferenceKey + ".fastMode")
+      } else {
+        extensionUI?.handle(event, from: self)
+      }
     default:
       break
     }
@@ -1969,9 +2172,17 @@ final class AppModel: ObservableObject {
 
   private func handleMessageEnd(_ event: PiRPCClient.JSON) {
     flushPendingMessageDeltas()
-    guard let message = event["message"] as? PiRPCClient.JSON,
-      message["role"] as? String == "assistant"
-    else { return }
+    guard let message = event["message"] as? PiRPCClient.JSON else { return }
+    if message["role"] as? String == "toolResult",
+      let id = message["toolCallId"] as? String,
+      let index = messages.firstIndex(where: { $0.id == id }), message["nestedCalls"] != nil
+    {
+      messages[index].nestedCalls = NestedToolCall.from(message["nestedCalls"])
+      messages[index].nestedCallsComplete =
+        (message["nestedCalls"] as? PiRPCClient.JSON)?["complete"] as? Bool ?? true
+      return
+    }
+    guard message["role"] as? String == "assistant" else { return }
     let exactText = Self.contentText(message["content"])
     let errorText = Self.assistantErrorText(message)
     if activeAssistantId == nil, activeThinkingId == nil,
@@ -2011,7 +2222,41 @@ final class AppModel: ObservableObject {
     activeThinkingId = nil
   }
 
-  private func handleToolEvent(_ event: PiRPCClient.JSON, type: String) {
+  func handleToolEvent(_ event: PiRPCClient.JSON, type: String) {
+    if let parentID = event["parentToolCallId"] as? String,
+      let id = event["toolCallId"] as? String
+    {
+      guard
+        let index = messages.firstIndex(where: {
+          $0.kind == .tool && ($0.id == parentID || $0.nestedCalls.contains { $0.id == parentID })
+        })
+      else { return }
+      let name = event["toolName"] as? String ?? "tool"
+      var calls = messages[index].nestedCalls
+      let callIndex: Int
+      if let existing = calls.firstIndex(where: { $0.id == id }) {
+        callIndex = existing
+      } else {
+        guard calls.count < 256 else {
+          messages[index].nestedCallsComplete = false
+          return
+        }
+        calls.append(
+          NestedToolCall(
+            id: id, name: name,
+            input: event["args"].flatMap { Self.toolInputText(toolName: name, args: $0) },
+            status: "unfinished"))
+        callIndex = calls.count - 1
+      }
+      if type == "tool_execution_end" {
+        calls[callIndex].status = event["isError"] as? Bool == true ? "error" : "ok"
+        if calls[callIndex].status == "error", let result = event["result"] as? PiRPCClient.JSON {
+          calls[callIndex].error = String(Self.resultText(result, toolName: name).prefix(1000))
+        }
+      }
+      messages[index].nestedCalls = calls
+      return
+    }
     // Preserve protocol order if a tool starts before the scheduled UI update for the final text.
     flushPendingMessageDeltas()
     guard let id = event["toolCallId"] as? String else { return }
@@ -2042,6 +2287,11 @@ final class AppModel: ObservableObject {
       // command arguments visible until actual output arrives instead of replacing
       // them with the protocol envelope.
       if !text.isEmpty { messages[index].text = text }
+      if result["nestedCalls"] != nil {
+        messages[index].nestedCalls = NestedToolCall.from(result["nestedCalls"])
+        messages[index].nestedCallsComplete =
+          (result["nestedCalls"] as? PiRPCClient.JSON)?["complete"] as? Bool ?? true
+      }
       if let details = result["details"] as? PiRPCClient.JSON {
         messages[index].diff = details["diff"] as? String ?? details["patch"] as? String
       }
@@ -2354,6 +2604,9 @@ final class AppModel: ObservableObject {
         ),
         isError: message["isError"] as? Bool ?? false,
         toolName: message["toolName"] as? String,
+        nestedCalls: NestedToolCall.from(message["nestedCalls"]),
+        nestedCallsComplete: (message["nestedCalls"] as? PiRPCClient.JSON)?["complete"] as? Bool
+          ?? true,
         diff: (message["details"] as? PiRPCClient.JSON)?["diff"] as? String
           ?? (message["details"] as? PiRPCClient.JSON)?["patch"] as? String,
         timestamp: messageDate(message)

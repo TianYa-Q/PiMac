@@ -11,7 +11,7 @@ let package = Package(
     .executableTarget(
       name: "PiMacApp",
       exclude: ["Resources/AppIcon.icns"],
-      resources: [.process("Resources/AppIcon.png")]
+      resources: [.process("Resources/AppIcon.png"), .copy("Resources/pimac-fast.ts")]
     ),
     .testTarget(name: "PiMacAppTests", dependencies: ["PiMacApp"]),
   ]

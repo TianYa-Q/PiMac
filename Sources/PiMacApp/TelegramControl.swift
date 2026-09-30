@@ -219,6 +219,7 @@ final class TelegramControl: ObservableObject {
   private var task: Task<Void, Never>?
   private var retryTask: Task<Void, Never>?
   private var remoteModels: [String: AppModel] = [:]
+  private var desktopObservations: [ObjectIdentifier: AnyCancellable] = [:]
   private var replyModels: [String: AppModel] = [:]
   private var messageSessions = TelegramMessageSessionStore()
   private var acknowledgementIDs: [Int64: Int64] = [:]
@@ -346,6 +347,7 @@ final class TelegramControl: ObservableObject {
       model.disconnect()
     }
     remoteModels.removeAll()
+    desktopObservations.removeAll()
     for model in replyModels.values { model.disconnect() }
     replyModels.removeAll()
     status = "已停止"
@@ -675,6 +677,7 @@ final class TelegramControl: ObservableObject {
       thinkingPreferenceKey: "telegram.thinkingLevels")
     model.extensionUI = workspace.extensionUI
     remoteModels[project.id] = model
+    observeDesktopUpdates(in: model)
     return model
   }
 
@@ -720,6 +723,7 @@ final class TelegramControl: ObservableObject {
       thinkingPreferenceKey: "telegram.thinkingLevels")
     model.extensionUI = workspace.extensionUI
     replyModels[location.sessionPath] = model
+    observeDesktopUpdates(in: model)
     return model
   }
 
@@ -1135,6 +1139,9 @@ final class TelegramControl: ObservableObject {
     }
     switch command {
     case let action where action.hasPrefix("account:") && fromCallback:
+      guard model.supportsAccountSwitch else {
+        return "当前账户扩展未报告此提供商的切换能力，请升级 account-usage。"
+      }
       let accounts = workspace.extensionUI.usage(for: model).accounts
       guard let number = Int(action.dropFirst(8)), accounts.indices.contains(number - 1)
       else { return "账户列表已变化，请重新使用 /usage。" }
@@ -1144,9 +1151,9 @@ final class TelegramControl: ObservableObject {
         !workspace.extensionUI.hasPendingRequests(from: model)
       else { return "会话正在执行或尚未就绪，请稍后再切换账户。" }
       let account = accounts[number - 1]
-      if account.isActive { return "当前已使用 Codex 账户 \(account.name)。" }
+      if account.isActive { return "当前已使用 OpenAI / Codex 账户 \(account.name)。" }
       model.switchCodexAccount(to: account.name)
-      return "已请求切换到 Codex 账户 \(account.name)，请用 /status 确认。"
+      return "已请求切换到 OpenAI / Codex 账户 \(account.name)，请用 /status 确认。"
     case "/model":
       model.refreshModelPreferences()
       let page = min(
@@ -1395,6 +1402,30 @@ final class TelegramControl: ObservableObject {
     model.resumeProcess(
       sessionPath: model.currentSessionPath.isEmpty ? nil : model.currentSessionPath,
       continueLastSession: false)
+  }
+
+  /// Observe for the model's lifetime, including stats responses that arrive after settlement.
+  private func observeDesktopUpdates(in model: AppModel) {
+    let updates = Publishers.MergeMany([
+      model.$messages.map { _ in () }.eraseToAnyPublisher(),
+      model.$stats.map { _ in () }.eraseToAnyPublisher(),
+      model.$currentSessionPath.map { _ in () }.eraseToAnyPublisher(),
+      model.$sessionName.map { _ in () }.eraseToAnyPublisher(),
+    ])
+    desktopObservations[ObjectIdentifier(model)] =
+      updates
+      .throttle(for: .milliseconds(100), scheduler: DispatchQueue.main, latest: true)
+      .receive(on: DispatchQueue.main)
+      .sink { [weak self, weak model] _ in
+        guard let self, let model else { return }
+        self.workspace?.remoteSessionUpdated(from: model)
+      }
+  }
+
+  func refreshDesktopSnapshots() {
+    for model in Array(remoteModels.values) + Array(replyModels.values) {
+      workspace?.remoteSessionUpdated(from: model)
+    }
   }
 
   private func observeQueue(in model: AppModel) {

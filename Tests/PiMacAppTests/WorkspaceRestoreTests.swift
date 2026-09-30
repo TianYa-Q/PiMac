@@ -26,13 +26,13 @@ struct WorkspaceRestoreTests {
     #expect(AppModel.sessionSearchRoot(for: "/Users/example/work", root: customRoot) == customRoot)
   }
 
-  @Test func launchChoosesMostRecentUserOrAssistantReplyWithinFiveMinutes() throws {
+  @Test func launchChoosesMostRecentUserOrAssistantReplyWithinThirtyMinutes() throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent("workspace-restore-\(UUID().uuidString)").resolvingSymlinksInPath()
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
     let now = Date(timeIntervalSince1970: floor(Date.now.timeIntervalSince1970))
-    let cutoff = now.addingTimeInterval(-300)
+    let cutoff = now.addingTimeInterval(-1800)
     let project = "/tmp/workspace-restore-project"
 
     func record(_ value: [String: Any]) throws -> Data {
@@ -58,36 +58,44 @@ struct WorkspaceRestoreTests {
       return url.resolvingSymlinksInPath().path
     }
 
-    _ = try session("old", messages: [("user", -301, "old")])
+    let old = try session("old", messages: [("user", -1801, "old")])
+    #expect(!WorkspaceModel.shouldRestoreSession(at: old, now: now))
     #expect(
       AppModel.mostRecentConversationSession(
         for: project, since: cutoff, now: now, root: root) == nil)
-    _ = try session("boundary", messages: [("user", -300, "just in time")])
+    let boundaryPath = try session("boundary", messages: [("user", -1800, "just in time")])
+    #expect(WorkspaceModel.shouldRestoreSession(at: boundaryPath, now: now))
     let boundary = try #require(
       AppModel.mostRecentConversationSession(
         for: project, since: cutoff, now: now, root: root))
     #expect(boundary.hasSuffix("/boundary.jsonl"))
-    _ = try session("user", messages: [("user", -200, "question")])
+    let userPath = try session("user", messages: [("user", -900, "question")])
+    #expect(WorkspaceModel.shouldRestoreSession(at: userPath, now: now))
     let user = try #require(
       AppModel.mostRecentConversationSession(
         for: project, since: cutoff, now: now, root: root))
     #expect(user.hasSuffix("/user.jsonl"))
-    _ = try session(
+    let replyPath = try session(
       "reply",
       messages: [
         ("user", -1000, "question"),
         ("assistant", -30, [["type": "text", "text": "answer"]]),
       ])
+    #expect(WorkspaceModel.shouldRestoreSession(at: replyPath, now: now))
     let reply = try #require(
       AppModel.mostRecentConversationSession(
         for: project, since: cutoff, now: now, root: root))
     #expect(reply.hasSuffix("/reply.jsonl"))
-    _ = try session(
+    let toolPath = try session(
       "tool",
       messages: [
-        ("user", -1000, "question"),
+        ("user", -2000, "question"),
         ("assistant", -10, [["type": "toolCall", "name": "bash"]]),
       ])
+    #expect(!WorkspaceModel.shouldRestoreSession(at: toolPath, now: now))
+    #expect(
+      !WorkspaceModel.shouldRestoreSession(
+        at: root.appendingPathComponent("missing.jsonl").path, now: now))
     _ = try session("other-project", projectPath: "/tmp/other", messages: [("user", -2, "hi")])
     #expect(
       AppModel.mostRecentConversationSession(

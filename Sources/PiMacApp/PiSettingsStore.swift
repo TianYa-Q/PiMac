@@ -18,6 +18,15 @@ struct PiModelPreferences {
     }
   }
 
+  /// Report unavailable patterns without silently rewriting settings: they may
+  /// belong to a provider whose credentials are temporarily unavailable.
+  func unmatchedPatterns(in models: [PiModel]) -> [String] {
+    (enabledModels ?? []).filter { pattern in
+      let preference = PiModelPreferences(enabledModels: [pattern], thinkingLevels: [:])
+      return !models.contains(where: preference.includes)
+    }
+  }
+
   private static func modelPattern(from value: String) -> String {
     let levels = Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
     guard let colon = value.lastIndex(of: ":"),

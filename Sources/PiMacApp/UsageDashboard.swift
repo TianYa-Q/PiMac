@@ -96,6 +96,8 @@ private struct UsageFileIndex: Codable {
 }
 
 private struct UsageIndex: Codable {
+  // Invalidate assistant-only indexes, even when source files have not changed.
+  var version: Int
   var root: String
   var files: [String: UsageFileIndex]
 }
@@ -134,11 +136,12 @@ enum UsageScanner {
 
     var index: UsageIndex
     if let cacheURL, let data = try? Data(contentsOf: cacheURL),
-      let saved = try? JSONDecoder().decode(UsageIndex.self, from: data), saved.root == root.path
+      let saved = try? JSONDecoder().decode(UsageIndex.self, from: data), saved.root == root.path,
+      saved.version == 2
     {
       index = saved
     } else {
-      index = UsageIndex(root: root.path, files: [:])
+      index = UsageIndex(version: 2, root: root.path, files: [:])
     }
     var changed = false
     var seen = Set<String>()
@@ -236,9 +239,14 @@ enum UsageScanner {
     fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     let secondsFormatter = ISO8601DateFormatter()
     let usageMarker = Data("\"usage\"".utf8)
+    var selectedModel: String?
     for line in data.split(separator: 0x0A) {
       // Most lines are user messages, tool calls or events; avoid JSON decoding those bodies.
-      if project != nil && !line.contains(usageMarker) { continue }
+      if project != nil && !line.contains(usageMarker)
+        && !line.contains(Data("\"model_change\"".utf8))
+      {
+        continue
+      }
       guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any]
       else { continue }
       if project == nil {
@@ -246,16 +254,38 @@ enum UsageScanner {
         project = record["cwd"] as? String ?? "未知项目"
         continue
       }
-      guard record["type"] as? String == "message",
-        let message = record["message"] as? [String: Any],
-        message["role"] as? String == "assistant",
-        let usage = message["usage"] as? [String: Any],
+      let type = record["type"] as? String
+      if type == "model_change" {
+        selectedModel = record["modelId"] as? String
+        continue
+      }
+      let source: [String: Any]
+      let model: String
+      if type == "message", let message = record["message"] as? [String: Any] {
+        let role = message["role"] as? String
+        guard role == "assistant" || role == "toolResult" else { continue }
+        source = message
+        // Nested usage can combine different models. Do not attribute it to the
+        // selected chat model, and do not count nestedCalls/details usage twice.
+        model =
+          role == "toolResult"
+          ? "工具内部调用 · \(message["toolName"] as? String ?? "tool")"
+          : message["model"] as? String ?? selectedModel ?? "未知模型"
+      } else if type == "usage" || type == "compaction" || type == "branch_summary" {
+        source = record
+        let details = record["details"] as? [String: Any]
+        model =
+          record["model"] as? String ?? details?["compactionModelId"] as? String
+          ?? (type == "usage" ? "其他用量" : "摘要调用（模型未记录）")
+      } else {
+        continue
+      }
+      guard let usage = source["usage"] as? [String: Any],
         let date = recordDate(
-          record, message: message, fractionalFormatter: fractionalFormatter,
+          record, message: source, fractionalFormatter: fractionalFormatter,
           secondsFormatter: secondsFormatter)
       else { continue }
       let day = calendar.startOfDay(for: date)
-      let model = message["model"] as? String ?? "未知模型"
       let key = "\(day.timeIntervalSince1970):\(model)"
       var bucket = buckets[key] ?? UsageBucket(day: day, model: model)
       let input = integer(usage["input"])
@@ -392,7 +422,7 @@ struct UsageDashboardView: View {
           metricCard(
             "估算费用", value: currency(model.snapshot.cost), icon: "dollarsign.circle", tint: .green)
           metricCard(
-            "模型请求", value: model.snapshot.requests.formatted(), icon: "sparkles", tint: .purple)
+            "用量记录", value: model.snapshot.requests.formatted(), icon: "sparkles", tint: .purple)
           metricCard(
             "活跃会话", value: model.snapshot.sessions.formatted(),
             icon: "bubble.left.and.bubble.right", tint: .orange)
@@ -495,7 +525,7 @@ struct UsageDashboardView: View {
   }
 
   private var modelBreakdown: some View {
-    breakdownCard(title: "模型用量", icon: "cpu") {
+    breakdownCard(title: "模型与工具用量", icon: "cpu") {
       ForEach(model.snapshot.models.prefix(6)) { item in
         breakdownRow(
           title: item.name,

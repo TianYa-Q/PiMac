@@ -5,7 +5,7 @@ import Foundation
 /// Application-wide coordinator for Pi extension UI.
 ///
 /// Dialogs from every live RPC process are queued here. Account selection is session-specific,
-/// while quota data has one application-wide source of truth shared by every session.
+/// while quota snapshots are shared across sessions of the same account provider.
 @MainActor
 final class ExtensionUIModel: ObservableObject {
   @Published var dialog: ExtensionDialog?
@@ -27,6 +27,9 @@ final class ExtensionUIModel: ObservableObject {
 
   private struct SessionAccountSelection {
     let activeAccount: String?
+    let provider: AccountUsageProvider
+    let supportsAccountSwitch: Bool
+    let managesSelectedAuth: Bool
     let geminiIsActive: Bool
     let updatedAt: Date?
   }
@@ -34,7 +37,8 @@ final class ExtensionUIModel: ObservableObject {
   private var presentedDialog: PendingDialog?
   private var queuedDialogs: [PendingDialog] = []
   private weak var selectedSource: AppModel?
-  private var usageSnapshot = UsageSnapshot(accounts: [], gemini: nil, updatedAt: nil)
+  private var usageSnapshots: [AccountUsageProvider: UsageSnapshot] = [:]
+  private var displayedUsageProvider = AccountUsageProvider.legacyCodex
   private var sessionAccountSelections: [ObjectIdentifier: SessionAccountSelection] = [:]
   private var awaitingSessionStatus: Set<ObjectIdentifier> = []
 
@@ -130,17 +134,7 @@ final class ExtensionUIModel: ObservableObject {
     sessionAccountSelections.removeValue(forKey: ObjectIdentifier(source))
     if selectedSource === source { selectSource(nil) }
 
-    let removed = queuedDialogs.filter { $0.source === source }
-    queuedDialogs.removeAll { $0.source === source }
-    for pending in removed {
-      pending.source.sendExtensionResponse(id: pending.dialog.id, cancelled: true)
-    }
-
-    guard let presentedDialog, presentedDialog.source === source else { return }
-    presentedDialog.source.sendExtensionResponse(id: presentedDialog.dialog.id, cancelled: true)
-    self.presentedDialog = nil
-    dialog = nil
-    presentNextDialog()
+    cancelDialogs(from: source)
   }
 
   private func enqueue(_ dialog: ExtensionDialog, from source: AppModel) {
@@ -173,6 +167,10 @@ final class ExtensionUIModel: ObservableObject {
       updateCodexAccounts(from: rawText, source: source)
       return
     }
+    if key == "account-usage-login" {
+      if rawText.isEmpty { dismissCompletedLoginDialogs(from: source) }
+      return
+    }
 
     let text = Self.removingANSIEscapes(rawText)
       .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -184,14 +182,42 @@ final class ExtensionUIModel: ObservableObject {
     }
   }
 
+  private func dismissCompletedLoginDialogs(from source: AppModel) {
+    cancelDialogs(from: source) { $0.title.hasPrefix("[account-usage login]") }
+  }
+
+  private func cancelDialogs(
+    from source: AppModel, matching predicate: (ExtensionDialog) -> Bool = { _ in true }
+  ) {
+    func matches(_ pending: PendingDialog) -> Bool {
+      pending.source === source && predicate(pending.dialog)
+    }
+    let removed = queuedDialogs.filter(matches)
+    queuedDialogs.removeAll(where: matches)
+    for pending in removed {
+      pending.source.sendExtensionResponse(id: pending.dialog.id, cancelled: true)
+    }
+    if let presentedDialog, matches(presentedDialog) {
+      source.sendExtensionResponse(id: presentedDialog.dialog.id, cancelled: true)
+      self.presentedDialog = nil
+      dialog = nil
+      presentNextDialog()
+    }
+  }
+
   private func updateCodexAccounts(from text: String, source: AppModel) {
     guard !text.isEmpty,
       let data = text.data(using: .utf8),
       let payload = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
-      payload["version"] as? Int == 1,
+      let version = payload["version"] as? Int, [1, 2].contains(version),
       let rawAccounts = payload["accounts"] as? [PiRPCClient.JSON]
     else { return }
 
+    let providerID =
+      version == 2 ? (payload["provider"] as? String ?? "openai-codex") : "openai-codex"
+    guard let provider = AccountUsageProvider(rawValue: providerID) else { return }
+    let usageSnapshot =
+      usageSnapshots[provider] ?? UsageSnapshot(accounts: [], gemini: nil, updatedAt: nil)
     let updatedAt = (payload["updatedAt"] as? Double).map {
       Date(timeIntervalSince1970: $0 / 1_000)
     }
@@ -242,7 +268,8 @@ final class ExtensionUIModel: ObservableObject {
     // Only account selection belongs to a session. Ignore an older selection update from the
     // same process, but allow another process to have an independently selected account.
     let previousSelection = sessionAccountSelections[sourceID]
-    let isInitialStatusFromSource = previousSelection == nil
+    let isInitialStatusFromSource =
+      previousSelection == nil || previousSelection?.provider != provider
     let selectionIsCurrent =
       updatedAt.map { incoming in
         previousSelection?.updatedAt.map { incoming >= $0 } ?? true
@@ -250,6 +277,11 @@ final class ExtensionUIModel: ObservableObject {
     if selectionIsCurrent {
       sessionAccountSelections[sourceID] = SessionAccountSelection(
         activeAccount: active,
+        provider: provider,
+        supportsAccountSwitch: version == 2
+          ? payload["supportsAccountSwitch"] as? Bool ?? false : true,
+        managesSelectedAuth: version == 2
+          ? payload["managesSelectedAuth"] as? Bool ?? false : active != nil,
         geminiIsActive: gemini?.isActive ?? false,
         updatedAt: updatedAt ?? previousSelection?.updatedAt
       )
@@ -268,7 +300,7 @@ final class ExtensionUIModel: ObservableObject {
         usageSnapshot.updatedAt.map { incoming >= $0 } ?? true
       } ?? true
     if mayUpdateUsage && usageIsCurrent {
-      usageSnapshot = UsageSnapshot(
+      usageSnapshots[provider] = UsageSnapshot(
         accounts: accounts,
         gemini: gemini,
         updatedAt: updatedAt ?? usageSnapshot.updatedAt
@@ -288,19 +320,21 @@ final class ExtensionUIModel: ObservableObject {
   func usage(for source: AppModel?) -> (
     accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?
   ) {
-    let selection = source.flatMap {
-      sessionAccountSelections[ObjectIdentifier($0)]
-    }
+    let candidate = source.flatMap { sessionAccountSelections[ObjectIdentifier($0)] }
+    let provider = usageProvider(for: source)
+    let selection = candidate?.provider == provider ? candidate : nil
+    let usageSnapshot =
+      usageSnapshots[provider] ?? UsageSnapshot(accounts: [], gemini: nil, updatedAt: nil)
     // The first status event after a project switch can arrive from the process that was just
     // left while the new process is still starting. Keep the account currently shown (or use
     // the payload's account when bootstrapping) until the selected process reports its own
     // selection; never turn a valid shared quota snapshot into an empty card.
     let fallbackActiveAccount =
-      source === selectedSource
+      source === selectedSource && selection == nil && provider == displayedUsageProvider
       ? (codexAccounts.first(where: \.isActive)?.name
         ?? usageSnapshot.accounts.first(where: \.isActive)?.name)
       : nil
-    let activeAccount = selection?.activeAccount ?? fallbackActiveAccount
+    let activeAccount = selection != nil ? selection?.activeAccount : fallbackActiveAccount
     let geminiIsActive =
       selection?.geminiIsActive
       ?? (source === selectedSource ? geminiUsage?.isActive : nil)
@@ -332,8 +366,28 @@ final class ExtensionUIModel: ObservableObject {
     return (accounts, gemini, usageSnapshot.updatedAt)
   }
 
+  func supportsAccountSwitch(for source: AppModel) -> Bool {
+    guard let selection = sessionAccountSelections[ObjectIdentifier(source)],
+      AccountUsageProvider(modelID: source.selectedModelId) == selection.provider
+    else { return false }
+    return selection.supportsAccountSwitch
+  }
+
+  func managesSelectedAuth(for source: AppModel) -> Bool {
+    supportsAccountSwitch(for: source)
+      && sessionAccountSelections[ObjectIdentifier(source)]?.managesSelectedAuth == true
+  }
+
+  private func usageProvider(for source: AppModel?) -> AccountUsageProvider {
+    guard let source else { return .legacyCodex }
+    return AccountUsageProvider(modelID: source.selectedModelId)
+      ?? sessionAccountSelections[ObjectIdentifier(source)]?.provider
+      ?? .legacyCodex
+  }
+
   private func applyUsageForSelectedSource() {
     let snapshot = usage(for: selectedSource)
+    displayedUsageProvider = usageProvider(for: selectedSource)
     if codexAccounts != snapshot.accounts { codexAccounts = snapshot.accounts }
     if geminiUsage != snapshot.gemini { geminiUsage = snapshot.gemini }
     if codexAccountsUpdatedAt != snapshot.updatedAt {

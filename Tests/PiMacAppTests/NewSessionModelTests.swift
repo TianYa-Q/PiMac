@@ -39,7 +39,9 @@ struct NewSessionModelTests {
     defer { defaults.removePersistentDomain(forName: suite) }
     for value in ["", "model", "/model", "provider/"] {
       defaults.set(value, forKey: "defaultNewSessionModelID")
-      #expect(AppModel.preferredNewSessionModelID(currentModelID: "other/model", defaults: defaults) == nil)
+      #expect(
+        AppModel.preferredNewSessionModelID(currentModelID: "other/model", defaults: defaults)
+          == nil)
     }
   }
 }

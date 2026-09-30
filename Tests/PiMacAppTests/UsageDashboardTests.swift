@@ -70,6 +70,73 @@ struct UsageDashboardTests {
     #expect(UsageScanner.scan(root: root, startingAt: nil, cacheURL: cache).requests == 0)
   }
 
+  @Test func scannerIncludesNestedToolSummaryAndIndependentUsageOnce() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let rows: [[String: Any]] = [
+      [
+        "type": "message",
+        "message": [
+          "role": "assistant", "model": "chat",
+          "usage": ["totalTokens": 10, "cost": ["total": 0.1]],
+        ],
+      ],
+      [
+        "type": "message",
+        "message": [
+          "role": "toolResult", "toolName": "codemode",
+          "usage": ["totalTokens": 20, "cost": ["total": 0.2]],
+          "details": ["usage": ["totalTokens": 20]],
+        ],
+      ],
+      [
+        "type": "compaction", "usage": ["totalTokens": 30, "cost": ["total": 0.3]],
+        "details": ["compactionModelId": "summary"],
+      ],
+      ["type": "branch_summary", "usage": ["totalTokens": 40, "cost": ["total": 0.4]]],
+      [
+        "type": "usage", "kind": "future-kind", "model": "warm",
+        "usage": ["input": 10, "cacheRead": 40, "cost": ["total": 0.5]],
+      ],
+      ["type": "context_edit", "targetId": "old", "replacement": NSNull()],
+    ]
+    var data = Data("{\"type\":\"session\",\"cwd\":\"/tmp/test\"}\n".utf8)
+    for var row in rows {
+      row["timestamp"] = "2025-02-01T10:00:00Z"
+      data.append(try JSONSerialization.data(withJSONObject: row))
+      data.append(0x0A)
+    }
+    try data.write(to: root.appendingPathComponent("usage.jsonl"))
+    let result = UsageScanner.scan(root: root, startingAt: nil)
+    #expect(result.totalTokens == 150)
+    #expect(abs(result.cost - 1.5) < 0.000001)
+    #expect(result.requests == 5)
+    #expect(result.models.contains { $0.name == "工具内部调用 · codemode" && $0.tokens == 20 })
+    #expect(result.models.contains { $0.name == "summary" && $0.tokens == 30 })
+  }
+
+  @Test func legacyIndexIsRebuiltForUnchangedSessions() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("usage.jsonl")
+    try
+      "{\"type\":\"session\",\"cwd\":\"/tmp/test\"}\n{\"type\":\"usage\",\"timestamp\":\"2025-01-01T00:00:00Z\",\"usage\":{\"totalTokens\":50}}\n"
+      .write(to: file, atomically: true, encoding: .utf8)
+    let cache = root.appendingPathComponent("cache.json")
+    #expect(UsageScanner.scan(root: root, startingAt: nil, cacheURL: cache).totalTokens == 50)
+    var legacy = try #require(
+      JSONSerialization.jsonObject(with: Data(contentsOf: cache)) as? [String: Any])
+    legacy.removeValue(forKey: "version")
+    legacy["files"] = [:]
+    try JSONSerialization.data(withJSONObject: legacy).write(to: cache)
+    #expect(UsageScanner.scan(root: root, startingAt: nil, cacheURL: cache).totalTokens == 50)
+    let rebuilt = try #require(
+      JSONSerialization.jsonObject(with: Data(contentsOf: cache)) as? [String: Any])
+    #expect(rebuilt["version"] as? Int == 2)
+  }
+
   @Test func scannerHonorsStartDate() throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent(UUID().uuidString, isDirectory: true)

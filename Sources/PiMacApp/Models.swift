@@ -43,6 +43,8 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
   var isError = false
   var toolName: String? = nil
   var toolInput: String? = nil
+  var nestedCalls: [NestedToolCall] = []
+  var nestedCallsComplete = true
   var diff: String? = nil
   var attachments: [PromptAttachment] = []
   var modelProvider: String? = nil
@@ -101,6 +103,7 @@ struct PiModel: Identifiable, Hashable {
   let modelId: String
   let name: String
   let reasoning: Bool
+  let api: String?
   let thinkingLevels: [String]
 
   var id: String { "\(provider)/\(modelId)" }
@@ -110,12 +113,14 @@ struct PiModel: Identifiable, Hashable {
     modelId: String,
     name: String,
     reasoning: Bool = false,
+    api: String? = nil,
     thinkingLevels: [String]? = nil
   ) {
     self.provider = provider
     self.modelId = modelId
     self.name = name
     self.reasoning = reasoning
+    self.api = api
     self.thinkingLevels =
       thinkingLevels ?? (reasoning ? Array(Self.thinkingLevelOrder.prefix(5)) : ["off"])
   }

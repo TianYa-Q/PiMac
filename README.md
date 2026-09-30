@@ -20,10 +20,13 @@ A native macOS [Pi coding agent](https://github.com/badlogic/pi-mono) client bui
 - Switch models and thinking levels
 - Check Pi and extension package versions in Settings, then install available updates with one click
 - Reuse an idle Pi RPC process when switching saved sessions, even across projects; run concurrent tasks in separate processes and stop inactive processes while retaining their saved conversations
-- Create, name, and open persistent sessions; on relaunch, reopen the current project's most recently active conversation if you sent a message or received a text reply within the past five minutes, otherwise start a new session
-- View compaction, token, cost, and context usage statistics
+- Create, name, and open persistent sessions; on relaunch, reopen the current project's most recently active conversation if you sent a message or received a text reply within the past 30 minutes, otherwise start a new session; when switching projects, reopen the last selected conversation only if it was active within the past 30 minutes, otherwise start a new session
+- Usage totals include assistant responses, nested model work in tools, compaction/branch summaries, and standalone usage entries; old indexes rebuild automatically. Nested tool calls stay under their parent and restore from session metadata
+- RPC respects handled inputs, bounds inspection request deadlines, cancels pending requests on stop/restart, and writes without blocking the UI
+- View compaction, token, cost, and context usage statistics, plus task output speed in tokens/s using actual provider usage (includes reasoning and request latency, excludes tool time; updates at response completion when streaming usage is unavailable)
+- Toggle OpenAI Responses / Codex Fast mode for priority processing (may consume more quota; does not change reasoning level). Preferences survive restarts and stay separate for desktop and Telegram processes without modifying global Pi settings
 - Support select, confirm, input, and editor dialogs provided by Pi extensions
-- Manage multiple Codex accounts and display Codex/Gemini quotas with [account-usage](https://github.com/TianYa-Q/account-usage)
+- Manage OpenAI ChatGPT / Codex accounts and Gemini quotas with the companion [account-usage](extensions/account-usage/README.md), maintained in this repository. Credentials, defaults and quotas stay provider-isolated; API keys are never automatically replaced
 - Reuse existing authentication, models, skills, extensions, and settings from `~/.pi/agent`
 
 ## Download and Installation
@@ -31,11 +34,14 @@ A native macOS [Pi coding agent](https://github.com/badlogic/pi-mono) client bui
 1. Download the latest `Pi-Mac-vX.Y.Z.zip` from [GitHub Releases](https://github.com/TianYa-Q/PiMac/releases/latest).
 2. Extract the archive and move **Pi Mac.app** to your Applications folder.
 3. Make sure Pi is installed and you are signed in.
-4. To enable account management and quota display, install the `account-usage` extension before launching Pi Mac:
+4. Install the companion `account-usage` from this repository (new OpenAI support requires Pi 0.99.1+):
 
    ```bash
-   pi install git:github.com/TianYa-Q/account-usage@v1.0.0
+   npm --prefix extensions/account-usage ci --ignore-scripts
+   ./scripts/link-account-usage.sh
    ```
+
+   Back up/remove an old installation first to avoid duplicate loading. Select an `openai` model and use `/accounts` to log in to ChatGPT; legacy tokens are not migrated. Account data remains under `~/.pi/agent`, never in the repository. Restart Pi / reconnect sessions after updates. Run `./scripts/check.sh` for full validation.
 
 > Current releases use ad-hoc signing and are not notarized by Apple. If macOS blocks the app the first time, right-click it in Finder and choose **Open**, or allow it under **System Settings → Privacy & Security**.
 

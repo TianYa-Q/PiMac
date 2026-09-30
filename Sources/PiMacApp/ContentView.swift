@@ -881,7 +881,7 @@ struct ContentView: View {
   }
 
   private var conversation: some View {
-    let turns = conversationTurns
+    let turns = app.conversationTurns
 
     return GeometryReader { viewport in
       ScrollViewReader { proxy in
@@ -1069,20 +1069,6 @@ struct ContentView: View {
     initialSessionScrollPending = false
   }
 
-  private var conversationTurns: [ConversationTurn] {
-    var turns: [ConversationTurn] = []
-    var current: [ChatEntry] = []
-    for entry in app.messages {
-      if entry.kind == .user, !current.isEmpty {
-        turns.append(ConversationTurn(entries: current))
-        current = []
-      }
-      current.append(entry)
-    }
-    if !current.isEmpty { turns.append(ConversationTurn(entries: current)) }
-    return turns
-  }
-
   private var composer: some View {
     VStack(spacing: 8) {
       if !app.queuedPrompts.isEmpty {
@@ -1133,18 +1119,35 @@ struct ContentView: View {
           Image(systemName: "paperclip")
         }
         .buttonStyle(.plain)
+        .modifier(ComposerControlChrome())
         .help("添加图片或文件")
+        .accessibilityLabel("添加图片或文件")
         modelMenu
         thinkingMenu
-        sessionControls
-        Spacer()
-        if !app.statusText.isEmpty {
-          ProgressView().controlSize(.small)
-          Text(app.statusText)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
+        if app.supportsFastMode {
+          Button {
+            app.changeFastMode(to: !app.fastModeEnabled)
+          } label: {
+            Label("Fast", systemImage: app.fastModeEnabled ? "bolt.fill" : "bolt")
+              .font(.caption)
+              .foregroundStyle(app.fastModeEnabled ? Color.orange : Color.secondary)
+          }
+          .buttonStyle(.plain)
+          .modifier(ComposerControlChrome())
+          .disabled(!app.canRestartSafely || !app.fastModeAvailable)
+          .help("OpenAI / Codex 优先处理（可能消耗更多额度）；不改变思考等级")
+          .accessibilityValue(app.fastModeEnabled ? "开启" : "关闭")
         }
+        Button(action: app.compact) {
+          Label("压缩", systemImage: "arrow.down.right.and.arrow.up.left")
+            .font(.caption)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .modifier(ComposerControlChrome())
+        .disabled(app.isBusy)
+        .help("压缩上下文")
+        Spacer(minLength: 8)
         let promptIsEmpty =
           app.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
           && app.attachments.isEmpty
@@ -1197,6 +1200,31 @@ struct ContentView: View {
           .help("发送（Enter）")
         }
       }
+      .controlSize(.small)
+
+      if app.stats != nil || app.outputTokensPerSecond != nil || app.isStreaming
+        || !app.statusText.isEmpty
+      {
+        Rectangle()
+          .fill(Color.primary.opacity(0.06))
+          .frame(height: 1)
+        HStack(spacing: 12) {
+          ScrollView(.horizontal, showsIndicators: false) {
+            sessionMetrics
+          }
+          .frame(height: 18)
+          if !app.statusText.isEmpty {
+            ProgressView().controlSize(.small)
+            Text(app.statusText)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+              .help(app.statusText)
+          }
+        }
+        .padding(.horizontal, 2)
+        .padding(.vertical, 2)
+      }
     }
     .padding(10)
     .background(.quaternary.opacity(0.42), in: RoundedRectangle(cornerRadius: 14))
@@ -1227,6 +1255,28 @@ struct ContentView: View {
         .font(.caption)
         .lineLimit(1)
         .frame(maxWidth: .infinity, alignment: .leading)
+      Button {
+        app.moveQueuedPrompt(id: prompt.id, direction: -1)
+      } label: {
+        Image(systemName: "chevron.up")
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+      .disabled(app.queuedPromptMoveTarget(id: prompt.id, direction: -1) == nil)
+      .help("上移（同一发送时机）")
+      .accessibilityLabel("上移待发送消息")
+
+      Button {
+        app.moveQueuedPrompt(id: prompt.id, direction: 1)
+      } label: {
+        Image(systemName: "chevron.down")
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+      .disabled(app.queuedPromptMoveTarget(id: prompt.id, direction: 1) == nil)
+      .help("下移（同一发送时机）")
+      .accessibilityLabel("下移待发送消息")
+
       Button {
         app.editQueuedPrompt(id: prompt.id)
         composerFocused = true
@@ -1373,25 +1423,30 @@ struct ContentView: View {
       .font(.caption)
     }
     .menuStyle(.borderlessButton)
+    .menuIndicator(.hidden)
     .fixedSize()
+    .modifier(ComposerControlChrome())
   }
 
-  private var sessionControls: some View {
-    HStack(spacing: 7) {
-      Button(action: app.compact) {
-        HStack(spacing: 4) {
-          Image(systemName: "arrow.down.right.and.arrow.up.left")
-          Text("压缩")
-        }
-        .font(.body)
+  private var sessionMetrics: some View {
+    HStack(spacing: 12) {
+      if let speed = app.outputTokensPerSecond {
+        Text("输出 \(speed, specifier: "%.1f") tokens/s")
+          .font(.caption)
+          .monospacedDigit()
+          .foregroundStyle(.secondary)
+          .help("当前任务输出 tokens ÷ 模型请求耗时（含思考与首字等待，不含工具执行）。每次模型响应结束更新。")
+      } else if app.isStreaming {
+        Text("输出 -- tokens/s")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .help("等待模型返回实际 token 用量")
       }
-      .buttonStyle(.plain)
-      .disabled(app.isBusy)
-      .help("压缩上下文")
-
       if let stats = app.stats {
-        Divider().frame(height: 14)
-        HStack(spacing: 7) {
+        if app.outputTokensPerSecond != nil || app.isStreaming {
+          Divider().frame(height: 12)
+        }
+        HStack(spacing: 12) {
           Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文 --")
             .foregroundStyle(contextUsageColor(stats.contextPercent))
           Text("\(stats.totalTokens.formatted()) tokens")
@@ -1439,10 +1494,30 @@ struct ContentView: View {
       .font(.caption)
     }
     .menuStyle(.borderlessButton)
+    .menuIndicator(.hidden)
     .fixedSize()
+    .modifier(ComposerControlChrome())
     .disabled(app.isBusy)
   }
 
+}
+
+/// Lightweight toolbar affordance without native button bezels or menu accents.
+private struct ComposerControlChrome: ViewModifier {
+  @Environment(\.isEnabled) private var isEnabled
+  @State private var isHovered = false
+
+  func body(content: Content) -> some View {
+    content
+      .padding(.horizontal, 8)
+      .frame(height: 28)
+      .background(
+        Color.primary.opacity(isHovered && isEnabled ? 0.08 : 0.025),
+        in: RoundedRectangle(cornerRadius: 6)
+      )
+      .contentShape(RoundedRectangle(cornerRadius: 6))
+      .onHover { isHovered = $0 }
+  }
 }
 
 /// Hover is local to the row, not ContentView (which also lays out the transcript).
@@ -1744,24 +1819,6 @@ private struct ComposerTextView: NSViewRepresentable {
   }
 }
 
-private struct ConversationTurn: Identifiable, Equatable {
-  let entries: [ChatEntry]
-
-  var id: String { entries.first?.id ?? UUID().uuidString }
-
-  var user: ChatEntry? { entries.first(where: { $0.kind == .user }) }
-  var finalAssistant: ChatEntry? { entries.last(where: { $0.kind == .assistant }) }
-  var activity: [ChatEntry] {
-    entries.filter { entry in
-      entry.kind == .thinking || entry.kind == .tool
-        || (entry.kind == .assistant && entry.id != finalAssistant?.id)
-    }
-  }
-  var supplementaryEntries: [ChatEntry] {
-    entries.filter { $0.kind == .system || $0.kind == .compaction }
-  }
-}
-
 private struct ConversationTurnView: View, Equatable {
   let turn: ConversationTurn
   let isActive: Bool
@@ -1963,6 +2020,29 @@ private struct ActivityEntryView: View {
           if expanded && hasVisibleDetails {
             activityContent
               .padding(.leading, 31)
+            ForEach(entry.nestedCalls) { call in
+              VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                  Image(systemName: "arrow.turn.down.right")
+                  Text(call.name).fontWeight(.semibold)
+                  if call.status == "unfinished" { Text("未完成").foregroundStyle(.secondary) }
+                  if call.status == "error" { Text("失败").foregroundStyle(.red) }
+                  if let duration = call.durationMs {
+                    Text("\(Int(duration)) ms").foregroundStyle(.secondary)
+                  }
+                }
+                if let input = call.input { Text(input).textSelection(.enabled) }
+                if let error = call.error {
+                  Text(error).foregroundStyle(.red).textSelection(.enabled)
+                }
+              }
+              .font(.system(.caption, design: .monospaced))
+              .padding(.leading, 31)
+            }
+            if !entry.nestedCallsComplete {
+              Text("嵌套调用记录不完整（Pi 已截断或有未完成调用）")
+                .font(.caption).foregroundStyle(.secondary).padding(.leading, 31)
+            }
           }
         }
         .padding(9)
@@ -2046,6 +2126,7 @@ private struct ActivityEntryView: View {
 
   private var hasVisibleDetails: Bool {
     if entry.kind == .thinking { return !entry.text.isEmpty }
+    if !entry.nestedCalls.isEmpty || !entry.nestedCallsComplete { return true }
     guard entry.toolName != "read" else { return false }
     return entry.diff?.isEmpty == false || !entry.text.isEmpty
   }
@@ -2389,6 +2470,14 @@ private struct CodexAccountsView: View {
           .help(isExpanded ? "折叠账户额度" : "展开全部账户额度")
         }
 
+        if AccountUsageProvider(modelID: app.selectedModelId) == .chatGPT {
+          Text(
+            app.supportsAccountSwitch
+              ? "ChatGPT 订阅账户与 Codex legacy 分开保存；API Key 不会被自动覆盖。"
+              : "新版 OpenAI 账户管理需要支持 v2 协议的 account-usage 扩展。"
+          )
+          .font(.caption2).foregroundStyle(.secondary)
+        }
         if isExpanded {
           expandedAccounts
           if let updatedAt = extensionUI.codexAccountsUpdatedAt {
@@ -2463,7 +2552,7 @@ private struct CodexAccountsView: View {
           Button("切换") { app.switchCodexAccount(to: account.name) }
             .buttonStyle(.borderless)
             .font(.caption2)
-            .disabled(app.isBusy)
+            .disabled(!app.canRestartSafely || !app.supportsAccountSwitch)
         }
       }
       // The hover card extends over the quota rows, so its source row must paint above them.

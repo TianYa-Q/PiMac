@@ -36,7 +36,7 @@ final class WorkspaceModel: ObservableObject {
   private static let sessionCatalogsKey = "workspaceSessionCatalogs"
   private static let composerDraftsKey = "workspaceComposerDrafts"
   private static let lastSessionByProjectKey = "workspaceLastSessionByProject"
-  private static let sessionRestoreInterval: TimeInterval = 5 * 60
+  nonisolated private static let sessionRestoreInterval: TimeInterval = 30 * 60
   private static let maximumLiveProcesses = 4
   private var observations: [UUID: AnyCancellable] = [:]
   private var streamingObservations: [UUID: AnyCancellable] = [:]
@@ -126,9 +126,11 @@ final class WorkspaceModel: ObservableObject {
 
   func selectProject(_ project: WorkspaceProject) {
     refreshSessionCatalog(for: project.url, ifStale: true)
-    if let tabID = selectedTabByProject[project.id], let tab = tabs.first(where: {
-      $0.id == tabID && $0.model.projectURL?.standardizedFileURL.path == project.id
-    }) {
+    if let tabID = selectedTabByProject[project.id],
+      let tab = tabs.first(where: {
+        $0.id == tabID && $0.model.projectURL?.standardizedFileURL.path == project.id
+      })
+    {
       selectProjectTab(tab, in: project)
       return
     }
@@ -138,15 +140,24 @@ final class WorkspaceModel: ObservableObject {
       selectProjectTab(existing, in: project)
       return
     }
-    // A saved conversation can replace the selected idle process; a draft with input stays put.
     openLastSessionTab(for: project)
   }
 
+  nonisolated static func shouldRestoreSession(at path: String, now: Date = .now) -> Bool {
+    guard !path.isEmpty,
+      let date = AppModel.latestConversationMessageDate(inFile: URL(fileURLWithPath: path))
+    else { return false }
+    return date >= now.addingTimeInterval(-sessionRestoreInterval) && date <= now
+  }
+
   private func selectProjectTab(_ tab: Tab, in project: WorkspaceProject) {
+    if tab.id == selectedTabID { return }
     let path = tab.requestedSessionPath ?? tab.model.currentSessionPath
-    if tab.id != selectedTabID, !tab.model.isProcessRunning, !path.isEmpty,
-      reusableTab() != nil
+    if !tab.isDraft, !tab.model.isBusy, !tab.model.hasUnsubmittedInput,
+      !Self.shouldRestoreSession(at: path)
     {
+      newSession(in: project.url)
+    } else if !tab.model.isProcessRunning, !path.isEmpty, reusableTab() != nil {
       openSession(path: path, in: project.url)
     } else {
       selectTab(tab.id)
@@ -154,28 +165,31 @@ final class WorkspaceModel: ObservableObject {
   }
 
   private func openLastSessionTab(for project: WorkspaceProject) {
-    // Project switching retains its last selected session; the five-minute rule applies to launch.
-    let path = lastSessionByProject[project.id].flatMap {
-      !archivedSessionPaths.contains($0) && FileManager.default.fileExists(atPath: $0) ? $0 : nil
-    } ?? sessionCatalogs[project.id]?
+    let path =
+      lastSessionByProject[project.id].flatMap {
+        !archivedSessionPaths.contains($0) && FileManager.default.fileExists(atPath: $0) ? $0 : nil
+      }
+      ?? sessionCatalogs[project.id]?
       .filter {
         !archivedSessionPaths.contains($0.path) && FileManager.default.fileExists(atPath: $0.path)
       }
       .max(by: { $0.modifiedAt < $1.modifiedAt })?.path
     let draft = composerDrafts[project.id]
-    if let path {
+    if let path,
+      Self.shouldRestoreSession(at: path)
+        || (draft?.sessionPath == path && draft?.text.isEmpty == false)
+    {
       openSession(path: path, in: project.url)
       return
     }
     addTab(
       model: AppModel(
         startupProjectURL: project.url,
-        continueLastSession: path == nil,
-        startupSessionPath: path,
-        initialComposerText: draft?.sessionPath == path ? draft?.text ?? "" : ""
+        continueLastSession: false,
+        initialComposerText: draft?.sessionPath == nil ? draft?.text ?? "" : ""
       ),
-      requestedSessionPath: path,
-      isDraft: false
+      requestedSessionPath: nil,
+      isDraft: true
     )
   }
 
@@ -373,6 +387,12 @@ final class WorkspaceModel: ObservableObject {
     for tab in tabs
     where tab.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL {
       tab.model.refreshExternalTranscript(at: sessionPath)
+    }
+  }
+
+  func remoteSessionUpdated(from source: AppModel) {
+    for tab in tabs {
+      tab.model.applyRemoteSessionSnapshot(from: source)
     }
   }
 
@@ -589,6 +609,7 @@ final class WorkspaceModel: ObservableObject {
       )
     }
     extensionUI.selectSource(selected.model)
+    telegram.refreshDesktopSnapshots()
     if let path = selected.model.projectURL?.standardizedFileURL.path {
       selectedTabByProject[path] = id
       UserDefaults.standard.set(path, forKey: Self.activeProjectKey)
