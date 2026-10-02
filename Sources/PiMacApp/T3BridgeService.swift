@@ -1,7 +1,8 @@
+import AppKit
 import Combine
 import Foundation
 
-/// Owns T3 transport and private IPC. Paired devices can send while the connection is enabled.
+/// Supervises one local T3 Server. LAN exposure is independent of its lifetime.
 @MainActor
 final class T3BridgeService: ObservableObject {
   @Published private(set) var port: Int?
@@ -9,17 +10,19 @@ final class T3BridgeService: ObservableObject {
   @Published private(set) var isEnabled = false
   @Published private(set) var isStopping = false
   @Published private(set) var rememberedNetwork: T3NetworkEndpoint?
-  private let commands = T3WorkspaceCommands()
   private let defaults: UserDefaults
   private let stateDirectory: URL?
   private var stoppingPID: Int32?
   @Published private(set) var publicURL: URL?
+  @Published private(set) var serverURL: URL?
   @Published private(set) var pairing: T3Pairing?
   @Published private(set) var clients: [T3PairedClient] = []
-  @Published private(set) var readDiagnostics: T3ReadDiagnostics?
   @Published private(set) var managementBusy = false
   private var clientRefreshID: UUID?
   @Published private(set) var managementMessage = ""
+  @Published private(set) var connectStatus: T3ConnectStatus?
+  @Published private(set) var connectBusy = false
+  @Published private(set) var connectMessage = ""
   private var pairingGeneration = UUID()
   private var adminToken = ""
   private var requestedNetwork: T3NetworkEndpoint?
@@ -45,7 +48,7 @@ final class T3BridgeService: ObservableObject {
 
   func disable() {
     forgetNetworkPreference()
-    stop()
+    Task { await setNetwork(nil) }
   }
 
   @discardableResult
@@ -56,7 +59,7 @@ final class T3BridgeService: ObservableObject {
   }
 
   var connectionURL: URL? {
-    publicURL ?? port.flatMap { URL(string: "http://127.0.0.1:\($0)") }
+    publicURL ?? serverURL ?? port.flatMap { URL(string: "http://127.0.0.1:\($0)") }
   }
 
   func enable(workspace: WorkspaceModel, network: T3NetworkEndpoint?) {
@@ -65,25 +68,33 @@ final class T3BridgeService: ObservableObject {
     rememberedNetwork = network
     T3ConnectionPreferences.save(network, to: defaults)
     do {
-      try start(
-        workspace: workspace, token: T3NetworkEndpoint.secret(),
-        stateDirectory: stateDirectory, network: network)
+      if process?.isRunning != true {
+        try start(
+          workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: stateDirectory,
+          network: network)
+        return  // The readiness record applies the requested LAN endpoint once.
+      }
+      Task {
+        for _ in 0..<600 {
+          if port != nil { break }
+          try? await Task.sleep(for: .milliseconds(100))
+        }
+        await setNetwork(network)
+      }
     } catch {
-      stop()
-      status = "无法启动：请检查 Node、IP 地址、端口及服务锁（详见集成文档）。"
+      status = "本机 T3 Server 无法启动：请检查 Node、资源及服务锁。"
     }
   }
   private var process: Process?
   private var input: FileHandle?
   private var generation = UUID()
-  private var bridge: RemoteWorkspaceBridge?
   private var writer = DispatchQueue(label: "pimac.t3.bridge.writer")
 
   func start(
     workspace: WorkspaceModel, token: String, stateDirectory: URL? = nil,
     network: T3NetworkEndpoint? = nil
   ) throws {
-    stop()
+    guard process?.isRunning != true else { return }
     guard token.count == 64, token.allSatisfy({ "0123456789abcdef".contains($0) }) else {
       throw ServiceError.invalidToken
     }
@@ -97,15 +108,14 @@ final class T3BridgeService: ObservableObject {
     let current = UUID()
     generation = current
     writer = DispatchQueue(label: "pimac.t3.bridge.writer.\(current)")
-    bridge = RemoteWorkspaceBridge(
-      workspace: workspace, commands: commands,
-      canSend: { [weak self] in self?.isEnabled == true })
     child.executableURL = URL(fileURLWithPath: "/bin/zsh")
     child.arguments = [
-      "-lc", "exec node \"$1\"", "pimac-t3", resource.appendingPathComponent("gateway.mjs").path,
+      "-lc", "exec node \"$1\"", "pimac-t3",
+      resource.appendingPathComponent("server-gateway.mjs").path,
     ]
     var environment = ProcessInfo.processInfo.environment
     environment["PIMAC_T3_BRIDGE_TOKEN"] = token
+    environment["PIMAC_PI_BINARY"] = defaults.string(forKey: "piPath") ?? AppModel.suggestedPiPath()
     // Do not inherit network exposure from a launching shell.
     environment.removeValue(forKey: "PIMAC_T3_PUBLIC_HOST")
     environment.removeValue(forKey: "PIMAC_T3_PUBLIC_PORT")
@@ -143,12 +153,9 @@ final class T3BridgeService: ObservableObject {
       input = stdin.fileHandleForWriting
       adminToken = token
       requestedNetwork = network
-      isEnabled = true
-      status = "启动中"
-      // Own reads for the entire child lifetime instead of relying on FileHandle
-      // readability notifications. HTTP/WebSocket health alone does not establish
-      // native IPC health. Install only after process/input/generation are ready
-      // so the first record cannot be dropped.
+      isEnabled = false
+      status = "本机 T3 Server 启动中"
+      // Read supervisor readiness only, after process/input/generation are ready.
       T3BridgePipeReader.start(stdout.fileHandleForReading) { [weak self] record in
         Task { @MainActor [weak self] in self?.receive(record, generation: current) }
       }
@@ -156,7 +163,6 @@ final class T3BridgeService: ObservableObject {
       T3BridgePipeReader.start(stderr.fileHandleForReading)
     } catch {
       lease.release()
-      bridge = nil
       throw error
     }
   }
@@ -167,15 +173,17 @@ final class T3BridgeService: ObservableObject {
     adminToken = ""
     requestedNetwork = nil
     publicURL = nil
+    serverURL = nil
     pairingGeneration = UUID()
     pairing = nil
     clients = []
-    readDiagnostics = nil
+    connectStatus = nil
+    connectBusy = false
+    connectMessage = ""
     clientRefreshID = nil
     managementBusy = false
     managementMessage = ""
     port = nil
-    bridge = nil
     let oldInput = input
     input = nil
     writer.async { try? oldInput?.close() }
@@ -200,38 +208,22 @@ final class T3BridgeService: ObservableObject {
       stop()
       status =
         message["code"] as? String == "address_in_use"
-        ? "端口已被占用，请更换端口后重试。" : "IP 地址不可用或监听失败。"
+        ? "端口已被占用，请更换端口后重试。" : "本机 T3 Server 启动失败，请检查 Node、资源及服务锁。"
       return
     }
     if let message = try? JSONSerialization.jsonObject(with: record) as? [String: Any],
       message["type"] as? String == "ready", let port = message["port"] as? Int,
       (1...65535).contains(port)
     {
-      if let network = requestedNetwork {
-        guard message["publicHost"] as? String == network.host,
-          message["publicPort"] as? Int == network.port
-        else {
-          stop()
-          status = "网络监听状态不匹配，已停止服务。"
-          return
-        }
-        publicURL = URL(string: "http://\(network.host):\(network.port)")
-      }
       self.port = port
-      status = publicURL == nil ? "仅本机只读预览（手机不可访问）" : "手机只读预览已启动（尚不支持发送与取消）"
-      NSLog("Pi Mac internal T3 bridge listening on 127.0.0.1:%d", port)
+      if let serverPort = message["serverPort"] as? Int, (1...65535).contains(serverPort) {
+        serverURL = URL(string: "http://127.0.0.1:\(serverPort)")
+      }
+      status = "本机 T3 Server 已启动（桌面统一使用 Server）"
+      if let network = requestedNetwork ?? rememberedNetwork { Task { await setNetwork(network) } }
       return
     }
-    guard let request = try? JSONDecoder().decode(RemoteBridgeRequest.self, from: record) else {
-      return
-    }
-    bridge?.handle(request) { [weak self] response in
-      guard let self, self.generation == current, let input = self.input,
-        var data = try? JSONSerialization.data(withJSONObject: response)
-      else { return }
-      data.append(0x0A)
-      self.writer.async { try? input.write(contentsOf: data) }
-    }
+    // No desktop/Pi requests on stdio. This pipe carries supervisor readiness only.
   }
 
   private func admin<T: Decodable>(
@@ -242,6 +234,7 @@ final class T3BridgeService: ObservableObject {
     let current = generation
     var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/internal/auth/\(path)")!)
     request.httpMethod = method
+    if path == "connect" { request.timeoutInterval = 45 }
     request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
@@ -253,10 +246,111 @@ final class T3BridgeService: ObservableObject {
     return try JSONDecoder().decode(T.self, from: data)
   }
 
+  func desktopCredential() async throws -> String {
+    struct Credential: Decodable { let token: String }
+    let result: Credential = try await admin("desktop-session", method: "POST", body: [:])
+    return result.token
+  }
+
+  private func setNetwork(_ network: T3NetworkEndpoint?) async {
+    struct Network: Decodable { let publicURL: String? }
+    let current = generation
+    do {
+      let result: Network = try await admin(
+        "network", method: "POST",
+        body: network.map { ["host": $0.host, "port": String($0.port)] } ?? [:])
+      guard generation == current else { return }
+      publicURL = result.publicURL.flatMap(URL.init(string:))
+      isEnabled = publicURL != nil
+      status = isEnabled ? "局域网访问已开启；桌面与手机共用 T3 Server" : "仅局域网访问已关闭；本机 Server 继续运行"
+    } catch {
+      guard generation == current else { return }
+      isEnabled = false
+      publicURL = nil
+      status = "局域网监听失败，请检查 IP/端口；本机 Server 不受影响。"
+    }
+  }
+
+  func sessionMetrics(threadID: String) async throws -> SessionStats? {
+    struct Metrics: Decodable {
+      struct Tokens: Decodable { let input: Int?; let cacheRead: Int?; let cacheWrite: Int?; let total: Int? }
+      struct Context: Decodable { let percent: Double? }
+      let cost: Double?
+      let outputTokensPerSecond: Double?
+      let tokens: Tokens
+      let contextUsage: Context?
+    }
+    struct Response: Decodable { let stats: Metrics? }
+    let response: Response = try await admin(
+      "session-metrics", method: "POST", body: ["threadId": threadID])
+    guard let stats = response.stats else { return nil }
+    return SessionStats(
+      cost: stats.cost ?? 0, contextPercent: stats.contextUsage?.percent,
+      totalTokens: stats.tokens.total ?? 0, inputTokens: stats.tokens.input ?? 0,
+      cacheReadTokens: stats.tokens.cacheRead ?? 0, cacheWriteTokens: stats.tokens.cacheWrite ?? 0,
+      outputTokensPerSecond: stats.outputTokensPerSecond)
+  }
+
+  func accountStatus(threadID: String, provider: String? = nil) async throws -> [String: Any]? {
+    struct Snapshot: Decodable { let status: String? }
+    var body = ["threadId": threadID]
+    if let provider { body["provider"] = provider }
+    let snapshot: Snapshot = try await admin(
+      "account-status", method: "POST", body: body)
+    guard let value = snapshot.status,
+      let data = value.data(using: .utf8)
+    else { return nil }
+    return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+  }
+
+  func connectAction(_ operation: String) async {
+    guard !connectBusy, port != nil,
+      [
+        "login", "reauthorize", "cancel-login", "retry-link", "refresh-devices", "enable",
+        "disable", "logout",
+      ].contains(operation)
+    else { return }
+    let current = generation
+    connectBusy = true
+    connectMessage = ""
+    defer { if generation == current { connectBusy = false } }
+    do {
+      if operation == "login" || operation == "reauthorize" {
+        struct Login: Decodable { let url: String? }
+        let login: Login = try await admin(
+          "connect", method: "POST", body: ["operation": operation])
+        if let authorizationURL = login.url {
+          guard let url = URL(string: authorizationURL), url.scheme == "https",
+            url.host == "app.t3.codes", url.path == "/connect", url.user == nil,
+            url.password == nil,
+            NSWorkspace.shared.open(url)
+          else {
+            let _: T3ConnectStatus? = try? await admin(
+              "connect", method: "POST", body: ["operation": "cancel-login"])
+            throw ServiceError.managementFailed
+          }
+        }
+      } else {
+        let result: T3ConnectStatus = try await admin(
+          "connect", method: "POST", body: ["operation": operation])
+        guard generation == current else { return }
+        connectStatus = result
+      }
+    } catch {
+      if generation == current {
+        connectMessage = "操作未确认成功；请刷新状态后重试。无法打开网页时，请检查默认浏览器及本机 34338 端口是否被占用。"
+      }
+    }
+    guard generation == current else { return }
+    let result: T3ConnectStatus? = try? await admin("connect")
+    guard generation == current else { return }
+    connectStatus = result
+  }
+
   private struct Revocation: Decodable { let revoked: Bool }
 
   func generatePairing(label: String) async {
-    guard !managementBusy, clientRefreshID == nil, port != nil else { return }
+    guard !managementBusy, port != nil else { return }
     let current = generation
     let pairingRequest = UUID()
     pairingGeneration = pairingRequest
@@ -269,8 +363,10 @@ final class T3BridgeService: ObservableObject {
         let _: Revocation = try await admin("revoke-pairing", method: "POST", body: ["id": old.id])
       }
       let grant: T3Pairing = try await admin("pairing", method: "POST", body: ["label": label])
-      guard grant.credential.count == 64,
-        grant.credential.allSatisfy({ "0123456789abcdef".contains($0) }),
+      guard (12...128).contains(grant.credential.count),
+        grant.credential.allSatisfy({
+          "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_".contains($0)
+        }),
         let expiry = grant.expiry, expiry > .now
       else { throw ServiceError.managementFailed }
       if pairingGeneration == pairingRequest {
@@ -294,9 +390,11 @@ final class T3BridgeService: ObservableObject {
       let values: [T3PairedClient] = try await admin("clients")
       guard generation == current else { return }
       if clients != values { clients = values }
-      let diagnostics: T3ReadDiagnostics? = try? await admin("read-diagnostics")
-      guard generation == current else { return }
-      if readDiagnostics != diagnostics { readDiagnostics = diagnostics }
+      if !connectBusy {
+        let value: T3ConnectStatus? = try? await admin("connect")
+        guard generation == current else { return }
+        if connectStatus != value { connectStatus = value }
+      }
       if let pairing {
         struct Link: Decodable { let id: String }
         let links: [Link] = try await admin("pairing-links")
@@ -311,7 +409,7 @@ final class T3BridgeService: ObservableObject {
   }
 
   func revokeClient(_ id: String) async {
-    guard !managementBusy, clientRefreshID == nil else { return }
+    guard !managementBusy else { return }
     let current = generation
     managementBusy = true
     defer { if generation == current { managementBusy = false } }

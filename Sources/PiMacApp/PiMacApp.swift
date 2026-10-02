@@ -6,6 +6,7 @@ import SwiftUI
 final class DevelopmentReloader: ObservableObject {
   private let executable: URL?
   private var originalModification: Date?
+  private let revisionFile: URL?
   private var pendingSince: Date?
   private var reloading = false
 
@@ -15,23 +16,29 @@ final class DevelopmentReloader: ObservableObject {
     executable = path.flatMap {
       URL(fileURLWithPath: $0).standardizedFileURL == running ? running : nil
     }
-    originalModification = executable.flatMap {
-      try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    revisionFile = ProcessInfo.processInfo.environment["PIMAC_DEV_RELOAD_REVISION"].map {
+      URL(fileURLWithPath: $0)
+    }
+    originalModification = (revisionFile ?? executable).flatMap {
+      (try? FileManager.default.attributesOfItem(atPath: $0.path)[.modificationDate]) as? Date
     }
   }
 
   func check(workspace: WorkspaceModel) {
     guard !reloading, let executable, let originalModification,
-      let modified = try? executable.resourceValues(forKeys: [.contentModificationDateKey])
-        .contentModificationDate,
+      let modified = (try? FileManager.default.attributesOfItem(
+        atPath: (revisionFile ?? executable).path)[.modificationDate]) as? Date,
       modified > originalModification
     else { return }
     if pendingSince == nil {
       pendingSince = .now
       return
     }
+    let blockers = workspace.restartBlockers
+    workspace.developmentReloadStatus = blockers.isEmpty
+      ? "新版构建就绪，准备空闲重启…" : "新版等待重启：\(blockers.joined(separator: "、"))"
     guard let pendingSince, Date.now.timeIntervalSince(pendingSince) >= 2,
-      workspace.canRestartSafely
+      blockers.isEmpty
     else { return }
 
     // Wait for the old process to exit before exec-ing the new binary (Telegram long polling

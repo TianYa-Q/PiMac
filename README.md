@@ -7,7 +7,9 @@
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/TianYa-Q/PiMac)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client built with SwiftUI. Rather than emulating a terminal, Pi Mac manages real agent sessions through Pi's official JSONL RPC protocol and continues to use your existing Pi configuration.
+A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client built with SwiftUI. Desktop, iOS and Telegram use the native T3 Server orchestration engine; its Pi Provider Adapter exclusively owns Pi runtimes.
+
+> **Source architecture update:** the old desktop-owned backend has been removed. The release-era feature/Telegram descriptions below are not feature-parity claims for this source migration. Historical import, extension dialogs/account switching, Fast mode, manual compaction and desktop steering are not yet supported. See [current architecture and limits](docs/t3-server-migration.md).
 
 ![Pi Mac overview](docs/images/pi-mac-overview-new.png)
 
@@ -50,7 +52,7 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 
 - macOS 14 or later
 - [Pi coding agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent), installed and authenticated; compatibility tested with **1.0.0**
-- Node.js 22.19+ (Pi's requirement)
+- Node.js 24+ (bundled T3 Server requirement)
 
 Pi Mac searches for the Pi executable in this order by default:
 
@@ -91,7 +93,7 @@ Delivery checkpoints each acknowledged reply chunk locally, so retries and resta
 
 New builds expose **Settings → T3 iOS 连接** with an explicit network switch, local IP/port, one-time pairing code/link/QR, and device revocation. Only trusted LAN IPv4 addresses are supported; LAN HTTP exposes credentials and transcripts to network observers. Access is initially off; confirmed startup saves the exact IP/port and automatically restores it on app relaunch until manually stopped or network consent is unchecked. An unavailable endpoint fails visibly without changing addresses. A separate listener never exposes local administration or diagnostic mutations. Use T3's in-app scanner or enter the address/code manually; Safari pairing is not supported.
 
-Supports bounded historical/live snapshots and subscriptions. Paired devices can send text and inline PNG/JPEG/WebP images to existing sessions without changing desktop selection (8 images / 8 MiB total). Busy sessions are rejected. Cancellation, new sessions and file uploads remain unsupported. The actual App Store client remains unverified; protocol tests are not physical-device acceptance. See [connection steps, limitations and recovery](docs/t3-code-integration.md). Use a newly built app and restart only when existing tasks are safe to stop.
+Supports bounded historical/live snapshots and subscriptions. Paired devices can send text and inline PNG/JPEG/WebP images to existing sessions without changing desktop selection (8 images / 8 MiB total). The model picker exposes native Pi models; New Thread creates a local session in an existing desktop project using the selected model. Messages sent while working enter Pi's steering queue after native acknowledgement; compaction, account handoff and model changes during a run are not supported. Cancellation, worktrees and file uploads remain unsupported. An opt-in **T3 Connect 通知** experiment adds official hosted Apple-compatible OAuth and signed publish-only completion/failure activity updates, with no public tunnel. It sends titles (possibly derived from the first message), model names and status metadata, not full transcripts or attachments; credentials stay in a local private file. Sign in to the same T3 account on the phone and enable notifications. Actual Apple login and iPhone push delivery still require acceptance testing. The actual App Store client remains unverified; protocol tests are not physical-device acceptance. See [connection steps, limitations and recovery](docs/t3-code-integration.md). Use a newly built app and restart only when existing tasks are safe to stop.
 
 ## Local Development
 
@@ -100,10 +102,11 @@ Swift 5.10 or later is required. Clone the repository and run:
 ```bash
 git clone https://github.com/TianYa-Q/PiMac.git
 cd PiMac
+./scripts/prepare-t3-server.sh
 swift run PiMac
 ```
 
-For development, run `python3 scripts/dev.py` instead: it rebuilds on Swift source changes and relaunches Pi Mac after a successful build once all desktop and Telegram sessions are idle, with no queued prompts or extension dialogs. Failed builds do not restart the app. Ctrl-C stops watching but leaves the app running; quit any existing Pi Mac instances before starting the watcher again. The script refuses to start a second watcher or app instance instead of terminating potentially busy sessions. Normal and packaged runs do not auto-restart.
+For development, run `python3 scripts/dev.py` instead: it rebuilds on Swift source changes and relaunches Pi Mac after a successful build once all desktop and Telegram sessions are idle, with no queued prompts or extension dialogs. Failed builds do not restart the app. On exit (including Ctrl-C or SIGTERM), the watcher stops this project's Pi Mac instances, T3 Server and child services, including hot-relaunched apps; remaining processes are force-stopped after a short grace period. This interrupts active tasks. A second watcher is refused; if an old app is still running, it is cleaned up on exit before you start the watcher again. Normal and packaged runs do not auto-restart.
 
 With the full Xcode installation, you can also open `Package.swift` directly.
 

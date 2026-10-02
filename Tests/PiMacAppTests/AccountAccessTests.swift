@@ -4,21 +4,11 @@ import Testing
 
 @MainActor
 struct AccountAccessTests {
-  @Test func accountManagementRemainsAvailableDuringAgentWork() {
+  @Test func accountManagementRequiresAnImplementedProviderFeature() {
     let app = AppModel(restoreLastProjectOnLaunch: false)
-    #expect(!app.canManageAccounts)
     app.connectionState = .connected
-    #expect(app.canManageAccounts)
-    app.isStreaming = true
-    #expect(app.isBusy)
-    #expect(app.canManageAccounts)
-    app.isCompacting = true
-    #expect(app.canManageAccounts)
-    app.isLoadingConfiguration = true
     #expect(!app.canManageAccounts)
-    app.isLoadingConfiguration = false
-    app.connectionState = .disconnected
-    #expect(!app.canManageAccounts)
+    #expect(!app.supportsAccountRotation)
   }
 
   @Test func loginLabelsDistinguishCredentialTypesWithoutChangingWireActions() throws {

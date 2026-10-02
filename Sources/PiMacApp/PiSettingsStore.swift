@@ -135,6 +135,14 @@ enum PiSettingsStore {
       .appendingPathComponent(".pi/agent/settings.json")
   }
 
+  static func defaultModelID(from url: URL = globalURL) -> String? {
+    let settings = loadJSON(from: url)
+    guard let provider = settings["defaultProvider"] as? String, !provider.isEmpty,
+      let model = settings["defaultModel"] as? String, !model.isEmpty
+    else { return nil }
+    return "\(provider)/\(model)"
+  }
+
   static func loadModelPreferences(from url: URL = globalURL) -> PiModelPreferences {
     let settings = loadJSON(from: url)
     let rawLevels = settings["modelThinkingLevels"] as? [String: Any] ?? [:]

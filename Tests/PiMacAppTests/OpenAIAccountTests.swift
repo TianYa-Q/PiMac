@@ -44,7 +44,7 @@ struct OpenAIAccountTests {
     ui.handle(try status(provider: "openai", manages: true, percent: 80), from: modern)
     #expect(ui.usage(for: legacy).accounts.first?.primary?.remainingPercent == 2)
     #expect(ui.usage(for: modern).accounts.first?.primary?.remainingPercent == 80)
-    #expect(modern.supportsAccountRotation)
+    #expect(!modern.supportsAccountRotation)  // Adapter capability is not implemented.
     ui.selectSource(modern)
     #expect(ui.codexAccounts.first?.primary?.remainingPercent == 80)
     ui.handle(
@@ -72,10 +72,10 @@ struct OpenAIAccountTests {
     let app = model("openai", ui: ui)
     ui.selectSource(app)
     ui.handle(try status(provider: "openai", manages: true, percent: 2), from: app)
-    #expect(app.supportsAccountRotation)
+    #expect(!app.supportsAccountRotation)
     ui.handle(
       try status(provider: "openai", manages: false, percent: 2, timestamp: 2000), from: app)
-    #expect(app.supportsAccountSwitch)  // Explicit opt-in is allowed.
+    #expect(!app.supportsAccountSwitch)  // Extension payloads cannot enable an unsupported capability.
     #expect(!app.supportsAccountRotation)
     #expect(ui.usage(for: app).accounts.first(where: \.isActive) == nil)
     #expect(ui.codexAccounts.first(where: \.isActive) == nil)

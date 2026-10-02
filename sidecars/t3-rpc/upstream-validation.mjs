@@ -2,6 +2,11 @@
 import * as Schema from 'effect/Schema';
 import { OrchestrationShellSnapshot, OrchestrationThreadDetailSnapshot, OrchestrationRpcSchemas } from './upstream/orchestration.ts';
 import { ServerConfig, ServerConfigStreamEvent, ServerLifecycleStreamEvent } from './upstream/server.ts';
+import { RelayEnvironmentLinkRequest, RelayEnvironmentLinkProofPayload, RelayAgentActivityPublishRequest, RelayAgentActivityPublishProofPayload } from './upstream/relay.ts';
+export const validateConnectLink = Schema.decodeUnknownSync(RelayEnvironmentLinkRequest);
+export const validateConnectLinkProof = Schema.decodeUnknownSync(RelayEnvironmentLinkProofPayload);
+export const validateConnectPublish = Schema.decodeUnknownSync(RelayAgentActivityPublishRequest);
+export const validateConnectPublishProof = Schema.decodeUnknownSync(RelayAgentActivityPublishProofPayload);
 export const encodeConfig = Schema.encodeSync(ServerConfig);
 export const encodeConfigEvent = Schema.encodeSync(ServerConfigStreamEvent);
 export const encodeLifecycle = Schema.encodeSync(ServerLifecycleStreamEvent);

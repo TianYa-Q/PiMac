@@ -93,32 +93,13 @@ struct T3ConnectionPreferences {
   }
 }
 
-/// Bounded, credential-free service counters; no claim about phone rendering.
-struct T3ReadDiagnostics: Decodable, Equatable {
-  let shellHttpRequests: Int
-  let shellHttpStatus: Int
-  let catalogReads: Int
-  let catalogFailures: Int
-  let shellSubscriptions: Int
-  let shellSnapshots: Int
-  let shellCompletionMarkers: Int
-  let lastRPC: String
-  let lastFailure: String
-
-  var summary: String {
-    let http = shellHttpStatus == 0 ? "尚无响应" : String(shellHttpStatus)
-    return "HTTP 列表请求：\(shellHttpRequests) · 最近状态：\(http)\n"
-      + "桌面目录读取：\(catalogReads) · 失败：\(catalogFailures)\n"
-      + "列表订阅：\(shellSubscriptions) · 快照生成：\(shellSnapshots) · 同步标记：\(shellCompletionMarkers)\n"
-      + "最近 RPC：\(lastRPC) · 最近失败：\(lastFailure)"
-  }
-}
-
 struct T3Pairing: Decodable {
   let id: String
   let credential: String
   let expiresAt: String
-  var expiry: Date? { ISO8601DateFormatter.t3.date(from: expiresAt) }
+  var expiry: Date? {
+    ISO8601DateFormatter.t3.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt)
+  }
 
   func url(base: URL) -> URL {
     var parts = URLComponents(

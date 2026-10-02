@@ -37,7 +37,7 @@ final class TelegramPresentationTests: XCTestCase {
     }
     let busy = actions("/status", running: true)
     XCTAssertTrue(busy.contains("/stop"))
-    XCTAssertFalse(busy.contains("/new"))
+    XCTAssertTrue(busy.contains("/new"))
     XCTAssertFalse(busy.contains("/compact"))
     let idle = actions("model:1", running: false)
     XCTAssertTrue(idle.contains("/new"))

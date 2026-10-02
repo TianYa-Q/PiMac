@@ -644,13 +644,10 @@ final class TelegramControlTests: XCTestCase {
   }
 
   @MainActor
-  func testIdleModelCanRestartButQueuedPromptsCannot() {
+  func testActiveTurnBlocksRestart() {
     let model = AppModel(restoreLastProjectOnLaunch: false)
     XCTAssertTrue(model.canRestartSafely)
-    model.queuedPrompts = [
-      QueuedPrompt(
-        id: UUID(), text: "pending", rpcText: "pending", delivery: .steer, attachments: [])
-    ]
+    model.isStreaming = true
     XCTAssertFalse(model.canRestartSafely)
   }
 

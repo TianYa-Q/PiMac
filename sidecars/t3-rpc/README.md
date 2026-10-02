@@ -33,8 +33,17 @@ App Store client compatibility; that needs physical iPhone verification.
 
 Device authorization lives outside the dependency bundle. A socket is bound to
 one ticket-authenticated session. RPC headers cannot change that identity;
-unsupported commands never dispatch workspace mutations. Config has no fake
-Codex/Claude provider; existing-thread sends use the shared native Pi runtime.
+unsupported commands never dispatch workspace mutations. Config publishes real
+native Pi models under the open `pi` driver (no fake Codex/Claude provider);
+existing-thread sends, model selection and local new-thread bootstrap use the
+shared native workspace owner.
+
+The separate `Resources/t3-bridge/connect.mjs` module implements opt-in hosted
+OAuth/PKCE and Ed25519-signed publish-only activity updates. It opens no tunnel
+and reads only native lifecycle metadata from the workspace catalog. Its
+credentials are private 0600 state; errors and status never expose them. Relay
+proof/request fixtures also use the unchanged, hash-pinned `upstream/relay.ts`.
+Real Apple login and iPhone APNs/Live Activity delivery remain unverified.
 
 See `docs/t3-code-integration.md` for settings, network warnings, budgets, crash
 ownership/recovery and remaining work. Public and private listeners are separate;

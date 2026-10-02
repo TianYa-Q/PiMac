@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import PiMacApp
@@ -43,6 +44,44 @@ struct CodexAccountRotationTests {
     #expect(
       CodexAccountRotation.nextAccount(in: [account("A", 1, active: true), account("B", .nan)])
         == nil)
+  }
+
+  @Test func weeklyAllocationPrioritizesResetWithoutBurningEarly() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let active = account("Active", 1, active: true)
+    let nearReset = weekly("Near", remaining: 40, days: 1, now: now)
+    let fresh = weekly("Fresh", remaining: 95, days: 6, now: now)
+    #expect(CodexAccountRotation.nextAccount(in: [active, fresh, nearReset], now: now) == "Near")
+    // Only 40% remains with six days to go: preserve this account despite ample 5h.
+    let overused = weekly("Overused", remaining: 40, days: 6, now: now)
+    #expect(CodexAccountRotation.nextAccount(in: [active, overused, fresh], now: now) == "Fresh")
+    let exhausted = weekly("Empty", remaining: 4, days: 0.1, now: now)
+    #expect(CodexAccountRotation.nextAccount(in: [active, exhausted], now: now) == nil)
+  }
+
+  @Test func weeklyRebalanceIsIdleOnlyAndHasHysteresis() {
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let active = weekly("Active", remaining: 90, days: 6, now: now, active: true)
+    let near = weekly("Near", remaining: 40, days: 1, now: now)
+    #expect(CodexAccountRotation.nextAccount(in: [active, near], now: now) == "Near")
+    #expect(CodexAccountRotation.nextAccount(
+      in: [active, near], now: now, allowRebalance: false) == nil)
+    let similar = weekly("Similar", remaining: 95, days: 6, now: now)
+    #expect(CodexAccountRotation.nextAccount(in: [active, similar], now: now) == nil)
+    let stale = weekly("Stale", remaining: 100, days: -1, now: now)
+    #expect(CodexAccountRotation.nextAccount(in: [active, stale], now: now) == nil)
+  }
+
+  private func weekly(
+    _ name: String, remaining: Double, days: Double, now: Date, active: Bool = false
+  ) -> CodexAccountStatus {
+    CodexAccountStatus(
+      name: name, isActive: active, isDefault: false, isHidden: false,
+      primary: CodexUsageWindow(remainingPercent: 80, resetAt: nil, windowSeconds: 18_000),
+      secondary: CodexUsageWindow(
+        remainingPercent: remaining, resetAt: now.addingTimeInterval(days * 86_400),
+        windowSeconds: 604_800),
+      resetCredits: nil, error: nil)
   }
 
   private func account(

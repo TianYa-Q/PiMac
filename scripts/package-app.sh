@@ -15,6 +15,7 @@ if [[ ! "$BUILD_NUMBER" =~ '^[0-9]+$' ]]; then
   exit 1
 fi
 
+"$ROOT_DIR/scripts/prepare-t3-server.sh"
 (cd "$ROOT_DIR" && swift build -c release)
 BINARY_DIR="$(cd "$ROOT_DIR" && swift build -c release --show-bin-path)"
 

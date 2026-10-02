@@ -208,7 +208,7 @@ enum TelegramPresentation {
       && (isStatus || command == "/sessions" || command == "/help" || command == "/start")
     {
       if running {
-        rows.append([button("📥 队列", "/queue"), button("❔ 帮助", "/help")])
+        rows.append([button("＋ 新会话", "/new"), button("📥 队列", "/queue"), button("❔ 帮助", "/help")])
         // A destructive action gets its own row, away from frequently used navigation.
         rows.append([button("⏹ 停止当前任务并取消排队", "/stop")])
       } else {

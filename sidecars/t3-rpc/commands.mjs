@@ -4,6 +4,21 @@ import { OrchestrationDispatchCommandError } from './upstream/orchestration.ts';
 const fail = message => new OrchestrationDispatchCommandError({ message });
 const identifier = value => typeof value === 'string' && value.length > 0 && value.length <= 128;
 const imageLimit = 8 * 1024 * 1024;
+const selection = value => identifier(value?.instanceId) && value.instanceId === 'pi' &&
+  identifier(value.model) && (!value.options || (Array.isArray(value.options) && !value.options.length));
+
+function validateBootstrap(value) {
+  if (!value) return undefined;
+  const create = value.createThread;
+  if (!create || value.prepareWorktree || value.runSetupScript ||
+      !identifier(create.projectId) || typeof create.title !== 'string' || !create.title.trim() ||
+      create.title.length > 512 || !selection(create.modelSelection) ||
+      create.runtimeMode !== 'full-access' || create.interactionMode !== 'default' ||
+      create.worktreePath !== null) throw fail('Only local Pi threads are supported. No message was sent; no session was created.');
+  return { createThread: { projectId: create.projectId, modelSelection: {
+    instanceId: 'pi', model: create.modelSelection.model,
+  } } };
+}
 
 // No caller-supplied paths, attachment URLs, or bootstrap workspace roots cross IPC.
 export function validateSend(input) {
@@ -12,11 +27,16 @@ export function validateSend(input) {
       input.message.role !== 'user' || typeof input.message.text !== 'string' ||
       Buffer.byteLength(input.message.text) > 256 * 1024 ||
       !Array.isArray(input.message.attachments) || input.message.attachments.length > 8 ||
-      input.bootstrap || input.sourceProposedPlan || input.message.context ||
+      input.sourceProposedPlan || input.message.context ||
       (input.runtimeMode !== undefined && input.runtimeMode !== 'full-access') ||
       (input.interactionMode !== undefined && input.interactionMode !== 'default') ||
-      (input.modelSelection !== undefined && (!identifier(input.modelSelection?.instanceId) || !identifier(input.modelSelection?.model)))) {
+      (input.modelSelection !== undefined && !selection(input.modelSelection))) {
     throw fail('Unsupported or invalid message command. No message was sent.');
+  }
+  const bootstrap = validateBootstrap(input.bootstrap);
+  if (bootstrap && (input.threadId.startsWith('pimac-') ||
+      (input.modelSelection && input.modelSelection.model !== bootstrap.createThread.modelSelection.model))) {
+    throw fail('Invalid new-thread identity or model.');
   }
   let bytes = 0;
   const images = input.message.attachments.map(attachment => {
@@ -38,6 +58,7 @@ export function validateSend(input) {
   if (!input.message.text.trim() && !images.length) throw fail('Message is empty. No message was sent.');
   return { type: input.type, commandId: input.commandId, threadId: input.threadId,
     message: { messageId: input.message.messageId, role: 'user', text: input.message.text, attachments: [] },
+    ...(bootstrap ? { bootstrap } : {}),
     ...(input.modelSelection ? { modelSelection: { instanceId: input.modelSelection.instanceId, model: input.modelSelection.model } } : {}), images };
 }
 

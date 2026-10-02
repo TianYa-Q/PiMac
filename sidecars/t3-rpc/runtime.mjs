@@ -25,9 +25,47 @@ export function validateReadSnapshot(value, kind) {
 // interrupts its handlers and protocol fibers, including outstanding requests.
 function serve(ws, session, store, workspace, dispatcher, signal, diagnostics) {
   let streams = 0;
-  const config = () => store.isLive(session.sessionId)?.scopes.includes('orchestration:read')
-    ? Effect.sync(() => previewServerConfig(store.state.environmentId))
-    : Effect.fail({ _tag: 'EnvironmentAuthorizationError', message: 'Scope required', requiredScope: 'orchestration:read' });
+  const readConfig = async () => {
+    if (!store.isLive(session.sessionId)?.scopes.includes('orchestration:read')) {
+      throw { _tag: 'EnvironmentAuthorizationError', message: 'Scope required', requiredScope: 'orchestration:read' };
+    }
+    if (workspace) await workspace.refresh();
+    // Authorization can expire while waiting for the private catalog.
+    if (!store.isLive(session.sessionId)?.scopes.includes('orchestration:read')) {
+      throw { _tag: 'EnvironmentAuthorizationError', message: 'Scope required', requiredScope: 'orchestration:read' };
+    }
+    return previewServerConfig(store.state.environmentId, workspace?.models ?? [], workspace?.defaultModelId, store.activityPublishing?.() === true);
+  };
+  const config = () => Effect.tryPromise({ try: readConfig, catch: error => error });
+  const configStream = input => Stream.callback(queue => Effect.gen(function* () {
+    if (streams >= 4) {
+      Queue.failCauseUnsafe(queue, Cause.fail({ _tag: 'OrchestrationGetSnapshotError', message: 'Subscription capacity exceeded' }));
+      return;
+    }
+    streams++;
+    let stopped = false, pending = false, signature;
+    const poll = async () => {
+      if (stopped || pending) return;
+      pending = true;
+      try {
+        const value = await readConfig();
+        const next = JSON.stringify(value);
+        if (!stopped && next !== signature) {
+          signature = next;
+          Queue.offerUnsafe(queue, [
+            { version: 1, type: 'snapshot', config: value },
+            ...(input.environmentThemes ? [{ version: 1, type: 'environmentThemesUpdated', payload: { themes: [] } }] : []),
+            ...(input.usageLimitSources ? [{ version: 1, type: 'usageLimitSourcesUpdated', payload: { sources: [] } }] : []),
+          ]);
+        }
+      } catch (error) { if (!stopped) Queue.failCauseUnsafe(queue, Cause.fail(error)); }
+      finally { pending = false; }
+    };
+    const timer = setInterval(() => void poll(), 1000);
+    timer.unref();
+    void poll();
+    yield* Effect.addFinalizer(() => Effect.sync(() => { stopped = true; streams--; clearInterval(timer); }));
+  }), { capacity: 1, strategy: 'sliding' }).pipe(Stream.flatMap(Stream.fromIterable));
   const staticStream = read => Stream.fromEffect(read).pipe(Stream.concat(Stream.never));
   const subscribe = (kind, input) => Stream.callback(queue => Effect.gen(function* () {
     const live = store.isLive(session.sessionId);
@@ -68,11 +106,7 @@ function serve(ws, session, store, workspace, dispatcher, signal, diagnostics) {
           : Effect.fail({ _tag: 'EnvironmentAuthorizationError', message: 'Session unavailable', requiredScope: 'orchestration:read' }),
         'server.getConfig': config,
         'server.getSettings': () => config().pipe(Effect.map(value => value.settings)),
-        'subscribeServerConfig': input => staticStream(config().pipe(Effect.map(value => [
-          { version: 1, type: 'snapshot', config: value },
-          ...(input.environmentThemes ? [{ version: 1, type: 'environmentThemesUpdated', payload: { themes: [] } }] : []),
-          ...(input.usageLimitSources ? [{ version: 1, type: 'usageLimitSourcesUpdated', payload: { sources: [] } }] : []),
-        ]))).pipe(Stream.flatMap(Stream.fromIterable)),
+        'subscribeServerConfig': configStream,
         'subscribeServerLifecycle': () => staticStream(config().pipe(Effect.map(value => [
           { version: 1, sequence: 0, type: 'welcome', payload: { environment: value.environment,
             cwd: value.cwd, projectName: 'Pi Mac', bootstrapStatus: 'complete' } },

@@ -7,7 +7,9 @@
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/TianYa-Q/PiMac)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-一个使用 SwiftUI 构建的原生 macOS [Pi coding agent](https://github.com/earendil-works/pi) 客户端。它不是终端模拟器，而是通过 Pi 官方 JSONL RPC 协议管理真实的 Agent 会话，并继续使用你已有的 Pi 配置。
+一个使用 SwiftUI 构建的原生 macOS [Pi coding agent](https://github.com/earendil-works/pi) 客户端。桌面、iOS 与 Telegram 统一使用 T3 Server 原生编排，由 Pi Provider Adapter 独占 Pi runtime。
+
+> **源码架构更新：**旧桌面后端已删除。下方发行版功能与 Telegram 说明不代表当前迁移已达到全部功能对等；历史导入、扩展对话/账户切换、Fast mode、手动压缩和桌面 steering 尚未支持。以[当前架构与限制](docs/t3-server-migration.md)为准。
 
 ![Pi Mac 主界面](docs/images/pi-mac-overview-new.png)
 
@@ -51,7 +53,7 @@
 
 - macOS 14 或更高版本
 - 已安装并登录 [Pi coding agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent)，当前兼容性测试版本为 **1.0.0**
-- Node.js 22.19+（Pi 的运行要求）
+- Node.js 24+（内置 T3 Server 的运行要求）
 
 Pi Mac 默认依次查找：
 
@@ -99,7 +101,7 @@ Telegram 局部引用回复会把选中的文字与回复正文一起传给模�
 
 新构建已加入 **设置 → T3 iOS 连接**：明确开启网络访问后，可选择本机 IP/端口、生成一次性配对码及链接/二维码，并管理、撤销设备。仅支持可信局域网 IPv4；局域网 HTTP 不加密，网络监听者可能获取凭据和会话。首次默认关闭；确认启动后记住 IP/端口并在软件重启时自动恢复，手动停止连接或取消允许访问后才清除。原 IP 不可用时提示失败，不自动换地址。手机监听不暴露本机管理或诊断写接口。在 T3 App 内扫码或手动填写地址和完整配对码，不支持 Safari 网页配对。
 
-支持读取历史与实时会话，并按最后用户消息时间排序。开启 T3 连接后，已配对的手机可向已有会话发送文字和 PNG/JPEG/WebP 内联图片（最多 8 张、合计 8 MiB），不会改变桌面选择或草稿；历史会话会启动其共享运行进程，忙碌时拒绝发送。尚不支持取消、新建会话或任意文件上传。无需另行开启发送权限。原版 App Store 客户端仍需实机验证，协议测试不能视为 iPhone 验收。详见[连接步骤、限制和恢复说明](docs/t3-code-integration.md)。需要使用新构建；已有任务未安全结束时不要强制重启。
+支持读取历史与实时会话，并按最后用户消息时间排序。开启 T3 连接后，已配对的手机可向已有会话发送文字和 PNG/JPEG/WebP 内联图片（最多 8 张、合计 8 MiB），不会改变桌面选择或草稿；历史会话会启动其共享运行进程，执行中追加消息会进入 Pi 的 steering 队列，收到原生确认后才返回成功；压缩上下文、账户交接及执行中切换模型暂不支持。模型选择器展示原生 Pi 可见模型；New Thread 可在 Mac 已添加的项目中新建本地会话并使用所选模型，也可在已有会话的下一次发送时切换模型。尚不支持取消、worktree 或任意文件上传。无需另行开启发送权限。另可自愿启用 **T3 Connect 通知（试验 · publish-only）**：在官方网页使用与手机相同的 Apple/T3 账号授权，签名上报标题（可能来自首条消息）、模型及任务状态，不上传完整正文或附件，不开公网隧道；凭据仅存本机私有文件。手机需开启通知；真实 Apple 登录及推送投递仍待验收。原版 App Store 客户端仍需实机验证，协议测试不能视为 iPhone 验收。详见[连接步骤、限制和恢复说明](docs/t3-code-integration.md)。需要使用新构建；已有任务未安全结束时不要强制重启。
 
 ## 本地开发
 
@@ -108,10 +110,11 @@ Telegram 局部引用回复会把选中的文字与回复正文一起传给模�
 ```bash
 git clone https://github.com/TianYa-Q/PiMac.git
 cd PiMac
+./scripts/prepare-t3-server.sh
 swift run PiMac
 ```
 
-开发时可改用 `python3 scripts/dev.py`：监听 Swift 源文件并自动构建，成功构建后等待桌面及 Telegram 会话全部空闲、没有排队消息或扩展确认，再自动重启 Pi Mac。构建失败不会重启；Ctrl-C 仅停止监听，应用仍会运行。再次启动监听前请先退出已有的 Pi Mac；脚本会拒绝启动第二个监听器或应用实例，不会强制关闭可能仍有任务的会话。普通运行与打包应用不会自动重启。
+开发时可改用 `python3 scripts/dev.py`：监听 Swift 源文件并自动构建，成功构建后等待桌面及 Telegram 会话全部空闲、没有排队消息或扩展确认，再自动重启 Pi Mac。构建失败不会重启；脚本退出时（包括 Ctrl-C、SIGTERM）会清理本项目的 Pi Mac 实例、T3 Server 及子服务，包括热重启后的应用；短暂等待后仍未退出的进程会被强制结束，因此运行中的任务会中断。脚本拒绝启动第二个监听器；若存在旧应用，会在退出时清理，再次执行脚本即可。普通运行与打包应用不会自动重启。
 
 安装完整 Xcode 后，也可以直接打开 `Package.swift`。
 

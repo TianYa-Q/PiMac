@@ -1,0 +1,130 @@
+{
+  "apps/server/src/workspace/WorkspaceSearchIndex.ts": [
+    {
+      "oldText": "const { FileFinder } = requireForFff(\"@ff-labs/fff-node\") as typeof import(\"@ff-labs/fff-node\");",
+      "newText": "const FileFinder = class { constructor() { throw new Error('Workspace search is disabled in the Pi Mac host'); } };",
+      "count": 1
+    }
+  ],
+  "apps/server/src/terminal/NodePtyAdapter.ts": [
+    {
+      "oldText": "Promise.resolve().then(() => requireForNodePty(\"node-pty\") as typeof import(\"node-pty\"));",
+      "newText": "Promise.resolve({ spawn: () => { throw new Error('Terminal spawning is disabled in the Pi Mac host'); } } as typeof import('node-pty'));",
+      "count": 1
+    }
+  ],
+  "apps/server/src/environment/ServerEnvironment.ts": [
+    {
+      "oldText": "import * as Context from \"effect/Context\";",
+      "newText": "import * as PiNative from \"pimac:native\";\nimport * as Context from \"effect/Context\";",
+      "count": 1
+    },
+    {
+      "oldText": "capabilities: { ...descriptor.capabilities, agentActivityPublishing },",
+      "newText": "capabilities: { ...PiNative.nativeCapabilities(), agentActivityPublishing },",
+      "count": 1
+    },
+    {
+      "oldText": "        ...descriptor,\n        capabilities:",
+      "newText": "        ...descriptor,\n        label: \"Pi Mac · Tunnel\",\n        capabilities:",
+      "count": 1
+    }
+  ],
+  "apps/server/src/orchestration/http.ts": [],
+  "apps/server/src/serverRuntimeStartup.ts": [
+    {
+      "oldText": "            const accessInfo = yield* issueHeadlessServeAccessInfo();\n            yield* runStartupPhase(\n              \"headless.output\",\n              Console.log(formatHeadlessServeOutput(accessInfo)),\n            );",
+      "newText": "            // Pi Mac supervises readiness privately; do not mint or print CLI administration credentials.\n            yield* Effect.void;",
+      "count": 1
+    }
+  ],
+  "apps/server/src/server.ts": [
+    {
+      "oldText": "import * as NodeHttp from \"node:http\";",
+      "newText": "import * as NodeHttp from \"node:http\";\nimport * as PiNative from \"pimac:native.mjs\";\nimport { NativeManagementLayer, NativeHttpPolicy, oauthAwareCommandReadiness } from \"pimac:management.mjs\";",
+      "count": 1
+    },
+    {
+      "oldText": "const ProviderInstallationRefreshLive = Layer.effectDiscard(\n  Effect.gen(function* () {\n    const antigravity = yield* AntigravityInstallation;\n    const codex = yield* CodexInstallation;\n    const instances = yield* ProviderInstanceRegistry;\n    const providers = yield* ProviderRegistry;\n    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(\n      Stream.runForEach((state) =>\n        instances.listInstances.pipe(\n          Effect.flatMap((entries) =>\n            Effect.forEach(\n              entries.filter((instance) => instance.driverKind === state.driver),\n              (instance) => providers.refreshInstance(instance.instanceId),\n              { discard: true },\n            ),\n          ),\n        ),\n      ),\n      Effect.forkScoped,\n    );\n  }),\n);\n",
+      "newText": "const ProviderInstallationRefreshLive = Layer.empty;\n",
+      "count": 1
+    },
+    {
+      "oldText": "  Layer.provide(httpCompressionLayer),",
+      "newText": "  Layer.provide(httpCompressionLayer),\n  Layer.provide(NativeHttpPolicy),",
+      "count": 1
+    },
+    {
+      "oldText": "const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(",
+      "newText": "const NativeRuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(",
+      "count": 1
+    },
+    {
+      "oldText": "const commandReadinessLayer = HttpRouter.middleware(\n  (httpEffect) =>\n    Effect.flatMap(ServerRuntimeStartup.ServerRuntimeStartup, (startup) =>\n      startup.awaitCommandReady.pipe(Effect.orDie, Effect.andThen(httpEffect)),\n    ),",
+      "newText": "const RuntimeDependenciesLive = NativeManagementLayer.pipe(Layer.provideMerge(NativeRuntimeDependenciesLive));\n\nconst commandReadinessLayer = HttpRouter.middleware(\n  (httpEffect) => oauthAwareCommandReadiness(httpEffect,\n    Effect.flatMap(ServerRuntimeStartup.ServerRuntimeStartup, (startup) =>\n      startup.awaitCommandReady.pipe(Effect.orDie),\n    )),",
+      "count": 1
+    }
+  ],
+  "apps/server/src/provider/builtInDrivers.ts": [
+    {
+      "oldText": "/**\n * BUILT_IN_DRIVERS \u2014 the static set of `ProviderDriver`s this build ships\n * with.\n *\n * Every driver that the server knows how to instantiate from settings is\n * listed here. The `ProviderInstanceRegistry` iterates this array when\n * resolving `providerInstances` entries; anything not in the array surfaces\n * as an `\"unavailable\"` shadow snapshot at runtime (see\n * `buildUnavailableProviderSnapshot`).\n *\n * Adding a new first-party driver means:\n *   1. implement `ProviderDriver` in a sibling `Drivers/<Name>Driver.ts`,\n *   2. add it to this array,\n *   3. ensure the runtime layer satisfies its declared `R`.\n *\n * The aggregated `BuiltInDriversEnv` type is the union of every driver's\n * env requirement \u2014 the registry layer's `R` is this type, and the runtime\n * layer (ChildProcessSpawner, FileSystem, Path, ServerConfig,\n * OpenCodeRuntime, \u2026) must satisfy it.\n *\n * @module provider/builtInDrivers\n */\nimport { ClaudeDriver, type ClaudeDriverEnv } from \"./Drivers/ClaudeDriver.ts\";\nimport { CodexDriver, type CodexDriverEnv } from \"./Drivers/CodexDriver.ts\";\nimport { CursorDriver, type CursorDriverEnv } from \"./Drivers/CursorDriver.ts\";\nimport { GrokDriver, type GrokDriverEnv } from \"./Drivers/GrokDriver.ts\";\nimport { OpenCodeDriver, type OpenCodeDriverEnv } from \"./Drivers/OpenCodeDriver.ts\";\nimport { AntigravityDriver, type AntigravityDriverEnv } from \"./Drivers/AntigravityDriver.ts\";\nimport type { AnyProviderDriver } from \"./ProviderDriver.ts\";\n\n/**\n * Union of infrastructure services required to construct any built-in\n * driver. The registry layer declares `R = BuiltInDriversEnv`; the runtime\n * layer must provide every service in this union.\n */\nexport type BuiltInDriversEnv =\n  | ClaudeDriverEnv\n  | CodexDriverEnv\n  | CursorDriverEnv\n  | GrokDriverEnv\n  | OpenCodeDriverEnv\n  | AntigravityDriverEnv;\n\n/**\n * Ordered list of built-in drivers. Order matters only for tie-breaking in\n * UI presentation \u2014 the registry itself is keyed by `driverKind`, so\n * iteration order has no functional effect on instance lookup.\n */\nexport const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [\n  CodexDriver,\n  ClaudeDriver,\n  CursorDriver,\n  GrokDriver,\n  OpenCodeDriver,\n  AntigravityDriver,\n];\n",
+      "newText": "import { PiDriver } from \"pimac:native.mjs\";\nexport type BuiltInDriversEnv = never;\nexport const BUILT_IN_DRIVERS = [PiDriver];\n",
+      "count": 1
+    }
+  ],
+  "apps/server/src/ws.ts": [
+    {
+      "oldText": "import {\n  sameUsageLimitCommandCoverage,",
+      "newText": "import * as PiNative from \"pimac:native.mjs\";\nimport {\n  sameUsageLimitCommandCoverage,",
+      "count": 1
+    },
+    {
+      "oldText": "authorizeEffect(requiredScopeForRpcMethod(method), effect),",
+      "newText": "PiNative.rpcAllowed(method) ? authorizeEffect(requiredScopeForRpcMethod(method), effect) : Effect.fail(authorizationError(requiredScopeForRpcMethod(method))),",
+      "count": 2
+    },
+    {
+      "oldText": "authorizeStream(requiredScopeForRpcMethod(method), stream),",
+      "newText": "PiNative.rpcAllowed(method) ? authorizeStream(requiredScopeForRpcMethod(method), stream) : Stream.fail(authorizationError(requiredScopeForRpcMethod(method))),",
+      "count": 1
+    }
+  ],
+  "apps/server/src/auth/EnvironmentAuthPolicy.ts": [
+    {
+      "oldText": "const isRemoteReachable = isRemoteReachableHost(config.host);",
+      "newText": "const isRemoteReachable = true; // Loopback listener is exposed through authorized LAN/tunnel transports.",
+      "count": 1
+    }
+  ],
+  "apps/server/src/process/externalLauncher.ts": [
+    {
+      "oldText": "import {\n  EDITORS,",
+      "newText": "import * as PiNative from \"pimac:native.mjs\";\nimport {\n  EDITORS,",
+      "count": 1
+    },
+    {
+      "oldText": "      launchBrowser(target).pipe(",
+      "newText": "      Effect.sync(() => PiNative.browserAuthorization(target)).pipe(",
+      "count": 1
+    }
+  ],
+  "apps/server/src/relay/AgentAwarenessRelay.ts": [
+    {
+      "oldText": "import * as Context from \"effect/Context\";",
+      "newText": "import * as Context from \"effect/Context\";\nimport * as PiNative from \"pimac:native.mjs\";",
+      "count": 1
+    },
+    {
+      "oldText": "        yield* Effect.logInfo(\"agent activity publish completed\", {",
+      "newText": "        PiNative.recordPublish(response);\n        yield* Effect.logInfo(\"agent activity publish completed\", {",
+      "count": 1
+    }
+  ],
+  "apps/server/src/cloud/CliTokenManager.ts": [
+    {
+      "oldText": "      const terminalInput = yield* input.terminal.readInput;",
+      "newText": "      yield* input.launchBrowser(input.authorizationUrl);\n      return yield* input.callback.pipe(Effect.map(code => ({ _tag: \"AuthorizationCode\", code } as const)));\n      const terminalInput = yield* input.terminal.readInput;",
+      "count": 1
+    }
+  ]
+}

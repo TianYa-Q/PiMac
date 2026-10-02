@@ -49,18 +49,6 @@ struct T3ConnectionModelsTests {
     #expect(pairing.expiry != nil)
   }
 
-  @Test func readDiagnosticsSeparateDeliveryFromPairingAndDecodeWithoutCredentials() throws {
-    let data = Data(
-      #"{"shellHttpRequests":1,"shellHttpStatus":200,"catalogReads":2,"catalogFailures":0,"shellSubscriptions":1,"shellSnapshots":1,"shellCompletionMarkers":1,"lastRPC":"orchestration.subscribeShell","lastFailure":"none"}"#
-        .utf8)
-    let diagnostics = try JSONDecoder().decode(T3ReadDiagnostics.self, from: data)
-    #expect(diagnostics.shellHttpStatus == 200)
-    #expect(diagnostics.shellCompletionMarkers == 1)
-    #expect(diagnostics.summary.contains("HTTP 列表请求：1"))
-    #expect(diagnostics.summary.contains("列表订阅：1"))
-    #expect(diagnostics.summary.contains("orchestration.subscribeShell"))
-  }
-
   @Test func confirmedNetworkPreferenceSurvivesShutdownButNotExplicitDisable() throws {
     let suite = "pimac-t3-preferences-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
@@ -113,6 +101,5 @@ struct T3ConnectionModelsTests {
     #expect(service.connectionURL == nil)
     service.stop()
     #expect(service.clients.isEmpty)
-    #expect(service.readDiagnostics == nil)
   }
 }

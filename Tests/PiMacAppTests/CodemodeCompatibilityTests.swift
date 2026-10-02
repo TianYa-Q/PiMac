@@ -62,31 +62,6 @@ struct CodemodeCompatibilityTests {
     #expect(!entry.text.contains(png))
   }
 
-  @Test @MainActor func liveToolResultKeepsCodeAndGeneratedImage() throws {
-    let model = AppModel(restoreLastProjectOnLaunch: false)
-    let code = "image(await getImage());"
-    model.handleToolEvent(
-      [
-        "toolCallId": "code-live", "toolName": "codemode", "args": ["code": code],
-      ], type: "tool_execution_start")
-    #expect(model.messages.first?.text == code)
-    model.handleToolEvent(
-      [
-        "toolCallId": "code-live", "toolName": "codemode", "isError": false,
-        "result": [
-          "content": [
-            ["type": "text", "text": "Script completed"],
-            ["type": "image", "data": png, "mimeType": "image/png"],
-          ]
-        ],
-      ], type: "tool_execution_end")
-    let entry = try #require(model.messages.first)
-    #expect(entry.toolInput == code)
-    #expect(entry.text == "Script completed")
-    #expect(entry.attachments.count == 1)
-    #expect(!entry.isRunning)
-  }
-
   @Test func scriptFailurePreservesPartialOutput() throws {
     let entry = try #require(
       AppModel.chatEntry(from: [

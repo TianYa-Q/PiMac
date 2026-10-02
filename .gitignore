@@ -3,3 +3,12 @@ dist/
 .DS_Store
 .swiftpm/
 sidecars/*/node_modules/
+
+# Rehydrated, hash-pinned T3 Server sources and generated test fixtures.
+# Keep adapters, patches, upstream-pin.json, lockfiles and license notices.
+/sidecars/t3-server/upstream/
+/sidecars/t3-server/.upstream-*/
+/sidecars/t3-server/generated/
+
+# Built before packaging; do not commit the bundled upstream server.
+/Sources/PiMacApp/Resources/t3-bridge/vendor/t3-server.mjs

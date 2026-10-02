@@ -76,6 +76,8 @@ struct QueuedPrompt: Identifiable, Sendable {
   let delivery: QueuedPromptDelivery
   let attachments: [PromptAttachment]
   var waitsForCompaction = false
+  var remoteMessageID: String? = nil
+  var remoteMessageDate: Date? = nil
 }
 
 struct PromptAttachment: Identifiable, Hashable, Sendable {
@@ -126,13 +128,14 @@ struct PiModel: Identifiable, Hashable {
   }
 }
 
-struct SessionStats {
+struct SessionStats: Codable {
   let cost: Double
   let contextPercent: Double?
   let totalTokens: Int
   let inputTokens: Int
   let cacheReadTokens: Int
   let cacheWriteTokens: Int
+  var outputTokensPerSecond: Double? = nil
 
   var cacheHitPercent: Double? {
     let promptTokens = inputTokens + cacheReadTokens + cacheWriteTokens

@@ -39,6 +39,14 @@ jobs:
           fi
           echo "APP_VERSION=${RELEASE_TAG#v}" >> "$GITHUB_ENV"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Prepare T3 Server resources
+        run: ./scripts/prepare-t3-server.sh
+
       - name: Test
         run: swift test
 

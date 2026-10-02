@@ -182,6 +182,7 @@ struct ContentView: View {
   @State private var choosingSession = false
   @State private var choosingAttachments = false
   @State private var showingSettings = false
+  @State private var showingLegacyHistory = false
   @State private var showingModelSettings = false
   @State private var selectedPage: MainPage = .conversation
   @State private var previewedAttachment: PromptAttachment?
@@ -242,6 +243,9 @@ struct ContentView: View {
       allowsMultipleSelection: true
     ) { result in
       if case .success(let urls) = result { addAttachmentsAtSelection(urls) }
+    }
+    .sheet(isPresented: $showingLegacyHistory) {
+      if let projectURL = app.projectURL { LegacyHistoryView(projectURL: projectURL) }
     }
     .sheet(isPresented: $showingSettings) {
       SettingsView(
@@ -442,6 +446,11 @@ struct ContentView: View {
           .help("在当前项目新建聊天")
           .padding(.top, 8)
           .padding(.bottom, 10)
+
+          Button("查看旧版历史", systemImage: "clock.arrow.circlepath") {
+            showingLegacyHistory = true
+          }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+            .padding(.bottom, 6)
 
           HStack {
             Text("会话")
@@ -1176,25 +1185,12 @@ struct ContentView: View {
           && app.attachments.isEmpty
         if app.isStreaming {
           Button {
-            sendPromptFollowingOutput(delivery: .steer)
-          } label: {
-            Label("工具后", systemImage: "arrow.turn.down.right")
-              .font(.caption)
-          }
-          .buttonStyle(.borderedProminent)
-          .disabled(promptIsEmpty || !app.clientConnected)
-          .help("当前工具调用阶段结束后插入（Return）")
-
-          Button {
             sendPromptFollowingOutput(delivery: .followUp)
           } label: {
-            Label("完成后", systemImage: "clock")
-              .font(.caption)
-          }
-          .buttonStyle(.bordered)
-          .disabled(promptIsEmpty || !app.clientConnected)
-          .help("当前任务全部完成后继续（⌥ Return）")
-
+            Label("排队发送", systemImage: "clock")
+          }.buttonStyle(.bordered)
+            .disabled(promptIsEmpty || !app.canSubmitPrompt)
+            .help("当前任务结束后发送；不是即时 steering")
           stopButton
         } else if app.isCompacting {
           Button {
@@ -1235,9 +1231,16 @@ struct ContentView: View {
           sessionMetrics
         }
         .frame(height: 18)
+        if !workspace.developmentReloadStatus.isEmpty {
+          Text(workspace.developmentReloadStatus)
+            .font(.caption).foregroundStyle(.orange).lineLimit(1)
+            .help(workspace.developmentReloadStatus)
+        }
         if !app.statusText.isEmpty {
-          ProgressView().controlSize(.small)
-            .frame(width: 18, height: 18)
+          if app.showsStatusProgress {
+            ProgressView().controlSize(.small)
+              .frame(width: 18, height: 18)
+          }
           Text(app.statusText)
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -2169,7 +2172,6 @@ private struct ActivityEntryView: View {
     if !entry.attachments.isEmpty { return true }
     if entry.toolName == "codemode", entry.toolInput?.isEmpty == false { return true }
     if !entry.nestedCalls.isEmpty || !entry.nestedCallsComplete { return true }
-    guard entry.toolName != "read" else { return false }
     return entry.diff?.isEmpty == false || !entry.text.isEmpty
   }
 
@@ -2490,8 +2492,8 @@ private struct CodexAccountsView: View {
             Image(systemName: "arrow.clockwise")
           }
           .buttonStyle(.plain)
-          .help("刷新额度")
-          .disabled(!app.canManageAccounts)
+          .help("读取 Server 最新缓存额度（扩展自动刷新）")
+          .disabled(!app.isProcessRunning)
           Button("管理") { app.openCodexAccountManager() }
             .buttonStyle(.plain)
             .font(.caption)
@@ -2508,18 +2510,17 @@ private struct CodexAccountsView: View {
         if AccountUsageProvider(modelID: app.selectedModelId) == .chatGPT,
           !app.supportsAccountSwitch
         {
-          Text("新版 OpenAI 账户管理需要支持 v2 协议的 account-usage 扩展。")
+          Text("额度由 Server 内的 account-usage 扩展自动刷新；账户切换尚未接入。")
             .font(.caption2).foregroundStyle(.secondary)
         }
         if isExpanded {
           expandedAccounts
-          if let updatedAt = extensionUI.codexAccountsUpdatedAt {
-            Text("更新于 \(updatedAt, style: .relative)")
-              .font(.caption2)
-              .foregroundStyle(.tertiary)
-          }
         } else {
           currentAccount
+        }
+        if let updatedAt = extensionUI.codexAccountsUpdatedAt {
+          Text("额度缓存 · 更新于 \(updatedAt, style: .relative)")
+            .font(.caption2).foregroundStyle(.secondary)
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -2549,7 +2550,8 @@ private struct CodexAccountsView: View {
   private var currentAccount: some View {
     if let gemini = extensionUI.geminiUsage, gemini.isConfigured, gemini.isActive {
       geminiRow(gemini)
-    } else if let account = extensionUI.codexAccounts.first(where: \.isActive) {
+    } else if let account = extensionUI.codexAccounts.first(where: \.isActive)
+      ?? extensionUI.codexAccounts.first(where: \.isDefault) {
       accountRow(account)
     } else {
       emptyStatus
@@ -2964,7 +2966,15 @@ private struct SettingsView: View {
   @Environment(\.dismiss) private var dismiss
   @State private var path: String
   @State private var editingPath = false
+  @State private var selectedTab: SettingsTab = .runtime
   @StateObject private var versions: VersionManagerModel
+
+  private enum SettingsTab: String, CaseIterable {
+    case runtime = "运行环境"
+    case mobile = "手机连接"
+    case telegram = "Telegram"
+    case updates = "版本与扩展"
+  }
   let projectURL: URL?
   let telegram: TelegramControl
   let workspace: WorkspaceModel
@@ -2986,7 +2996,11 @@ private struct SettingsView: View {
   var body: some View {
     VStack(spacing: 0) {
       HStack {
-        Text("设置").font(.title2.bold())
+        VStack(alignment: .leading, spacing: 4) {
+          Text("设置").font(.title2.bold())
+          Text("管理运行环境、手机连接与扩展更新")
+            .font(.caption).foregroundStyle(.secondary)
+        }
         Spacer()
         Button("完成") {
           save(path)
@@ -2998,117 +3012,139 @@ private struct SettingsView: View {
 
       Divider()
 
+      Picker("设置分类", selection: $selectedTab) {
+        ForEach(SettingsTab.allCases, id: \.self) { tab in
+          Text(tab.rawValue).tag(tab)
+        }
+      }
+      .pickerStyle(.segmented)
+      .padding(.horizontal, 20)
+      .padding(.top, 16)
+
       ScrollView {
-        VStack(alignment: .leading, spacing: 22) {
-          GroupBox("Pi 可执行文件") {
-            VStack(alignment: .leading, spacing: 8) {
-              HStack(spacing: 8) {
-                if editingPath {
-                  TextField("/path/to/pi", text: $path)
-                    .textFieldStyle(.roundedBorder)
-                } else {
-                  Text(path)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
-                    .padding(.horizontal, 8)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 6))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                }
-                Button(editingPath ? "完成编辑" : "编辑路径") { editingPath.toggle() }
-              }
-              Text("如需修改，点击“编辑路径”；保存后重新打开设置即可检查对应的 Pi。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 4)
-          }
-
-          T3SettingsView(service: workspace.t3Bridge, workspace: workspace)
-          TelegramSettingsView(control: telegram)
-
-          GroupBox("Pi 版本") {
-            HStack(spacing: 12) {
-              versionIcon(hasUpdate: versions.piHasUpdate)
-              VStack(alignment: .leading, spacing: 3) {
-                Text("Pi coding agent").font(.headline)
-                Text(versionDescription)
-                  .font(.caption)
-                  .foregroundStyle(versions.piHasUpdate ? Color.orange : Color.secondary)
-              }
-              Spacer()
-              if versions.updatingID == "pi" {
-                ProgressView().controlSize(.small)
-              } else if versions.piHasUpdate {
-                Button("更新到 \(versions.piLatestVersion ?? "最新版")") {
-                  versions.updatePi()
-                }
-                .buttonStyle(.borderedProminent)
-              }
-            }
-            .padding(.vertical, 5)
-          }
-
-          GroupBox("扩展包版本") {
-            VStack(alignment: .leading, spacing: 0) {
-              if versions.extensions.isEmpty, versions.isChecking {
+        VStack(alignment: .leading, spacing: 18) {
+          if selectedTab == .runtime {
+            GroupBox("Pi 可执行文件") {
+              VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
-                  ProgressView().controlSize(.small)
-                  Text("正在读取扩展包并检查版本…")
+                  if editingPath {
+                    TextField("/path/to/pi", text: $path)
+                      .textFieldStyle(.roundedBorder)
+                  } else {
+                    Text(path)
+                      .lineLimit(1)
+                      .truncationMode(.middle)
+                      .textSelection(.enabled)
+                      .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+                      .padding(.horizontal, 8)
+                      .background(.background, in: RoundedRectangle(cornerRadius: 6))
+                      .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                  }
+                  Button(editingPath ? "完成编辑" : "编辑路径") { editingPath.toggle() }
                 }
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 12)
-              } else if versions.extensions.isEmpty {
-                Text("没有通过 Pi 包管理器安装的扩展包。")
+                Text("修改后保存并重新打开设置，即可检查对应的 Pi。")
+                  .font(.caption)
+                  .foregroundStyle(.secondary)
+              }
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .padding(.vertical, 4)
+            }
+
+          }
+
+          if selectedTab == .mobile {
+            T3SettingsView(service: workspace.t3Bridge, workspace: workspace)
+          }
+          if selectedTab == .telegram {
+            TelegramSettingsView(control: telegram)
+          }
+
+          if selectedTab == .updates {
+            GroupBox("Pi 版本") {
+              HStack(spacing: 12) {
+                versionIcon(hasUpdate: versions.piHasUpdate)
+                VStack(alignment: .leading, spacing: 3) {
+                  Text("Pi coding agent").font(.headline)
+                  Text(versionDescription)
+                    .font(.caption)
+                    .foregroundStyle(versions.piHasUpdate ? Color.orange : Color.secondary)
+                }
+                Spacer()
+                if versions.updatingID == "pi" {
+                  ProgressView().controlSize(.small)
+                } else if versions.piHasUpdate {
+                  Button("更新到 \(versions.piLatestVersion ?? "最新版")") {
+                    versions.updatePi()
+                  }
+                  .buttonStyle(.borderedProminent)
+                }
+              }
+              .padding(.vertical, 5)
+            }
+
+            GroupBox("扩展包版本") {
+              VStack(alignment: .leading, spacing: 0) {
+                if versions.extensions.isEmpty, versions.isChecking {
+                  HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在读取扩展包并检查版本…")
+                  }
                   .foregroundStyle(.secondary)
                   .padding(.vertical, 12)
-              } else {
-                ForEach(Array(versions.extensions.enumerated()), id: \.element.id) { index, item in
-                  extensionRow(item)
-                  if index < versions.extensions.count - 1 { Divider() }
+                } else if versions.extensions.isEmpty {
+                  Text("没有通过 Pi 包管理器安装的扩展包。")
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 12)
+                } else {
+                  ForEach(Array(versions.extensions.enumerated()), id: \.element.id) { index, item in
+                    extensionRow(item)
+                    if index < versions.extensions.count - 1 { Divider() }
+                  }
                 }
               }
+              .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-          }
 
-          if !versions.message.isEmpty {
-            Text(versions.message)
-              .font(.caption.monospaced())
-              .foregroundStyle(.secondary)
-              .textSelection(.enabled)
-              .lineLimit(8)
+            if !versions.message.isEmpty {
+              Text(versions.message)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(8)
+            }
           }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(20)
       }
+      .id(selectedTab)
 
-      Divider()
-      HStack {
-        Text("更新扩展后，需要重新打开会话才能载入新代码。")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-        Spacer()
-        if versions.extensionUpdateCount > 0 {
-          Button("更新全部扩展（\(versions.extensionUpdateCount)）") {
-            versions.updateAllExtensions()
+      if selectedTab == .updates {
+        Divider()
+        HStack {
+          Text("更新扩展后，需要重新打开会话才能载入新代码。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Spacer()
+          if versions.extensionUpdateCount > 0 {
+            Button("更新全部扩展（\(versions.extensionUpdateCount)）") {
+              versions.updateAllExtensions()
+            }
+            .disabled(versions.updatingID != nil || versions.isChecking)
           }
-          .disabled(versions.updatingID != nil || versions.isChecking)
-        }
-        Button {
-          versions.refresh()
-        } label: {
-          if versions.isChecking {
-            ProgressView().controlSize(.small)
-          } else {
-            Label("检查更新", systemImage: "arrow.clockwise")
+          Button {
+            versions.refresh()
+          } label: {
+            if versions.isChecking {
+              ProgressView().controlSize(.small)
+            } else {
+              Label("检查更新", systemImage: "arrow.clockwise")
+            }
           }
+          .disabled(versions.isChecking || versions.updatingID != nil)
         }
-        .disabled(versions.isChecking || versions.updatingID != nil)
+        .padding(16)
       }
-      .padding(16)
     }
     .frame(width: 650, height: 620)
     .onAppear { versions.refresh() }

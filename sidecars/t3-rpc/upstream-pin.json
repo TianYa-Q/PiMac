@@ -3,6 +3,7 @@
   "commit": "a97a4a9d189f145afe79c3a6f8533bbf9a6b40b1",
   "effect": "4.0.0-rc.115",
   "files": {
+    "relay.ts": "76fb91f27e0649bae6ea4fe0b2b3e0eac4fbffc844d7dcc747d5c3759dea2d6f",
     "baseSchemas.ts": "25eb73528c2833f97483430b08fbb9ba85fc80147c97f8aa4e8064125f1f156b",
     "composerContext.ts": "ad0b4963b6dd09d64f745fb2127bfe75a43d59f87a1b0e77c56524a76a839cb0",
     "environment.ts": "c234e321797907abdf6049404c6f582859400db63bc15129079464ea20261e1b",
