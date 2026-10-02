@@ -6,7 +6,10 @@ export function originAllowed(method, url, headers) {
       headers.upgrade?.toLowerCase() !== 'websocket') return false;
   try {
     const origin = new URL(headers.origin);
-    const endpoint = new URL(`http://${headers.host}`);
+    // Cloudflare terminates TLS and forwards the original scheme to the
+    // loopback listener. LAN strips forwarding headers in server-gateway.
+    const protocol = headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    const endpoint = new URL(`${protocol}://${headers.host}`);
     return origin.origin === endpoint.origin && origin.pathname === '/' &&
       !origin.search && !origin.hash && !origin.username && !origin.password;
   } catch { return false; }

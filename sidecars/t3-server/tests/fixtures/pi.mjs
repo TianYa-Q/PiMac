@@ -17,7 +17,7 @@ process.stdin.on('data', chunk => {
   buffer += decoder.write(chunk); let end;
   while ((end = buffer.indexOf('\n')) !== -1) {
     const command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
-    if (file) fs.appendFileSync(file, JSON.stringify({ command: command.type, message: command.message, sessionId,
+    if (file) fs.appendFileSync(file, JSON.stringify({ command: command.type, message: command.message, streamingBehavior: command.streamingBehavior, sessionId,
       secretInherited: !!process.env.PIMAC_T3_BRIDGE_TOKEN }) + '\n', { mode: 0o600 });
     const response = data => send({ id: command.id, type: 'response', command: command.type, success: true, ...(data ? { data } : {}) });
     switch (command.type) {
@@ -32,6 +32,10 @@ process.stdin.on('data', chunk => {
       case 'abort':
         clearTimeout(completion); running = false; send({ type: 'agent_settled' }); response(); break;
       case 'prompt': {
+        if (running && command.streamingBehavior === 'steer') {
+          response({ disposition: 'queued' });
+          break;
+        }
         if (command.message === 'exit') { process.exit(3); }
         if (command.message === 'no-response') break;
         response({ disposition: command.message === '/handled' ? 'handled' : 'started' });
@@ -41,7 +45,12 @@ process.stdin.on('data', chunk => {
         if (command.message === 'tools') {
           send({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'fixture.txt' } });
           send({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'read', partialResult: { content: [{ type: 'text', text: 'partial' }] } });
-          send({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'read', result: { content: [{ type: 'text', text: 'done' }] }, isError: false });
+          send({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'read', result: { content: [{ type: 'text', text: 'done\nsecond line\nthird line' }] }, isError: false });
+          send({ type: 'tool_execution_start', toolCallId: 'code-1', toolName: 'codemode', args: { code: 'const value = 1;\ntext(value);' } });
+          send({ type: 'tool_execution_end', toolCallId: 'code-1', toolName: 'codemode', result: {
+            content: [{ type: 'text', text: 'Script completed\nOutput:\n1' }],
+            nestedCalls: { complete: true, calls: [{ id: 'nested-1', name: 'read', arguments: { path: 'nested.txt' }, status: 'success' }] }
+          }, isError: false });
         }
         send({ type: 'message_start', message: { role: 'assistant', content: [] } });
         const text = 'Reply: ' + command.message;

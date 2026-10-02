@@ -99,8 +99,10 @@ export const ServerOwnedPiDriver = {
           ? result.content.filter(block => block.type === 'text').map(block => block.text).join('\n') : result?.content;
         publish(session, type, { itemType: 'dynamic_tool_call', title: event.toolName,
           status: event.type === 'tool_execution_end' ? (event.isError ? 'failed' : 'completed') : 'inProgress',
-          data: { toolName: event.toolName, toolCallId: event.toolCallId, input: event.args,
+          data: { piTool: true, toolName: event.toolName, toolCallId: event.toolCallId, input: event.args,
             rawOutput: result ? { content } : undefined,
+            ...(result?.nestedCalls ? { nestedCalls: result.nestedCalls } : {}),
+            ...(result?.details?.diff ? { diff: result.details.diff } : {}),
             ...(event.args?.command ? { command: event.args.command } : {}) } }, { itemId: event.toolCallId });
       } else if (event.type === 'auto_retry_end' && event.success === false) {
         session.failure = 'Pi retries exhausted.';
@@ -194,7 +196,7 @@ export const ServerOwnedPiDriver = {
     });
     const sendTurn = input => attempt('sendTurn', async () => {
       const session = requireSession(input.threadId);
-      if (session.sending || session.turnId) throw validation('sendTurn', 'Pi is already executing a turn.');
+      if (session.sending) throw validation('sendTurn', 'Pi is already submitting a prompt.');
       if (input.continuation || !input.input?.trim()) throw validation('sendTurn', 'An explicit text prompt is required.');
       const attachments = input.attachments ?? [];
       if (attachments.length > 8 || attachments.reduce((total, item) => total + item.sizeBytes, 0) > 8 * 1024 * 1024)
@@ -215,6 +217,14 @@ export const ServerOwnedPiDriver = {
       if (input.interactionMode && input.interactionMode !== 'default') throw validation('sendTurn', 'Plan mode is not supported by Pi.');
       session.sending = true;
       try {
+        // Native T3 sends another turn request to steer a running provider.
+        // Preserve its identity and metrics; Pi owns delivery at the tool boundary.
+        if (session.turnId) {
+          const turnId = session.turnId;
+          await session.rpc.request({ type: 'prompt', message: input.input, streamingBehavior: 'steer',
+            ...(images.length ? { images } : {}) });
+          return { threadId: input.threadId, turnId, resumeCursor: session.info.resumeCursor };
+        }
         await selectModel(session, input.modelSelection);
         session.outputSpeed.reset();
         session.turnId = randomUUID(); const turnId = session.turnId;

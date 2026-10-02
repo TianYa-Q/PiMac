@@ -1185,12 +1185,19 @@ struct ContentView: View {
           && app.attachments.isEmpty
         if app.isStreaming {
           Button {
+            sendPromptFollowingOutput(delivery: .steer)
+          } label: {
+            Label("工具后插入", systemImage: "arrow.turn.down.right")
+          }.buttonStyle(.borderedProminent)
+            .disabled(promptIsEmpty || !app.canSubmitPrompt)
+            .help("当前轮工具调用完成后、下一次模型请求前插入（Enter）")
+          Button {
             sendPromptFollowingOutput(delivery: .followUp)
           } label: {
             Label("排队发送", systemImage: "clock")
           }.buttonStyle(.bordered)
             .disabled(promptIsEmpty || !app.canSubmitPrompt)
-            .help("当前任务结束后发送；不是即时 steering")
+            .help("当前任务结束后发送（Option+Enter）")
           stopButton
         } else if app.isCompacting {
           Button {
@@ -2024,13 +2031,25 @@ private struct ActivityEntryView: View {
                   }
                 }
                 if entry.kind == .tool, let toolInput = entry.toolInput, !toolInput.isEmpty {
-                  Text(toolInput)
-                    .font(.system(.caption, design: .monospaced))
-                    .lineLimit(entry.toolName == "codemode" ? 3 : nil)
-                    .foregroundStyle(.primary.opacity(0.88))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                  if entry.toolName == "read" {
+                    ReadToolInputView(input: toolInput)
+                  } else if entry.toolName == "codemode" {
+                    HStack(spacing: 6) {
+                      Text("JavaScript · \(toolInput.components(separatedBy: "\n").count) 行")
+                      if !entry.nestedCalls.isEmpty {
+                        Text("· \(entry.nestedCalls.count) 次嵌套调用")
+                      }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                  } else {
+                    Text(toolInput)
+                      .font(.system(.caption, design: .monospaced))
+                      .lineLimit(3)
+                      .foregroundStyle(.primary.opacity(0.88))
+                      .fixedSize(horizontal: false, vertical: true)
+                      .frame(maxWidth: .infinity, alignment: .leading)
+                  }
                 }
               }
               Spacer(minLength: 8)
@@ -2047,12 +2066,9 @@ private struct ActivityEntryView: View {
 
           if expanded && hasVisibleDetails {
             if entry.toolName == "codemode", let code = entry.toolInput,
-              !code.isEmpty, code != entry.text
+              !code.isEmpty
             {
-              Text(code)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+              ToolDetailView(title: "脚本 · JavaScript", text: code)
                 .padding(.leading, 31)
             }
             activityContent
@@ -2072,7 +2088,13 @@ private struct ActivityEntryView: View {
                     Text("\(Int(duration)) ms").foregroundStyle(.secondary)
                   }
                 }
-                if let input = call.input { Text(input).textSelection(.enabled) }
+                if let input = call.input {
+                  if call.name == "read" {
+                    ReadToolInputView(input: input)
+                  } else {
+                    Text(input).lineLimit(3).textSelection(.enabled).help(input)
+                  }
+                }
                 if let error = call.error {
                   Text(error).foregroundStyle(.red).textSelection(.enabled)
                 }
@@ -2187,21 +2209,24 @@ private struct ActivityEntryView: View {
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
     } else if !entry.text.isEmpty {
-      ToolOutputView(text: entry.text)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.46))
-        .clipShape(RoundedRectangle(cornerRadius: 7))
-        .overlay {
-          RoundedRectangle(cornerRadius: 7)
-            .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
-        }
+      ToolDetailView(
+        title: entry.isError ? "错误输出" : (entry.toolName == "read" ? "文件内容" : "输出"),
+        text: entry.text
+      )
     }
   }
 
   private var activityIcon: String {
     switch entry.kind {
     case .thinking: "brain.head.profile"
-    case .tool: entry.toolName == "codemode" ? "curlybraces" : "wrench.and.screwdriver"
+    case .tool:
+      switch entry.toolName {
+      case "codemode": "curlybraces"
+      case "read": "doc.text"
+      case "bash": "terminal"
+      case "edit", "write": "square.and.pencil"
+      default: "wrench.and.screwdriver"
+      }
     case .assistant: "sparkles"
     case .user: "person.crop.circle"
     case .compaction: "arrow.down.right.and.arrow.up.left"

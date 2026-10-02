@@ -35,7 +35,7 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('Unsafe T3 Server directory');
   checkPrivateTree(directory, path.join(directory, 'tools'));
-  const broker = configureNative({ environmentId });
+  const broker = configureNative({ environmentId, directory });
   configureAccountStatuses(directory);
   broker.controlToken = randomBytes(32).toString('hex');
   const configLayer = Layer.effect(ServerConfig, Effect.gen(function* () {

@@ -233,7 +233,7 @@ final class AppModel: ObservableObject {
     guard canSubmitPrompt,
       let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
     else { return }
-    if isStreaming {
+    if isStreaming && delivery == .followUp {
       guard queuedPrompts.count < 100 else {
         statusText = "等待队列已满，请等待任务完成。"
         return
@@ -241,7 +241,7 @@ final class AppModel: ObservableObject {
       queuedPrompts.append(prompt)
       composerText = ""
       attachments = []
-      statusText = "已排队，当前任务完成后发送（不是即时 steering）。"
+      statusText = "已排队，当前任务完成后发送。"
       return
     }
     submit(prompt) { [weak self] accepted in
@@ -283,7 +283,8 @@ final class AppModel: ObservableObject {
       return
     }
     submitting = true
-    awaitingAgentStart = true
+    let isSteering = isStreaming && prompt.delivery == .steer
+    awaitingAgentStart = !isSteering
     submittedFromTurnID = lastTurnID
     let selection = modelSelection
     let shouldNameThread = !hasUserMessage && (sessionName.isEmpty || sessionName == "新任务")
@@ -311,7 +312,7 @@ final class AppModel: ObservableObject {
           ],
         ])
         completion(true)
-        self.statusText = "已提交到 T3 Server"
+        self.statusText = isSteering ? "已提交插入消息，当前工具调用结束后处理。" : "已提交到 T3 Server"
         if shouldNameThread {
           let title = String(prompt.text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(60))
           if !title.isEmpty {
@@ -491,6 +492,9 @@ final class AppModel: ObservableObject {
             toolName: data["toolName"] as? String ?? payload["title"] as? String ?? "",
             args: data["input"]
           ) ?? (data["command"] as? String).map { "$ \($0)" },
+          nestedCalls: NestedToolCall.from(data["nestedCalls"]),
+          nestedCallsComplete: (data["nestedCalls"] as? [String: Any])?["complete"] as? Bool ?? true,
+          diff: data["diff"] as? String,
           timestamp: T3DesktopClient.date(activity["createdAt"]))
       if kind.hasPrefix("tool.") {
         entry.toolInput = entry.toolInput ?? toolEntries[entryID]?.toolInput

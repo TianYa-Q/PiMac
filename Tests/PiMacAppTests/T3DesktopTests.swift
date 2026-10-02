@@ -91,7 +91,7 @@ struct T3DesktopTests {
   }
 
   @Test(.timeLimit(.minutes(1)))
-  func desktopUsesNativeServerAndLANDisableDoesNotStopIt() async throws {
+  func desktopUsesNativeLoopbackServerWithTunnelOnlyPhoneAccess() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -143,7 +143,14 @@ struct T3DesktopTests {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(model.messages.contains { $0.kind == .user && $0.text == "tools" })
-    #expect(model.messages.contains { $0.kind == .tool && $0.text == "done" && !$0.isRunning })
+    let read = try #require(model.messages.first { $0.toolName == "read" })
+    #expect(read.text == "done\nsecond line\nthird line")
+    #expect(read.toolInput == "fixture.txt")
+    #expect(!read.isRunning)
+    let code = try #require(model.messages.first { $0.toolName == "codemode" })
+    #expect(code.toolInput == "const value = 1;\ntext(value);")
+    #expect(code.text == "Script completed\nOutput:\n1")
+    #expect(code.nestedCalls.first?.input == "nested.txt")
     #expect(model.messages.contains { $0.kind == .assistant })
     #expect(model.lastSettledTurnID != nil)  // Also covers turns completed between polls.
     #expect(model.terminalStopReason == nil)
@@ -163,8 +170,17 @@ struct T3DesktopTests {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(model.isStreaming)
+    model.composerText = "steer-now"
+    model.sendPrompt(delivery: .steer)
+    for _ in 0..<100 where !model.composerText.isEmpty {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(model.composerText.isEmpty)
+    #expect(model.queuedPrompts.isEmpty)
+    #expect(!model.awaitingAgentStart)
+    #expect(model.isStreaming)
     model.composerText = "queued-followup"
-    model.sendPrompt()
+    model.sendPrompt(delivery: .followUp)
     #expect(model.queuedPrompts.count == 1)
     #expect(model.composerText.isEmpty)
     #expect(!model.canRestartSafely)
@@ -176,11 +192,8 @@ struct T3DesktopTests {
     let id = try #require(model.threadID)
     let detail = try await client.request("/api/orchestration/threads/\(id)")
     #expect((detail["thread"] as? [String: Any])?["id"] as? String == id)
-    let serverURL = service.serverURL
-    service.disable()
-    try await Task.sleep(for: .milliseconds(100))
-    #expect(service.serverURL == serverURL)
-    #expect(!service.isEnabled)
+    // Phone transport is Tunnel-only; the desktop retains its loopback Server.
+    #expect(service.serverURL?.host == "127.0.0.1")
     let shell = try await client.request("/api/orchestration/shell")
     #expect((shell["threads"] as? [[String: Any]])?.contains { $0["id"] as? String == id } == true)
   }

@@ -49,57 +49,20 @@ struct T3ConnectionModelsTests {
     #expect(pairing.expiry != nil)
   }
 
-  @Test func confirmedNetworkPreferenceSurvivesShutdownButNotExplicitDisable() throws {
-    let suite = "pimac-t3-preferences-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
-    #expect(T3ConnectionPreferences.load(from: defaults) == nil)
-    let endpoint = try T3NetworkEndpoint(host: "192.168.1.2", port: 3773)
-    T3ConnectionPreferences.save(endpoint, to: defaults)
-    let first = T3BridgeService(defaults: defaults)
-    #expect(first.rememberedNetwork == endpoint)
-    first.stop()  // App shutdown, not an explicit user disable.
-    let restarted = T3BridgeService(defaults: defaults)
-    #expect(restarted.rememberedNetwork == endpoint)
-    #expect(restarted.publicURL == nil)  // Preference alone is not a live listener.
-    restarted.disable()
-    #expect(T3BridgeService(defaults: defaults).rememberedNetwork == nil)
-    #expect(defaults.object(forKey: T3ConnectionPreferences.key) == nil)
-  }
-
-  @Test func uncheckingNetworkConsentClearsSavedEndpoint() throws {
+  @Test func upgradingToTunnelOnlyClearsLegacyLANConsent() throws {
     let suite = "pimac-t3-preferences-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     T3ConnectionPreferences.save(
-      try T3NetworkEndpoint(host: "10.0.0.1", port: 4321), to: defaults)
+      try T3NetworkEndpoint(host: "192.168.1.2", port: 3773), to: defaults)
     let service = T3BridgeService(defaults: defaults)
-    service.forgetNetworkPreference()
-    #expect(service.rememberedNetwork == nil)
+    #expect(T3ConnectionPreferences.load(from: defaults) == nil)
+    #expect(defaults.object(forKey: T3ConnectionPreferences.key) == nil)
+    #expect(service.serverURL == nil)
+    service.stop()
+    #expect(service.clients.isEmpty)
+    _ = T3BridgeService(defaults: defaults)
     #expect(T3ConnectionPreferences.load(from: defaults) == nil)
   }
 
-  @Test func corruptOrIneligibleSavedEndpointsCannotEnableNetworkExposure() throws {
-    let suite = "pimac-t3-preferences-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
-    for json in [
-      "{bad", #"{"host":"0.0.0.0","port":3773}"#,
-      #"{"host":"100.64.0.1","port":3773}"#,
-      #"{"host":"192.168.1.2","port":80}"#,
-    ] {
-      defaults.set(Data(json.utf8), forKey: T3ConnectionPreferences.key)
-      #expect(T3BridgeService(defaults: defaults).rememberedNetwork == nil)
-    }
-  }
-
-  @Test func previewIsOffAndDoesNotInventAPhoneAddress() {
-    let service = T3BridgeService()
-    #expect(!service.isEnabled)
-    #expect(service.publicURL == nil)
-    #expect(service.pairing == nil)
-    #expect(service.connectionURL == nil)
-    service.stop()
-    #expect(service.clients.isEmpty)
-  }
 }

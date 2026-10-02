@@ -1,10 +1,11 @@
 // Pi Mac host policy only. T3 owns the engine, receipts, projections and reactors.
 import { ServerOwnedPiDriver } from './pi-provider.mjs';
+import { createConnectionDiagnostics } from './connection-diagnostics.mjs';
 export const PiDriver = ServerOwnedPiDriver;
 let host;
-export function configureNative({ environmentId }) {
+export function configureNative({ environmentId, directory }) {
   if (host && !host.closed) throw new Error('Server host already owned');
-  host = { environmentId, closed: false,
+  host = { environmentId, closed: false, connectionDiagnostics: createConnectionDiagnostics(directory),
     diagnostics: { requests: 0, accepted: 0, queuedDeliveries: 0, successfulDeliveries: 0, failedDeliveries: 0 },
     message: '', browserURL: null, tunnelStatus: 'disabled', close() { this.closed = true; } };
   return host;

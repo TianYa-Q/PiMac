@@ -21,16 +21,27 @@ export { oauthAwareCommandReadiness } from './oauth-readiness.mjs';
 import { accountStatus } from './account-status.mjs';
 import { sessionMetrics } from './session-metrics.mjs';
 import { originAllowed } from './origin-policy.mjs';
+import { connectionRoute } from './connection-diagnostics.mjs';
 
 export const NativeHttpPolicy = HttpRouter.middleware(effect => Effect.flatMap(HttpServerRequest.HttpServerRequest, request => {
   const broker = getNative();
-  if (!originAllowed(request.method, request.url, request.headers)) return Effect.succeed(HttpServerResponse.empty({ status: 403 }));
+  const route = connectionRoute(request.url);
+  const fields = { route, method: request.method,
+    transport: request.headers['x-forwarded-proto'] === 'https' ? 'https-tunnel' : 'http-local',
+    origin: request.headers.origin === undefined ? 'absent' : 'present' };
+  const record = (event, extra = {}) => { if (route) broker.connectionDiagnostics.record(event, { ...fields, ...extra }); };
+  record('request');
+  if (!originAllowed(request.method, request.url, request.headers)) {
+    record('denied', { status: 403, reason: 'origin-policy' });
+    return Effect.succeed(HttpServerResponse.empty({ status: 403 }));
+  }
   const localControl = request.headers['x-pimac-control'] === broker.controlToken && !!broker.controlToken;
   // Global router middleware also wraps the official CLI's separate OAuth
   // listener. Keep /callback off the environment/public server, but let the
   // loopback listener validate the OAuth state and authorization code.
   return loopbackOAuthCallbackAllowed(request) || httpAllowed(request.method, request.url) || (localControl && request.url.startsWith('/api/connect/'))
-    ? effect : Effect.succeed(HttpServerResponse.empty({ status: 404 }));
+    ? effect.pipe(Effect.tap(response => Effect.sync(() => record('response', { status: response.status }))))
+    : Effect.sync(() => { record('denied', { status: 404, reason: 'http-policy' }); return HttpServerResponse.empty({ status: 404 }); });
 }), { global: true });
 
 export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* () {
@@ -42,7 +53,10 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
   const controlContext = yield* Effect.context();
   const localURL = `http://127.0.0.1:${server.address.port}`;
   const originalApply = runtime.applyConfig;
-  runtime.applyConfig = value => originalApply(value).pipe(Effect.tap(status => Effect.sync(() => { broker.tunnelStatus = status.status + ('failure' in status ? ':' + status.failure : ''); })));
+  runtime.applyConfig = value => originalApply(value).pipe(Effect.tap(status => Effect.sync(() => {
+    broker.tunnelStatus = status.status + ('failure' in status ? ':' + status.failure : '');
+    broker.connectionDiagnostics.record('tunnel-config', { reason: broker.tunnelStatus });
+  })));
   let adminToken, loginFiber, loginPending = false, busy = false, deviceCount = null, tunnelURL = '';
   const run = effect => Effect.runPromise(Effect.provide(effect, controlContext));
   const readSecret = name => secrets.get(name).pipe(Effect.map(value => Option.isSome(value) ? new TextDecoder().decode(value.value) : ''));
@@ -58,7 +72,7 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
       run(readSecret(CloudConfig.CLOUD_LINKED_USER_ID)), run(readSecret(CloudConfig.RELAY_ENVIRONMENT_CREDENTIAL_SECRET)),
       run(CloudConfig.readAgentActivityPublishingActive(secrets)), run(tokens.hasCredential).catch(() => false),
     ]);
-    return { available: true, networkDiagnostic: broker.networkDiagnostic ?? '', authorized, linked: !!credential, enabled: publishing, account, loginPending, busy,
+    return { available: true, networkDiagnostic: [broker.networkDiagnostic, broker.connectionDiagnostics.summary].filter(Boolean).join('\n'), authorized, linked: !!credential, enabled: publishing, account, loginPending, busy,
       deviceCount, message: broker.message, tunnelStatus: broker.tunnelStatus, tunnelURL, backend: 't3-server', ...broker.diagnostics };
   };
   const refreshDevices = async () => {

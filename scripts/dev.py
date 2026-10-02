@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build on source changes; Pi Mac relaunches the built binary once all sessions are idle."""
+import argparse
 import fcntl
 import hashlib
 import os
@@ -12,6 +13,23 @@ import time
 
 root = Path(__file__).resolve().parent.parent
 os.chdir(root)
+
+verbose = False
+build_log = root / ".build" / "dev-build.log"
+app_log = root / ".build" / "dev-app.log"
+build_number = 0
+
+
+def status(message):
+    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+
+def changed_files(previous, current):
+    before = {path: (mtime, size) for path, mtime, size in previous}
+    after = {path: (mtime, size) for path, mtime, size in current}
+    return sorted(Path(path).relative_to(root).as_posix()
+                  for path in before.keys() | after.keys()
+                  if before.get(path) != after.get(path))
 
 
 def snapshot():
@@ -54,10 +72,22 @@ def run_build_command(command, capture=False):
     # owns cancellation, including npm/node grandchildren that inherit SIGINT.
     process = subprocess.Popen(
         command, start_new_session=True, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE if capture else None, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE if capture else subprocess.STDOUT,
+        text=True, errors="replace",
     )
     try:
-        output, _ = process.communicate()
+        output, errors = process.communicate()
+        if errors:
+            print(errors, end="", file=sys.stderr, flush=True)
+        if not capture:
+            build_log.parent.mkdir(parents=True, exist_ok=True)
+            with build_log.open("a") as log:
+                log.write(f"\n$ {' '.join(command)}\n{output}")
+            if verbose:
+                print(output, end="", flush=True)
+            elif process.returncode != 0:
+                # Keep terminal diagnostics bounded; the complete output is on disk.
+                print("\n".join(output.splitlines()[-40:]), file=sys.stderr, flush=True)
         return process.returncode, output
     except BaseException:
         # Do not wait indefinitely for a build tool's shutdown handler.
@@ -76,17 +106,29 @@ def run_build_command(command, capture=False):
 
 
 def build():
-    print("Building Pi Mac...", flush=True)
+    global build_number
+    build_number += 1
+    started = time.monotonic()
+    build_log.parent.mkdir(parents=True, exist_ok=True)
+    build_log.write_text(f"Build #{build_number} — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    status(f"Build #{build_number} · Server → Swift…")
     # Bundle the backend before Swift copies resources. Never signal a reload
     # when either build fails, even if an old executable still exists.
     if run_build_command(["npm", "--prefix", "sidecars/t3-server", "run", "build"])[0] != 0:
-        print("Server build failed; keeping the current app running.", file=sys.stderr, flush=True)
+        status(f"Build #{build_number} failed (Server); no restart. Details: {build_log.relative_to(root)}")
         return None
     if run_build_command(["swift", "build"])[0] != 0:
-        print("Build failed; keeping the current app running.", file=sys.stderr, flush=True)
+        status(f"Build #{build_number} failed (Swift); no restart. Details: {build_log.relative_to(root)}")
         return None
     code, output = run_build_command(["swift", "build", "--show-bin-path"], capture=True)
-    return Path(output.strip()) / "PiMac" if code == 0 else None
+    if code != 0:
+        with build_log.open("a") as log:
+            log.write(output)
+        print(output, end="", file=sys.stderr, flush=True)
+        status(f"Build #{build_number} failed (binary path); no restart.")
+        return None
+    status(f"Build #{build_number} ready · {time.monotonic() - started:.1f}s")
+    return Path(output.strip()) / "PiMac"
 
 
 def process_table():
@@ -122,7 +164,7 @@ def owned_processes(table, app_groups):
 
 
 def cleanup(app_groups):
-    print("Stopping Pi Mac and its services...", flush=True)
+    status("Stopping Pi Mac and its services…")
     # Capture descendants before parents exit/reparent them. Rescan during the
     # grace period to catch a concurrent hot relaunch, then force stragglers out.
     tracked = {}
@@ -199,15 +241,20 @@ def watch(app_groups):
     revision.write_text(str(time.time_ns()))
     env["PIMAC_DEV_RELOAD_REVISION"] = str(revision)
     # Isolate the app tree so shutdown can also collect orphaned services.
-    app = subprocess.Popen(
-        [str(binary)], env=env, start_new_session=True, stdin=subprocess.DEVNULL)
+    app_log.parent.mkdir(parents=True, exist_ok=True)
+    with app_log.open("w") as log:
+        app = subprocess.Popen(
+            [str(binary)], env=env, start_new_session=True, stdin=subprocess.DEVNULL,
+            stdout=None if verbose else log, stderr=None if verbose else subprocess.STDOUT)
     # SIGINT can also arrive during startup/build/snapshot (handled by main).
     app_groups.add(app.pid)
     app.poll()
-    print(
-        "Watching Swift, Server, extensions and resources; a successful build restarts Pi Mac when all sessions "
-        "are idle. Ctrl-C stops Pi Mac and all its services.", flush=True
-    )
+    status(f"Pi Mac started · PID {app.pid}")
+    status("Watching Swift, Server, extensions and resources · Ctrl-C to stop")
+    if verbose:
+        status(f"Build log: {build_log.relative_to(root)} · App logs: terminal")
+    else:
+        status(f"Logs: {build_log.relative_to(root)} (latest build), {app_log.relative_to(root)} (app)")
     previous = snapshot()
     try:
         while True:
@@ -218,19 +265,30 @@ def watch(app_groups):
                 continue
             # Debounce editor saves and builds; avoid starting another build mid-write.
             time.sleep(0.7)
-            previous = snapshot()
+            current = snapshot()
+            changes = changed_files(previous, current)
+            previous = current
+            preview = ", ".join(changes[:3])
+            if len(changes) > 3:
+                preview += f" (+{len(changes) - 3} more)"
+            status(f"Changed · {preview}")
             if build() is not None:
                 revision.write_text(str(time.time_ns()))
+                status("Reload requested · Pi Mac restarts when all sessions are idle")
     except KeyboardInterrupt:
         raise
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="show build output and live app logs in the terminal")
+    verbose = parser.parse_args().verbose
     # Explicitly restore Ctrl-C even if the invoking environment ignored SIGINT.
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         main()
     except KeyboardInterrupt:
-        print("\nStopped watching; Pi Mac and its services have been stopped.", flush=True)
+        status("Stopped · Pi Mac and its services have been stopped")
         sys.exit(130)

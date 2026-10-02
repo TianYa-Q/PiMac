@@ -14,24 +14,35 @@ Protocol tests are not evidence that the installed App Store version interoperat
 ## Phone connection
 
 1. Build the new app; restart only after existing tasks finish.
-2. Open **Settings → T3 iOS 连接**. The local Server starts with Pi Mac even when
-   LAN access is disabled.
-3. Explicitly enable LAN access on a current local RFC1918 IPv4 address (default
-   port 3773). Invalid/nonlocal addresses or occupied ports fail visibly; there is
-   no wildcard, public-IP, DNS, CGNAT or silent alternative listener.
-4. Generate a one-time pairing code. Enter the displayed HTTP address and the
-   complete code in T3 iOS, or scan the QR inside T3 iOS. Pairing uses the upstream
-   12-digit code; the pair URL keeps it in `#token=…`, not a query.
-5. The unused grant expires after five minutes and is revoked when the panel
-   closes or replaces it. Authorized devices can be revoked from the panel.
-6. Disabling LAN closes remote access, **not** the local Server or running tasks.
-   Explicit disable clears remembered network consent. App shutdown preserves it.
+2. Open **Settings → T3 iOS 连接** and authorize official T3 Connect using the
+   same account as the App Store T3 iOS client.
+3. On the phone, delete the old **Pi Mac · LAN** entry (if present), then enable
+   **Pi Mac · Tunnel** under T3 Connect. No custom iOS build or patch is needed.
+4. Keep Pi Mac awake and online. LAN listeners and pairing controls are removed;
+   upgrade clears legacy saved LAN consent. The desktop Server stays on loopback.
+5. Pausing publication only pauses activity updates; unlinking revokes the Tunnel.
 
-LAN HTTP is plaintext, including bearer credentials and transcripts. Use a
-trusted LAN only; never add router port forwarding or share pairing codes.
-The separate public proxy never serves `/internal/`. The supervisor credential
-is local-only and is not passed to Pi tools/extensions. TLS, IPv6, Bonjour and
-managed tunnels are not implemented.
+The iOS catalog is keyed by `environmentId`. Registering Tunnel for a Server
+already saved as LAN replaces that catalog entry; labels cannot make them two
+independent environments. We intentionally offer only Tunnel rather than fake
+an identity or run a second orchestration engine.
+
+Cloudflare terminates HTTPS and forwards to the private loopback Server.
+Same-origin WebSocket validation uses the forwarded HTTPS scheme, not a fixed
+HTTP scheme; mismatched origins and invalid/replayed DPoP proofs remain denied.
+Remote tasks have local Pi permissions, and transcripts/attachments pass through
+Cloudflare. This is authenticated TLS transport, not end-to-end encryption.
+
+## Connection diagnostics
+
+Settings expose the latest 20 credential-free events. A bounded private log is
+written to
+`~/Library/Application Support/PiMac/T3/server-owned/connection-diagnostics.log`
+with one rotated `.1` file (approximately 256 KiB each, mode 0600).
+Events include route/method, transport, HTTP status, Origin rejection and DPoP
+failure classification. Query strings, tickets, proofs, tokens, pairing codes,
+request bodies and transcripts are never logged. Logs can identify whether
+Tunnel traffic reaches the Server; absence of traffic is not proof of readiness.
 
 ## Native client behavior
 
@@ -55,27 +66,20 @@ does not prove that the phone rendered the catalog. The retired desktop-bridge
 counter endpoint is no longer available.
 
 Old JSONL transcripts and legacy authorization/identity stores are not silently
-imported or rebound. Existing phone installations may need to pair again. New
+imported or rebound. Existing phone installations should remove the old LAN entry and enable Tunnel. New
 threads use the Server-owned database and private per-instance Pi sessions.
 
-## Experimental T3 Connect notifications
+## T3 Connect notifications
 
-The existing publish-only integration uses official hosted OAuth/PKCE and signed
-activity publication; chat stays on LAN. Enable it separately in settings and
-use the same T3/Apple account as the phone. The callback listens only on
-`127.0.0.1:34338`; an occupied port fails closed.
+Official hosted OAuth/PKCE binds the environment and starts a managed Tunnel;
+the OAuth callback listens only on `127.0.0.1:34338`. Notifications publish
+title/model/phase/timestamp/opaque-link metadata, not full prompts or attachments.
+Titles can contain sensitive text. Credentials and signing material remain private.
+A successful publish or device count does not prove phone delivery.
 
-Only title/model/phase/timestamp/opaque-link metadata is published, not prompts,
-reasoning, tool bodies or attachment data. Titles can contain sensitive text.
-Credentials and signing material are privately stored, not in UserDefaults or
-logs. Pause stops new publishing; it cannot recall already queued notifications.
-Logout requires acknowledged unlinking; failure retains credentials for an
-explicit retry. A successful publish or registered-device count does not prove
-that an iPhone displayed a notification.
-
-Real Apple login, APNs, Live Activities and App Store compatibility still need
-physical-device acceptance. Approval/input notifications and hosted chat are not
-implemented.
+Real Apple login, APNs, Live Activities and installed App Store interoperability
+still require physical-device acceptance. Local protocol tests simulate TLS
+termination and authentication, not the hosted relay or real mobile device.
 
 ## Ownership and recovery
 

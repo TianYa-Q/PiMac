@@ -30,6 +30,30 @@
       "count": 1
     }
   ],
+  "apps/server/src/orchestration/ActivityPayloadProjection.ts": [
+    {
+      "oldText": "import { projectQuestionToolInput } from \"@t3tools/shared/toolActivity\";",
+      "newText": "import { projectPiToolActivityData } from \"pimac:pi-tool-activity.mjs\";\nimport { projectQuestionToolInput } from \"@t3tools/shared/toolActivity\";",
+      "count": 1
+    },
+    {
+      "oldText": "  const itemStatus = asRecord(data.item)?.status;",
+      "newText": "  if (data.piTool === true) {\n    return { ...activity, payload: { ...payload, data: projectPiToolActivityData(data) } };\n  }\n\n  const itemStatus = asRecord(data.item)?.status;",
+      "count": 1
+    }
+  ],
+  "apps/server/src/auth/dpop.ts": [
+    {
+      "oldText": "import {\n  type DpopVerificationFailureCode",
+      "newText": "import * as PiNative from \"pimac:native.mjs\";\nimport {\n  type DpopVerificationFailureCode",
+      "count": 1
+    },
+    {
+      "oldText": "    if (!result.ok) {\n      yield* Effect.annotateCurrentSpan({",
+      "newText": "    if (!result.ok) {\n      PiNative.getNative().connectionDiagnostics.record(\"dpop-denied\", { reason: result.code });\n      yield* Effect.annotateCurrentSpan({",
+      "count": 1
+    }
+  ],
   "apps/server/src/orchestration/http.ts": [],
   "apps/server/src/serverRuntimeStartup.ts": [
     {

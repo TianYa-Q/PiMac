@@ -112,6 +112,19 @@ test('native T3 command reactor routes model changes and cancellation into the P
     const files = await sessionFiles(directory);
     return files.length && (await readFile(files[0], 'utf8')).includes('"command":"prompt"');
   });
+  const beforeSteer = (await f.get('/api/orchestration/threads/' + threadId)).thread.latestTurn;
+  const steering = { type: 'thread.turn.start', commandId: randomUUID(), threadId,
+    createdAt: new Date().toISOString(), runtimeMode: 'full-access', interactionMode: 'default',
+    message: { messageId: randomUUID(), role: 'user', text: 'change direction', attachments: [] } };
+  await f.dispatch(steering);
+  await eventually(async () => {
+    const files = await sessionFiles(directory);
+    return (await readFile(files[0], 'utf8')).includes('"streamingBehavior":"steer"');
+  });
+  await f.dispatch(steering); // Receipt retry must not enqueue the steer twice.
+  const afterSteer = (await f.get('/api/orchestration/threads/' + threadId)).thread.latestTurn;
+  assert.equal(afterSteer.turnId, beforeSteer.turnId);
+  assert.equal(afterSteer.state, beforeSteer.state);
   await call(await f.ws(), 'orchestration.dispatchCommand', { type: 'thread.turn.interrupt', commandId: randomUUID(), threadId, createdAt: new Date().toISOString() });
   await eventually(async () => {
     const files = await sessionFiles(directory);
@@ -120,7 +133,8 @@ test('native T3 command reactor routes model changes and cancellation into the P
   await eventually(async () => (await f.get('/api/orchestration/threads/' + threadId)).thread.latestTurn?.state === 'interrupted');
   const files = await sessionFiles(directory);
   const records = (await readFile(files[0], 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.equal(records.filter(r => r.command === 'prompt').length, 1);
+  assert.equal(records.filter(r => r.command === 'prompt').length, 2);
+  assert.equal(records.filter(r => r.streamingBehavior === 'steer').length, 1);
   assert.equal(records.filter(r => r.command === 'set_thinking_level').length, 1);
   assert.equal(records.filter(r => r.command === 'abort').length, 1);
   // No retired desktop command IPC was used: all mutations above go through

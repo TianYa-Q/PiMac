@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import os
 from pathlib import Path
 import signal
@@ -21,6 +23,57 @@ def wait_file(path):
 
 
 class DevWatcherTests(unittest.TestCase):
+    def load_dev(self):
+        spec = importlib.util.spec_from_file_location('dev', SCRIPT)
+        dev = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(dev)
+        return dev
+
+    def test_successful_build_output_goes_to_log(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.build_log = Path(directory) / 'build.log'
+            terminal = io.StringIO()
+            with contextlib.redirect_stdout(terminal), contextlib.redirect_stderr(terminal):
+                code, output = dev.run_build_command([
+                    sys.executable, '-c', 'import sys; print("built"); print("warning", file=sys.stderr)'])
+            self.assertEqual(code, 0)
+            self.assertEqual(terminal.getvalue(), '')
+            self.assertIn('built', output)
+            self.assertIn('warning', dev.build_log.read_text())
+
+    def test_failed_build_shows_tail_and_keeps_full_log(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.build_log = Path(directory) / 'build.log'
+            terminal = io.StringIO()
+            with contextlib.redirect_stderr(terminal):
+                code, _ = dev.run_build_command([
+                    sys.executable, '-c', 'import sys; print("\\n".join(f"line {i}" for i in range(60))); sys.exit(1)'])
+            self.assertEqual(code, 1)
+            self.assertEqual(len(terminal.getvalue().splitlines()), 40)
+            self.assertIn('line 0\n', dev.build_log.read_text())
+            self.assertIn('line 59', terminal.getvalue())
+
+    def test_verbose_build_output_is_visible(self):
+        dev = self.load_dev()
+        dev.verbose = True
+        with tempfile.TemporaryDirectory() as directory:
+            dev.build_log = Path(directory) / 'build.log'
+            terminal = io.StringIO()
+            with contextlib.redirect_stdout(terminal):
+                dev.run_build_command([sys.executable, '-c', 'print("details")'])
+            self.assertEqual(terminal.getvalue(), 'details\n')
+
+    def test_change_summary_includes_added_modified_and_removed_files(self):
+        dev = self.load_dev()
+        before = [(str(dev.root / 'removed.swift'), 1, 1),
+                  (str(dev.root / 'changed.swift'), 1, 1)]
+        after = [(str(dev.root / 'added.swift'), 1, 1),
+                 (str(dev.root / 'changed.swift'), 2, 1)]
+        self.assertEqual(dev.changed_files(before, after),
+                         ['added.swift', 'changed.swift', 'removed.swift'])
+
     def test_ctrl_c_cancels_build_process_group(self):
         with tempfile.TemporaryDirectory() as directory:
             pid_file = Path(directory) / 'build-pid'
@@ -54,7 +107,7 @@ class DevWatcherTests(unittest.TestCase):
             service = f'import os, time; open({str(service_file)!r}, "w").write(str(os.getpid())); time.sleep(60)'
             binary.write_text(f'#!{sys.executable}\nimport os, time, subprocess\nsubprocess.Popen([{sys.executable!r}, "-c", {service!r}], start_new_session=True)\nopen({str(pid_file)!r}, "w").write(str(os.getpid()))\ntime.sleep(60)\n')
             binary.chmod(0o700)
-            source = IMPORT + f"d.root=d.Path({directory!r}); d.build=lambda: d.Path({str(binary)!r}); d.running_apps=lambda _: []\ntry:\n d.main()\nexcept KeyboardInterrupt:\n raise SystemExit(130)\n"
+            source = IMPORT + f"d.root=d.Path({directory!r}); d.build_log=d.root/'.build/dev-build.log'; d.app_log=d.root/'.build/dev-app.log'; d.build=lambda: d.Path({str(binary)!r}); d.running_apps=lambda _: []\ntry:\n d.main()\nexcept KeyboardInterrupt:\n raise SystemExit(130)\n"
             watcher = subprocess.Popen([sys.executable, '-c', source], start_new_session=True,
                                        stdout=subprocess.DEVNULL)
             app_pid = None
