@@ -33,6 +33,19 @@ final class T3BridgeStateLease: @unchecked Sendable {
     descriptor = fd
   }
 
+  /// Probe without creating or unlinking the inode shared with Node's lockf.
+  static func isAvailable(_ file: URL) -> Bool {
+    let fd = Darwin.open(file.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    if fd < 0 { return errno == ENOENT }
+    defer { Darwin.close(fd) }
+    var info = stat()
+    guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+      info.st_uid == getuid(), flock(fd, LOCK_EX | LOCK_NB) == 0
+    else { return false }
+    flock(fd, LOCK_UN)
+    return true
+  }
+
   func release() {
     lock.lock()
     defer { lock.unlock() }

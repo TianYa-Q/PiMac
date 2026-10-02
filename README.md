@@ -7,9 +7,9 @@
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/TianYa-Q/PiMac)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client built with SwiftUI. Desktop, iOS and Telegram use the native T3 Server orchestration engine; its Pi Provider Adapter exclusively owns Pi runtimes.
+A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client built with SwiftUI. Desktop, iOS and Telegram use official T3 Server orchestrator V2 and its built-in Pi Provider; the custom Pi Adapter has been removed.
 
-> **Source architecture update:** the old desktop-owned backend has been removed. The release-era feature/Telegram descriptions below are not feature-parity claims for this source migration. Historical import, extension dialogs/account switching, Fast mode, manual compaction and desktop steering are not yet supported. See [current architecture and limits](docs/t3-server-migration.md).
+> **Source architecture update:** migrated to the official main Pi Provider and orchestration protocol 2. Native extension dialogs, /compact and steering are supported; private account status, Fast/compaction-model overrides and rich tool output are no longer provided. Release-era descriptions below are not feature-parity claims. Real historical upgrades and mobile acceptance remain pending. See [current architecture and limits](docs/t3-server-migration.md).
 
 ![Pi Mac overview](docs/images/pi-mac-overview-new.png)
 

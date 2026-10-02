@@ -11,6 +11,7 @@ final class T3BridgeService: ObservableObject {
   private let defaults: UserDefaults
   private let stateDirectory: URL?
   private var stoppingPID: Int32?
+  private var stoppingProcess: Process?
   @Published private(set) var serverURL: URL?
   @Published private(set) var clients: [T3PairedClient] = []
   @Published private(set) var managementBusy = false
@@ -36,7 +37,7 @@ final class T3BridgeService: ObservableObject {
   }
 
   private var process: Process?
-  private var childLeaseMarker: URL?
+  private var childLockFile: URL?
   private var input: FileHandle?
   private var generation = UUID()
   private var writer = DispatchQueue(label: "pimac.t3.bridge.writer")
@@ -44,6 +45,7 @@ final class T3BridgeService: ObservableObject {
   func start(
     workspace: WorkspaceModel, token: String, stateDirectory: URL? = nil
   ) throws {
+    guard !isStopping else { throw T3BridgeStateLease.LeaseError.alreadyOwned }
     guard process?.isRunning != true else { return }
     guard token.count == 64, token.allSatisfy({ "0123456789abcdef".contains($0) }) else {
       throw ServiceError.invalidToken
@@ -65,12 +67,14 @@ final class T3BridgeService: ObservableObject {
     ]
     var environment = ProcessInfo.processInfo.environment
     environment["PIMAC_T3_BRIDGE_TOKEN"] = token
+    environment["PIMAC_T3_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
     environment["PIMAC_PI_BINARY"] = defaults.string(forKey: "piPath") ?? AppModel.suggestedPiPath()
     // Do not inherit network exposure from a launching shell.
     environment.removeValue(forKey: "PIMAC_T3_PUBLIC_HOST")
     environment.removeValue(forKey: "PIMAC_T3_PUBLIC_PORT")
     let stateDirectory =
       stateDirectory
+      ?? self.stateDirectory
       ?? FileManager.default.urls(
         for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("PiMac/T3", isDirectory: true)
@@ -86,6 +90,7 @@ final class T3BridgeService: ObservableObject {
         guard let self else { return }
         if self.stoppingPID == child.processIdentifier {
           self.stoppingPID = nil
+          self.stoppingProcess = nil
           self.isStopping = false
         }
         guard self.generation == current else { return }
@@ -95,7 +100,7 @@ final class T3BridgeService: ObservableObject {
     }
     do {
       try child.run()
-      childLeaseMarker = stateDirectory.appendingPathComponent("child-owner.json")
+      childLockFile = stateDirectory.appendingPathComponent("child-owner.lock")
       process = child
       input = stdin.fileHandleForWriting
       adminToken = token
@@ -132,20 +137,34 @@ final class T3BridgeService: ObservableObject {
     if let old, old.isRunning {
       isStopping = true
       stoppingPID = old.processIdentifier
-      old.terminate()
-      DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+      stoppingProcess = old
+      // EOF is the normal shutdown request. Give upstream finalizers time to
+      // stop Pi and Tunnel before escalating (SIGTERM uses the same finalizers).
+      DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+        if old.isRunning { old.terminate() }
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
         if old.isRunning { kill(old.processIdentifier, SIGKILL) }
       }
     }
     status = "未启用"
   }
 
-  /// A replacement must not start until the termination handler has released
-  /// the parent lease and Node has removed its exclusive child marker.
+  /// Wait for both the process termination handler and the kernel child lease.
+  /// A diagnostic PID file left by SIGKILL is never a shutdown barrier.
   func stopAndWait() async -> Bool {
     stop()
-    for _ in 0..<100 {
-      if !isStopping { return childLeaseHasCleared }
+    for _ in 0..<360 {
+      // The termination callback may be queued after the process is already gone.
+      // Do not keep the UI in "stopping" solely because that callback is late.
+      if let old = stoppingProcess,
+        !old.isRunning || (kill(old.processIdentifier, 0) == -1 && errno == ESRCH)
+      {
+        stoppingPID = nil
+        stoppingProcess = nil
+        isStopping = false
+      }
+      if !isStopping && childLeaseHasCleared { return true }
       if Task.isCancelled { return false }
       try? await Task.sleep(for: .milliseconds(50))
     }
@@ -153,8 +172,8 @@ final class T3BridgeService: ObservableObject {
   }
 
   private var childLeaseHasCleared: Bool {
-    guard let childLeaseMarker else { return true }
-    return !FileManager.default.fileExists(atPath: childLeaseMarker.path)
+    guard let childLockFile else { return true }
+    return T3BridgeStateLease.isAvailable(childLockFile)
   }
 
   private func receive(_ record: Data, generation current: UUID) {
@@ -191,7 +210,7 @@ final class T3BridgeService: ObservableObject {
     var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/internal/auth/\(path)")!)
     request.httpMethod = method
     if path == "connect" { request.timeoutInterval = 45 }
-    if path == "session-control" { request.timeoutInterval = 310 }
+    if path == "account-status" { request.timeoutInterval = 20 }
     request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
@@ -212,55 +231,24 @@ final class T3BridgeService: ObservableObject {
 
   func syncModelPreferences(hiddenModels: [String], defaultModel: String?) async throws {
     struct Response: Decodable { let ok: Bool }
-    let _: Response = try await admin("model-preferences", method: "POST", body: [
-      "hiddenModels": hiddenModels, "defaultModel": defaultModel as Any? ?? NSNull(),
-    ])
+    let _: Response = try await admin(
+      "model-preferences", method: "POST",
+      body: [
+        "hiddenModels": hiddenModels, "defaultModel": defaultModel as Any? ?? NSNull(),
+      ])
   }
 
-  func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws {
-    struct Response: Decodable { let ok: Bool }
-    var body: [String: Any] = ["threadId": threadID, "operation": operation]
-    if let accountName { body["accountName"] = accountName }
-    let result: Response = try await admin("session-control", method: "POST", body: body)
-    guard result.ok else { throw ServiceError.managementFailed }
+  func accountStatus(provider: String, force: Bool) async throws -> [String: Any] {
+    struct Response: Decodable { let payload: String }
+    let response: Response = try await admin(
+      "account-status", method: "POST", body: ["provider": provider, "force": force])
+    return try JSONSerialization.jsonObject(with: Data(response.payload.utf8)) as? [String: Any] ?? [:]
   }
 
   func desktopCredential() async throws -> String {
     struct Credential: Decodable { let token: String }
     let result: Credential = try await admin("desktop-session", method: "POST", body: [:])
     return result.token
-  }
-
-  func sessionMetrics(threadID: String) async throws -> SessionStats? {
-    struct Metrics: Decodable {
-      struct Tokens: Decodable { let input: Int?; let cacheRead: Int?; let cacheWrite: Int?; let total: Int? }
-      struct Context: Decodable { let percent: Double? }
-      let cost: Double?
-      let outputTokensPerSecond: Double?
-      let tokens: Tokens
-      let contextUsage: Context?
-    }
-    struct Response: Decodable { let stats: Metrics? }
-    let response: Response = try await admin(
-      "session-metrics", method: "POST", body: ["threadId": threadID])
-    guard let stats = response.stats else { return nil }
-    return SessionStats(
-      cost: stats.cost ?? 0, contextPercent: stats.contextUsage?.percent,
-      totalTokens: stats.tokens.total ?? 0, inputTokens: stats.tokens.input ?? 0,
-      cacheReadTokens: stats.tokens.cacheRead ?? 0, cacheWriteTokens: stats.tokens.cacheWrite ?? 0,
-      outputTokensPerSecond: stats.outputTokensPerSecond)
-  }
-
-  func accountStatus(threadID: String, provider: String? = nil) async throws -> [String: Any]? {
-    struct Snapshot: Decodable { let status: String? }
-    var body = ["threadId": threadID]
-    if let provider { body["provider"] = provider }
-    let snapshot: Snapshot = try await admin(
-      "account-status", method: "POST", body: body)
-    guard let value = snapshot.status,
-      let data = value.data(using: .utf8)
-    else { return nil }
-    return try JSONSerialization.jsonObject(with: data) as? [String: Any]
   }
 
   func connectAction(_ operation: String) async {

@@ -12,6 +12,7 @@ final class DevelopmentReloader: ObservableObject {
   private var idleSince: Date?
   private var pendingSince: Date?
   private var reloading = false
+  private var relaunchProcess: Process?
 
   init() {
     let path = ProcessInfo.processInfo.environment["PIMAC_DEV_RELOAD_PATH"]
@@ -33,7 +34,7 @@ final class DevelopmentReloader: ObservableObject {
     }
   }
 
-  func check(workspace: WorkspaceModel) {
+  func check(workspace: WorkspaceModel, appDelegate: AppDelegate) {
     guard !reloading, executable != nil else { return }
     let blockers = workspace.restartBlockers
     if blockers.isEmpty {
@@ -51,9 +52,12 @@ final class DevelopmentReloader: ObservableObject {
       }
     }
     let requested = requestFile.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
-    workspace.developmentReloadStatus = requested
+    let status = requested
       ? (blockers.isEmpty ? "源码已更新，等待空闲构建…" : "源码待构建：\(blockers.joined(separator: "、"))")
       : ""
+    if workspace.developmentReloadStatus != status {
+      workspace.developmentReloadStatus = status
+    }
     // Do not restart a previously built revision while newer edits are pending.
     guard !requested, let executable, let originalModification,
       let modified = (try? FileManager.default.attributesOfItem(
@@ -72,9 +76,8 @@ final class DevelopmentReloader: ObservableObject {
 
     reloading = true
     Task {
-      // Parent exit is not a shutdown barrier: Node is detached and can still
-      // own child-owner.json after PiMac exits. Drain services while the main
-      // actor is alive so its termination handler also releases owner.lock.
+      // Drain services while the main actor is alive so the child finalizers
+      // and termination handler finish before launching a replacement.
       workspace.developmentReloadStatus = "正在停止旧版服务，等待安全重启…"
       workspace.disconnectAll()
       guard await workspace.t3Bridge.stopAndWait() else {
@@ -82,6 +85,7 @@ final class DevelopmentReloader: ObservableObject {
         NSLog("Pi Mac development reload cancelled: T3 shutdown barrier failed")
         return
       }
+      workspace.developmentReloadStatus = "旧版服务已停止，正在重启应用…"
       // Retain the development environment, but never run two app owners.
       let process = Process()
       process.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -89,8 +93,13 @@ final class DevelopmentReloader: ObservableObject {
         "-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "--",
         "\(ProcessInfo.processInfo.processIdentifier)", executable.path,
       ]
+      process.standardInput = FileHandle.nullDevice
+      process.standardOutput = FileHandle.nullDevice
+      process.standardError = FileHandle.nullDevice
       do {
         try process.run()
+        relaunchProcess = process
+        appDelegate.servicesStoppedForReload = true
         NSApp.terminate(nil)
       } catch {
         workspace.developmentReloadStatus = "自动重启失败，请停止监听器后重新启动。"
@@ -100,7 +109,32 @@ final class DevelopmentReloader: ObservableObject {
   }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+  weak var workspace: WorkspaceModel?
+  private var terminating = false
+  var servicesStoppedForReload = false
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    // DevelopmentReloader has already drained services and passed the barrier.
+    // Running the asynchronous termination barrier a second time is unnecessary.
+    guard !servicesStoppedForReload, let workspace else { return .terminateNow }
+    guard !terminating else { return .terminateLater }
+    terminating = true
+    Task {
+      workspace.disconnectAll()
+      let stopped = await workspace.t3Bridge.stopAndWait()
+      if !stopped {
+        terminating = false
+        workspace.developmentReloadStatus = "退出已暂停：等待本机 T3 Server 关闭，请稍后重试。"
+      }
+      sender.reply(toApplicationShouldTerminate: stopped)
+    }
+    return .terminateLater
+  }
+
+  func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     // SwiftPM 直接运行的可执行文件没有完整 .app 启动流程，AppKit 有时不会
     // 自动把它激活；窗口虽然可见，键盘事件却仍发往之前的应用。
@@ -150,9 +184,9 @@ struct PiMacApp: App {
       WorkspaceView()
         .environmentObject(workspace)
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-          developmentReloader.check(workspace: workspace)
+          developmentReloader.check(workspace: workspace, appDelegate: appDelegate)
         }
-        .onDisappear { workspace.disconnectAll() }
+        .onAppear { appDelegate.workspace = workspace }
     }
     .defaultSize(width: 1120, height: 760)
     .windowToolbarStyle(.unifiedCompact(showsTitle: false))

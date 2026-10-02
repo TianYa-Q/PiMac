@@ -2,11 +2,13 @@
 enum AccountUsageProvider: String, Sendable {
   case legacyCodex = "openai-codex"
   case chatGPT = "openai"
+  case antigravity = "antigravity"
 
   var credentialLabel: String {
     switch self {
     case .legacyCodex: "Codex Legacy"
     case .chatGPT: "Codex 新版 · ChatGPT"
+    case .antigravity: "Antigravity"
     }
   }
 

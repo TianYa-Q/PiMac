@@ -126,6 +126,34 @@ private struct ConversationScrollObserver: NSViewRepresentable {
   }
 }
 
+// Quota is a snapshot, not an ongoing operation. Avoid the native progress
+// indicator's animation/redraws when the surrounding conversation updates.
+private struct QuotaUsageBar: View {
+  let remainingPercent: Double
+  let color: Color
+
+  private var fraction: Double {
+    remainingPercent.isFinite ? max(0, min(100, remainingPercent)) / 100 : 0
+  }
+
+  var body: some View {
+    GeometryReader { geometry in
+      Capsule()
+        .fill(Color.secondary.opacity(0.15))
+        .overlay(alignment: .leading) {
+          Capsule()
+            .fill(color)
+            .frame(width: geometry.size.width * fraction)
+        }
+    }
+    .frame(height: 6)
+    .transaction { $0.animation = nil }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("剩余额度")
+    .accessibilityValue("\(Int((fraction * 100).rounded()))%")
+  }
+}
+
 private struct CompactResetTime: View {
   let date: Date
 
@@ -834,7 +862,7 @@ struct ContentView: View {
           Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文统计等待更新")
             .foregroundStyle(contextUsageColor(stats.contextPercent))
           Text(stats.cacheHitPercent.map { "缓存命中 \(Int($0.rounded()))%" } ?? "缓存命中 --")
-          Text(stats.cost, format: .currency(code: "USD"))
+          if let cost = stats.cost { Text(cost, format: .currency(code: "USD")) }
         }
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -1442,28 +1470,32 @@ struct ContentView: View {
           .monospacedDigit()
           .foregroundStyle(.secondary)
           .help("当前任务输出 tokens ÷ 模型请求耗时（含思考与首字等待，不含工具执行）。每次模型响应结束更新。")
-      } else if app.isStreaming {
+      } else {
         Text("输出 -- tokens/s")
           .font(.caption)
           .foregroundStyle(.secondary)
           .help("等待模型返回实际 token 用量")
       }
+      Divider().frame(height: 12)
       if let stats = app.stats {
-        if app.outputTokensPerSecond != nil || app.isStreaming {
-          Divider().frame(height: 12)
-        }
         HStack(spacing: 12) {
           Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文 --")
             .foregroundStyle(contextUsageColor(stats.contextPercent))
-          Text("\(stats.totalTokens.formatted()) tokens")
+          Text(stats.contextWindow.map {
+            "\(stats.totalTokens.formatted()) / \($0.formatted()) tokens"
+          } ?? "\(stats.totalTokens.formatted()) tokens")
           Text(stats.cacheHitPercent.map { "缓存命中 \(Int($0.rounded()))%" } ?? "缓存命中 --")
-          Text(stats.cost, format: .currency(code: "USD"))
+          if let cost = stats.cost { Text(cost, format: .currency(code: "USD")) }
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+      } else {
+        Text("上下文 -- · -- / -- tokens · 缓存命中 --")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .help("等待 Provider 返回上下文和 token 用量")
       }
     }
-    .fixedSize()
   }
 
   private func contextUsageColor(_ percent: Double?) -> Color {
@@ -2177,7 +2209,9 @@ private struct ActivityEntryView: View {
     if entry.kind == .thinking { return !entry.text.isEmpty }
     if !entry.attachments.isEmpty { return true }
     if entry.toolName == "codemode", entry.toolInput?.isEmpty == false { return true }
-    if !entry.childToolEntries.isEmpty || !entry.nestedCalls.isEmpty || !entry.nestedCallsComplete { return true }
+    if !entry.childToolEntries.isEmpty || !entry.nestedCalls.isEmpty || !entry.nestedCallsComplete {
+      return true
+    }
     return entry.diff?.isEmpty == false || !entry.text.isEmpty
   }
 
@@ -2487,7 +2521,44 @@ private struct ResetCreditsIcon: View {
 private struct CodexAccountsView: View {
   @EnvironmentObject private var app: AppModel
   @EnvironmentObject private var extensionUI: ExtensionUIModel
+
+  var body: some View {
+    CodexAccountsCard(
+      snapshot: .init(
+        sourceID: ObjectIdentifier(app), accounts: extensionUI.codexAccounts, gemini: extensionUI.geminiUsage,
+        emptyStatus: extensionUI.statuses["account-usage"], message: app.accountQuotaMessage,
+        canRefresh: app.isProcessRunning && !app.isRefreshingAccountQuota,
+        canManage: app.canManageAccounts,
+        canSwitch: app.canRestartSafely && app.supportsAccountSwitch),
+      refresh: { app.refreshCodexAccounts(force: true) },
+      manage: { app.openCodexAccountManager() },
+      switchAccount: { app.switchCodexAccount(to: $0) }
+    )
+    .equatable()
+  }
+}
+
+// Ignore unrelated streaming/heartbeat publications. Only a changed quota snapshot
+// or control availability should redraw the card (including its material-backed rows).
+private struct CodexAccountsCard: View, Equatable {
+  struct Snapshot: Equatable {
+    var sourceID: ObjectIdentifier
+    var accounts: [CodexAccountStatus]
+    var gemini: GeminiUsageStatus?
+    var emptyStatus: String?
+    var message: String
+    var canRefresh: Bool
+    var canManage: Bool
+    var canSwitch: Bool
+  }
+
+  let snapshot: Snapshot
+  let refresh: () -> Void
+  let manage: () -> Void
+  let switchAccount: (String) -> Void
   @State private var isExpanded = false
+
+  static func == (lhs: Self, rhs: Self) -> Bool { lhs.snapshot == rhs.snapshot }
 
   var body: some View {
     GroupBox {
@@ -2495,19 +2566,26 @@ private struct CodexAccountsView: View {
         HStack {
           Label("账户额度", systemImage: "gauge.with.dots.needle.50percent")
             .font(.caption.bold())
-          Spacer()
-          Button {
-            app.refreshCodexAccounts()
-          } label: {
+            .fixedSize()
+          if !snapshot.message.isEmpty {
+            Text(snapshot.message)
+              .font(.caption2)
+              .foregroundStyle(.red)
+              .lineLimit(1)
+              .truncationMode(.tail)
+              .help(snapshot.message)
+          }
+          Spacer(minLength: 0)
+          Button(action: refresh) {
             Image(systemName: "arrow.clockwise")
           }
           .buttonStyle(.plain)
-          .help("读取 Server 最新缓存额度（扩展自动刷新）")
-          .disabled(!app.isProcessRunning)
-          Button("管理") { app.openCodexAccountManager() }
+          .help("重新查询账户额度；不修改 Pi 授权")
+          .disabled(!snapshot.canRefresh)
+          Button("管理", action: manage)
             .buttonStyle(.plain)
             .font(.caption)
-            .disabled(!app.canManageAccounts)
+            .disabled(!snapshot.canManage)
           Button {
             withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
           } label: {
@@ -2517,20 +2595,10 @@ private struct CodexAccountsView: View {
           .help(isExpanded ? "折叠账户额度" : "展开全部账户额度")
         }
 
-        if AccountUsageProvider(modelID: app.selectedModelId) == .chatGPT,
-          !app.supportsAccountSwitch
-        {
-          Text("账户额度由 Server 自动刷新；连接 Pi 线程后可在空闲时切换账户。")
-            .font(.caption2).foregroundStyle(.secondary)
-        }
         if isExpanded {
           expandedAccounts
         } else {
           currentAccount
-        }
-        if let updatedAt = extensionUI.codexAccountsUpdatedAt {
-          Text("额度缓存 · 更新于 \(updatedAt, style: .relative)")
-            .font(.caption2).foregroundStyle(.secondary)
         }
       }
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -2539,15 +2607,15 @@ private struct CodexAccountsView: View {
 
   @ViewBuilder
   private var expandedAccounts: some View {
-    if extensionUI.codexAccounts.isEmpty && extensionUI.geminiUsage == nil {
+    if snapshot.accounts.isEmpty && snapshot.gemini == nil {
       emptyStatus
     } else {
       ScrollView {
         LazyVStack(spacing: 7) {
-          ForEach(extensionUI.codexAccounts) { account in
+          ForEach(snapshot.accounts) { account in
             accountRow(account)
           }
-          if let gemini = extensionUI.geminiUsage, gemini.isConfigured {
+          if let gemini = snapshot.gemini, gemini.isConfigured {
             geminiRow(gemini)
           }
         }
@@ -2558,18 +2626,22 @@ private struct CodexAccountsView: View {
 
   @ViewBuilder
   private var currentAccount: some View {
-    if let gemini = extensionUI.geminiUsage, gemini.isConfigured, gemini.isActive {
+    if let gemini = snapshot.gemini, gemini.isConfigured, gemini.isActive {
       geminiRow(gemini)
-    } else if let account = extensionUI.codexAccounts.first(where: \.isActive)
-      ?? extensionUI.codexAccounts.first(where: \.isDefault) {
+    } else if let account = snapshot.accounts.first(where: \.isActive)
+      ?? snapshot.accounts.first(where: \.isDefault)
+      ?? snapshot.accounts.first
+    {
       accountRow(account)
+    } else if let gemini = snapshot.gemini, gemini.isConfigured {
+      geminiRow(gemini)
     } else {
       emptyStatus
     }
   }
 
   private var emptyStatus: some View {
-    Text(extensionUI.statuses["account-usage"] ?? "等待扩展提供账户信息…")
+    Text(snapshot.emptyStatus ?? "暂无账户额度数据，可点击刷新查询。")
       .font(.caption2)
       .foregroundStyle(.secondary)
       .lineLimit(5)
@@ -2594,10 +2666,10 @@ private struct CodexAccountsView: View {
         }
         Spacer()
         if !account.isActive {
-          Button("切换") { app.switchCodexAccount(to: account.name) }
+          Button("切换") { switchAccount(account.name) }
             .buttonStyle(.borderless)
             .font(.caption2)
-            .disabled(!app.canRestartSafely || !app.supportsAccountSwitch)
+            .disabled(!snapshot.canSwitch)
         }
       }
       // The hover card extends over the quota rows, so its source row must paint above them.
@@ -2624,7 +2696,7 @@ private struct CodexAccountsView: View {
         Circle()
           .fill(status.isActive ? Color.green : Color.secondary.opacity(0.35))
           .frame(width: 7, height: 7)
-        Text("Gemini").font(.caption.bold())
+        Text("Antigravity · Gemini").font(.caption.bold())
         Text("Antigravity").font(.caption2).foregroundStyle(.secondary)
         Spacer()
       }
@@ -2637,8 +2709,8 @@ private struct CodexAccountsView: View {
           HStack(spacing: 4) {
             Text(geminiWindowLabel(quota.window))
               .frame(width: 20, alignment: .leading)
-            ProgressView(value: max(0, min(100, quota.remainingPercent)), total: 100)
-              .tint(usageColor(quota.remainingPercent))
+            QuotaUsageBar(
+              remainingPercent: quota.remainingPercent, color: usageColor(quota.remainingPercent))
               .frame(minWidth: 24)
               .layoutPriority(1)
             Text("\(Int(quota.remainingPercent.rounded()))%")
@@ -2665,8 +2737,8 @@ private struct CodexAccountsView: View {
   private func usageRow(_ window: CodexUsageWindow, label: String) -> some View {
     HStack(spacing: 4) {
       Text(label).frame(width: 20, alignment: .leading)
-      ProgressView(value: max(0, min(100, window.remainingPercent)), total: 100)
-        .tint(usageColor(window.remainingPercent))
+      QuotaUsageBar(
+        remainingPercent: window.remainingPercent, color: usageColor(window.remainingPercent))
         .frame(minWidth: 24)
         .layoutPriority(1)
       Text("\(Int(window.remainingPercent.rounded()))%")
@@ -2789,185 +2861,238 @@ private struct ImageAttachmentPreview: View {
 private struct ModelSettingsView: View {
   @Environment(\.dismiss) private var dismiss
   @EnvironmentObject private var app: AppModel
+  @State private var search = ""
+  @State private var onlyVisible = false
+
+  private var filteredModels: [PiModel] {
+    let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+    let visibleIDs = Set(app.models.map(\.id))
+    return app.allModels.filter { model in
+      (!onlyVisible || visibleIDs.contains(model.id))
+        && (query.isEmpty || "\(model.name) \(model.id)".localizedCaseInsensitiveContains(query))
+    }
+  }
 
   var body: some View {
     VStack(spacing: 0) {
-      HStack {
-        VStack(alignment: .leading, spacing: 3) {
+      HStack(spacing: 12) {
+        Image(systemName: "slider.horizontal.3")
+          .font(.title2)
+          .foregroundStyle(Color.accentColor)
+          .frame(width: 40, height: 40)
+          .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+        VStack(alignment: .leading, spacing: 4) {
           Text("模型与思考等级").font(.title2.bold())
-          Text("默认模型用于新建会话；临时切换模型不会修改默认值。")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+          Text("设置新会话默认值，管理模型显示与思考等级")
+            .font(.caption).foregroundStyle(.secondary)
         }
         Spacer()
         Button(action: app.reloadModelList) {
-          if app.isLoadingConfiguration {
-            HStack(spacing: 6) {
-              ProgressView().controlSize(.small)
-              Text("正在重新载入…")
-            }
-          } else {
-            Label("重新载入模型列表", systemImage: "arrow.clockwise")
-          }
+          Label("刷新", systemImage: "arrow.clockwise")
         }
-        .disabled(!app.canReloadModelList)
-        .help("重新启动当前 Pi 连接，并从配置中重新读取可用模型")
-
+        .disabled(!app.canReloadModelList || app.isLoadingConfiguration)
+        .help("重新读取 Server 的可用模型列表")
         Button("完成") { dismiss() }
           .buttonStyle(.borderedProminent)
+          .keyboardShortcut(.defaultAction)
       }
-      .padding(20)
-
-      Divider()
-
-      HStack(spacing: 12) {
-        VStack(alignment: .leading, spacing: 3) {
-          Text("默认模型").font(.callout.weight(.medium))
-          Text("新建会话时使用；不会改变已有会话的模型。")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-        Spacer()
-        Picker(
-          "默认模型",
-          selection: Binding(
-            get: {
-              app.models.contains(where: { $0.id == app.defaultModelID })
-                ? app.defaultModelID : nil
-            },
-            set: { app.setDefaultModel($0) }
-          )
-        ) {
-          Text("未指定 · 由 Pi 决定").tag(nil as String?)
-          ForEach(app.models) { model in
-            Text("\(model.name) · \(model.provider)").tag(Optional(model.id))
-          }
-        }
-        .labelsHidden()
-        .frame(width: 260)
-      }
-      .padding(.horizontal, 20)
-      .padding(.vertical, 14)
-
-      Divider()
-
-      HStack(spacing: 12) {
-        VStack(alignment: .leading, spacing: 3) {
-          Text("全局默认思考等级").font(.callout.weight(.medium))
-          Text("无模型专属默认时使用；当前会话的等级不会因此改变。")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-        Spacer()
-        Picker(
-          "全局默认思考等级",
-          selection: Binding(
-            get: { app.globalDefaultThinkingLevel },
-            set: { app.setGlobalDefaultThinkingLevel($0) }
-          )
-        ) {
-          ForEach(PiModel.thinkingLevelOrder, id: \.self) { level in
-            Text(thinkingLevelLabel(level)).tag(level)
-          }
-        }
-        .labelsHidden()
-        .frame(width: 175)
-      }
-      .padding(.horizontal, 20)
-      .padding(.vertical, 14)
-
-      Divider()
-
-      HStack(spacing: 12) {
-        VStack(alignment: .leading, spacing: 3) {
-          Text("压缩使用的模型").font(.callout.weight(.medium))
-          Text("同时用于手动压缩和自动压缩；空闲时会在后台重新连接 Pi。")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        }
-        Spacer()
-        Picker(
-          "压缩使用的模型",
-          selection: Binding(
-            get: {
-              app.models.contains(where: { $0.id == app.compactionModelID })
-                ? app.compactionModelID : nil
-            },
-            set: { app.setCompactionModel($0) }
-          )
-        ) {
-          Text("当前对话模型 · Current").tag(nil as String?)
-          ForEach(app.models) { model in
-            Text("\(model.name) · \(model.provider)").tag(Optional(model.id))
-          }
-        }
-        .labelsHidden()
-        .frame(width: 260)
-      }
-      .padding(.horizontal, 20)
-      .padding(.vertical, 14)
+      .padding(.horizontal, 24)
+      .padding(.vertical, 18)
+      .background(Color(nsColor: .windowBackgroundColor))
 
       Divider()
 
       ScrollView {
-        LazyVStack(spacing: 0) {
-          ForEach(app.allModels) { model in
-            modelRow(model)
-            Divider()
+        VStack(alignment: .leading, spacing: 18) {
+          VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("会话默认值", icon: "bubble.left.and.bubble.right")
+            VStack(spacing: 0) {
+              settingRow("默认模型", detail: "仅用于新会话，不改变已有会话。") {
+                Picker(
+                  "默认模型",
+                  selection: Binding(
+                    get: { app.defaultModelID },
+                    set: { app.setDefaultModel($0) }
+                  )
+                ) {
+                  Text("自动选择").tag(nil as String?)
+                  if let id = app.defaultModelID, !app.models.contains(where: { $0.id == id }) {
+                    Text("\(id)（隐藏或不可用）").tag(Optional(id))
+                  }
+                  ForEach(app.models) { model in
+                    Text("\(model.name) · \(model.provider)").tag(Optional(model.id))
+                  }
+                }
+                .labelsHidden()
+              }
+              Divider().padding(.horizontal, 16)
+              settingRow("默认思考等级", detail: "模型未设置专属等级时使用。") {
+                Picker(
+                  "默认思考等级",
+                  selection: Binding(
+                    get: { app.globalDefaultThinkingLevel },
+                    set: { app.setGlobalDefaultThinkingLevel($0) }
+                  )
+                ) {
+                  ForEach(PiModel.thinkingLevelOrder, id: \.self) { level in
+                    Text(thinkingLevelLabel(level)).tag(level)
+                  }
+                }
+                .labelsHidden()
+              }
+            }
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
+          }
+
+          HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.down.right.and.arrow.up.left")
+              .foregroundStyle(Color.accentColor)
+              .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+              Text("上下文压缩").font(.caption.weight(.semibold))
+              Text("使用 /compact 命令，压缩模型与自动压缩策略遵循 Pi 配置。")
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+          }
+          .padding(12)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .background(Color.accentColor.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+
+          VStack(alignment: .leading, spacing: 10) {
+            HStack {
+              sectionTitle("可用模型", icon: "square.stack.3d.up")
+              Spacer()
+              Text("已显示 \(app.models.count) / \(app.allModels.count)")
+                .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                .monospacedDigit()
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color.secondary.opacity(0.08), in: Capsule())
+            }
+            HStack(spacing: 8) {
+              Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+              TextField("搜索模型名称或提供商", text: $search)
+                .textFieldStyle(.plain)
+              if !search.isEmpty {
+                Button {
+                  search = ""
+                } label: {
+                  Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+              }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary, lineWidth: 1))
+            HStack {
+              Toggle("仅已显示", isOn: $onlyVisible)
+                .toggleStyle(.checkbox)
+                .help("只查看已在对话选择列表中显示的模型")
+              Spacer()
+              Text("默认思考等级")
+                .frame(width: 150, alignment: .trailing)
+            }
+            .font(.caption).foregroundStyle(.secondary)
+
+            LazyVStack(spacing: 0) {
+              if filteredModels.isEmpty {
+                Text(app.allModels.isEmpty ? "暂无模型，请连接 Server 后刷新。" : "没有匹配的模型")
+                  .foregroundStyle(.secondary)
+                  .frame(maxWidth: .infinity).padding(24)
+              }
+              ForEach(filteredModels) { model in
+                modelRow(model)
+                if model.id != filteredModels.last?.id {
+                  Divider().padding(.leading, 62).padding(.trailing, 14)
+                }
+              }
+            }
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
           }
         }
-        .padding(.horizontal, 20)
+        .padding(24)
       }
+      .background(Color(nsColor: .windowBackgroundColor))
     }
-    .frame(width: 700, height: 640)
+    .frame(width: 780, height: 720)
+  }
+
+  private func sectionTitle(_ title: String, icon: String) -> some View {
+    Label(title, systemImage: icon)
+      .font(.callout.weight(.semibold))
+      .foregroundStyle(.primary)
+  }
+
+  private func settingRow<Control: View>(
+    _ title: String, detail: String, @ViewBuilder control: () -> Control
+  ) -> some View {
+    HStack(spacing: 20) {
+      VStack(alignment: .leading, spacing: 5) {
+        Text(title).font(.callout.weight(.medium))
+        Text(detail).font(.caption).foregroundStyle(.secondary)
+      }
+      Spacer(minLength: 0)
+      control()
+        .pickerStyle(.menu)
+        .controlSize(.regular)
+        .frame(width: 260)
+    }
+    .padding(.horizontal, 16)
+    .padding(.vertical, 12)
   }
 
   private func modelRow(_ model: PiModel) -> some View {
-    HStack(spacing: 14) {
+    HStack(spacing: 12) {
       Toggle(
-        "",
+        "显示 \(model.name)",
         isOn: Binding(
           get: { app.models.contains(where: { $0.id == model.id }) },
           set: { app.setModelVisible($0, modelID: model.id) }
         )
       )
-      .labelsHidden()
-      .toggleStyle(.switch)
-      .controlSize(.small)
+      .labelsHidden().toggleStyle(.switch).controlSize(.small)
+      .help("在对话模型列表中显示此模型")
 
-      VStack(alignment: .leading, spacing: 3) {
+      VStack(alignment: .leading, spacing: 4) {
         HStack(spacing: 6) {
           Text(model.name).font(.callout.weight(.medium))
+            .lineLimit(1)
+            .help(model.name)
           if model.id == app.selectedModelId {
-            Text("当前")
-              .font(.caption2)
+            Text("当前").font(.caption2)
               .foregroundStyle(Color.accentColor)
+              .padding(.horizontal, 6).padding(.vertical, 2)
+              .background(Color.accentColor.opacity(0.12), in: Capsule())
           }
         }
-        Text(model.id)
-          .font(.caption.monospaced())
-          .foregroundStyle(.secondary)
+        Text(model.id).font(.caption.monospaced())
+          .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+          .help(model.id)
       }
-
-      Spacer()
-
+      Spacer(minLength: 8)
       Picker(
-        "默认思考等级",
+        "专属默认思考等级",
         selection: Binding(
           get: { app.modelDefaultThinkingLevels[model.id] ?? "__global__" },
-          set: { value in
-            app.setDefaultThinkingLevel(value == "__global__" ? nil : value, for: model.id)
-          }
+          set: { app.setDefaultThinkingLevel($0 == "__global__" ? nil : $0, for: model.id) }
         )
       ) {
-        Text("跟随全局 · Global").tag("__global__")
+        Text("跟随全局").tag("__global__")
         ForEach(model.thinkingLevels, id: \.self) { level in
           Text(thinkingLevelLabel(level)).tag(level)
         }
       }
       .labelsHidden()
-      .frame(width: 175)
+      .pickerStyle(.menu)
+      .controlSize(.small)
+      .frame(width: 150)
+      .help("仅用于此模型的新会话；跟随全局时使用默认思考等级")
     }
+    .padding(.horizontal, 14)
     .padding(.vertical, 11)
   }
 }
@@ -3147,7 +3272,8 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 12)
                 } else {
-                  ForEach(Array(versions.extensions.enumerated()), id: \.element.id) { index, item in
+                  ForEach(Array(versions.extensions.enumerated()), id: \.element.id) {
+                    index, item in
                     extensionRow(item)
                     if index < versions.extensions.count - 1 { Divider() }
                   }
@@ -3199,10 +3325,13 @@ private struct SettingsView: View {
     }
     .frame(width: 650, height: 620)
     .onAppear { versions.refresh() }
-    .alert("删除扩展包？", isPresented: Binding(
-      get: { extensionToRemove != nil },
-      set: { if !$0 { extensionToRemove = nil } }
-    )) {
+    .alert(
+      "删除扩展包？",
+      isPresented: Binding(
+        get: { extensionToRemove != nil },
+        set: { if !$0 { extensionToRemove = nil } }
+      )
+    ) {
       Button("取消", role: .cancel) { extensionToRemove = nil }
       Button("删除", role: .destructive) {
         if let item = extensionToRemove { versions.remove(item) }
@@ -3256,7 +3385,9 @@ private struct SettingsView: View {
             .buttonStyle(.borderedProminent)
             .disabled(versions.isBusy)
         }
-        Button(role: .destructive) { extensionToRemove = item } label: {
+        Button(role: .destructive) {
+          extensionToRemove = item
+        } label: {
           Image(systemName: "trash")
         }
         .help("删除扩展包")

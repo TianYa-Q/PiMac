@@ -19,7 +19,8 @@ final class T3DesktopClient: ObservableObject {
   private var loop: Task<Void, Never>?
   private var refreshTask: Task<Void, Never>?
   private var generation = UUID()
-  private var watches: [UUID: (String, (JSON) -> Void)] = [:]
+  private var watches: [UUID: (String, (JSON) -> Void, (JSON) -> Void)] = [:]
+  private var imageCache: [String: PromptAttachment] = [:]
   private var threadRevisions: [String: Int] = [:]
   private var hasDeliveredShell = false
   private var syncedModelPreferences: Data?
@@ -35,7 +36,8 @@ final class T3DesktopClient: ObservableObject {
   init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
     if let data = defaults.data(forKey: "t3DesktopShellCache"),
-      let snapshot = try? JSONSerialization.jsonObject(with: data) as? JSON {
+      let snapshot = try? JSONSerialization.jsonObject(with: data) as? JSON
+    {
       shell = snapshot
     }
   }
@@ -112,8 +114,11 @@ final class T3DesktopClient: ObservableObject {
     projects.first { $0["workspaceRoot"] as? String == url.standardizedFileURL.path }?["id"]
       as? String
   }
-  func watch(_ id: String, owner: UUID, receive: @escaping (JSON) -> Void) {
-    watches[owner] = (id, receive)
+  func watch(
+    _ id: String, owner: UUID, receiveUI: @escaping (JSON) -> Void = { _ in },
+    receive: @escaping (JSON) -> Void
+  ) {
+    watches[owner] = (id, receive, receiveUI)
     threadRevisions.removeValue(forKey: id)
     requestRefresh()
   }
@@ -135,6 +140,7 @@ final class T3DesktopClient: ObservableObject {
     request.httpMethod = method
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("2", forHTTPHeaderField: "x-t3-orchestration-protocol")
     if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
     let (data, response) = try await session.data(for: request)
     guard generation == current else { throw CancellationError() }
@@ -154,12 +160,42 @@ final class T3DesktopClient: ObservableObject {
     try await waitUntilReady()
     var command = fields
     command["commandId"] = commandID
-    if command["createdAt"] == nil { command["createdAt"] = Self.timestamp() }
+    if command["type"] as? String == "thread.create"
+      || command["type"] as? String == "message.dispatch"
+    {
+      command["createdBy"] = "user"
+      command["creationSource"] = "web"
+    }
     // The ID is allocated once per user action. Network failure is an unknown
     // outcome, never permission for the UI to replay or create another thread.
-    let result = try await request("/api/orchestration/dispatch", method: "POST", body: command)
+    let result = try await rpc(
+      command["type"] as? String == "project.create"
+        ? "projects.mutate" : "orchestration.dispatchCommand", payload: command)
     requestRefresh()
     return result
+  }
+
+  func persistAttachments(_ images: [JSON], threadID: String, messageID: String) async throws
+    -> [JSON]
+  {
+    guard !images.isEmpty else { return [] }
+    let result = try await rpc(
+      "assets.persistChatAttachments",
+      payload: ["threadId": threadID, "messageId": messageID, "attachments": images])
+    guard let attachments = result["attachments"] as? [JSON] else { throw ClientError.rejected }
+    return attachments
+  }
+
+  func interrupt(threadID: String) async throws {
+    let native = try await request("/api/orchestration/threads/\(threadID)")
+    guard let projection = native["projection"] as? JSON,
+      let runs = projection["runs"] as? [JSON],
+      let run = runs.last(where: {
+        ["preparing", "starting", "running", "waiting"].contains($0["status"] as? String ?? "")
+      }),
+      let runID = run["id"] as? String
+    else { throw ClientError.rejected }
+    try await dispatch(["type": "run.interrupt", "threadId": threadID, "runId": runID])
   }
 
   func ensureProject(_ url: URL) async throws -> String {
@@ -180,18 +216,29 @@ final class T3DesktopClient: ObservableObject {
     guard !refreshing else { return }
     refreshing = true
     defer { refreshing = false }
+    let current = generation
     let next = try await request("/api/orchestration/shell")
-    applyShell(next)
+    applyShell(T3V2Presentation.shell(next))
     for id in Set(watches.values.map { $0.0 }) {
       guard thread(id) != nil else { continue }
       let escaped = id.addingPercentEncoding(
         withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
-      let detail = try await request("/api/orchestration/threads/\(escaped)?reasoningMessages=true")
+      let nativeDetail = try await request("/api/orchestration/threads/\(escaped)")
+      if let stats = T3V2Presentation.stats(nativeDetail),
+        let data = try? JSONEncoder().encode(stats)
+      {
+        defaults.set(data, forKey: "t3DesktopV2Metrics.\(id)")
+      }
+      let detail = T3V2Presentation.detail(nativeDetail)
+      let ui = T3V2Presentation.requests(nativeDetail)
+      for callback in watches.values.filter({ $0.0 == id }).map({ $0.2 }) { callback(ui) }
       let revision = detail["snapshotSequence"] as? Int ?? -1
       if threadRevisions[id] == revision { continue }
-      threadRevisions[id] = revision
+      let (hydrated, complete) = await hydrateImages(detail)
+      guard generation == current else { return }
+      if complete { threadRevisions[id] = revision }
       let callbacks = watches.values.filter { $0.0 == id }.map { $0.1 }
-      for callback in callbacks { callback(detail) }
+      for callback in callbacks { callback(hydrated) }
     }
   }
   // Do not invalidate the entire desktop or rewrite its cache on identical polls.
@@ -208,9 +255,10 @@ final class T3DesktopClient: ObservableObject {
   }
 
   func sessionMetrics(threadID: String) async throws -> SessionStats? {
-    guard let service else { throw ClientError.unavailable }
-    let key = "t3DesktopMetrics.\(threadID)"
-    if let stats = try? await service.sessionMetrics(threadID: threadID) {
+    let key = "t3DesktopV2Metrics.\(threadID)"
+    if let native = try? await request("/api/orchestration/threads/\(threadID)"),
+      let stats = T3V2Presentation.stats(native)
+    {
       if let data = try? JSONEncoder().encode(stats) { defaults.set(data, forKey: key) }
       return stats
     }
@@ -218,15 +266,41 @@ final class T3DesktopClient: ObservableObject {
     return try? JSONDecoder().decode(SessionStats.self, from: data)
   }
 
-  func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws {
-    guard let service else { throw ClientError.unavailable }
-    try await service.sessionControl(threadID: threadID, operation: operation, accountName: accountName)
-    requestRefresh()
+  func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws
+  {
+    guard ["compact", "manage-accounts"].contains(operation) else { throw ClientError.rejected }
+    try await dispatch([
+      "type": "message.dispatch", "threadId": threadID,
+      "messageId": UUID().uuidString, "text": operation == "compact" ? "/compact" : "/accounts", "attachments": [],
+      "dispatchMode": ["type": "start_immediately"],
+    ])
   }
 
-  func accountStatus(threadID: String, provider: String? = nil) async throws -> JSON? {
-    guard let service else { throw ClientError.unavailable }
-    return try await service.accountStatus(threadID: threadID, provider: provider)
+  func extensionResponse(
+    threadID: String, id: String, value: String?, confirmed: Bool?, cancelled: Bool
+  ) async throws {
+    let native = try await request("/api/orchestration/threads/\(threadID)")
+    guard let projection = native["projection"] as? JSON,
+      let item = (projection["turnItems"] as? [JSON])?.first(where: {
+        $0["requestId"] as? String == id
+      })
+    else { throw ClientError.rejected }
+    var command: JSON = ["type": "runtime-request.respond", "threadId": threadID, "requestId": id]
+    if item["type"] as? String == "approval_request" {
+      command["decision"] = cancelled ? "cancel" : confirmed == true ? "accept" : "decline"
+    } else {
+      let questions = item["questions"] as? [JSON] ?? []
+      guard let questionID = questions.first?["id"] as? String, questions.count == 1 else {
+        throw ClientError.rejected
+      }
+      command["answers"] = cancelled ? [:] : [questionID: value ?? ""]
+    }
+    try await dispatch(command)
+  }
+
+  func accountStatus(threadID: String, provider: String? = nil, force: Bool = false) async throws -> JSON? {
+    guard let service, let provider, ["openai", "openai-codex", "antigravity"].contains(provider) else { return nil }
+    return try await service.accountStatus(provider: provider, force: force)
   }
 
   func requestRefresh() {
@@ -237,13 +311,14 @@ final class T3DesktopClient: ObservableObject {
     }
   }
 
-  private func syncModelPreferences() async throws {
+  func syncModelPreferences() async throws {
     guard let service else { throw ClientError.unavailable }
     let hidden = (defaults.stringArray(forKey: "t3HiddenModels") ?? []).sorted()
     let model = defaults.string(forKey: "defaultNewSessionModelID")
-    let data = try JSONSerialization.data(withJSONObject: [
-      "hiddenModels": hidden, "defaultModel": model as Any? ?? NSNull(),
-    ], options: [.sortedKeys])
+    let data = try JSONSerialization.data(
+      withJSONObject: [
+        "hiddenModels": hidden, "defaultModel": model as Any? ?? NSNull(),
+      ], options: [.sortedKeys])
     guard data != syncedModelPreferences else { return }
     try await service.syncModelPreferences(hiddenModels: hidden, defaultModel: model)
     try await loadConfig()
@@ -261,7 +336,7 @@ final class T3DesktopClient: ObservableObject {
       return nativeProvider
     }
   }
-  private func rpc(_ method: String) async throws -> JSON {
+  private func rpc(_ method: String, payload: JSON = [:]) async throws -> JSON {
     let current = generation
     let ticket = try await request("/api/auth/websocket-ticket", method: "POST", body: [:])
     guard let secret = ticket["ticket"] as? String, let base = service?.serverURL else {
@@ -271,7 +346,7 @@ final class T3DesktopClient: ObservableObject {
     components.scheme = "ws"
     components.path = "/ws"
     components.queryItems = [
-      .init(name: "orchestrationProtocol", value: "1"), .init(name: "wsTicket", value: secret),
+      .init(name: "orchestrationProtocol", value: "2"), .init(name: "wsTicket", value: secret),
     ]
     let socket = session.webSocketTask(with: components.url!)
     socket.maximumMessageSize = 16 * 1024 * 1024
@@ -289,7 +364,7 @@ final class T3DesktopClient: ObservableObject {
       .string(
         String(
           decoding: try JSONSerialization.data(withJSONObject: [
-            "_tag": "Request", "id": id, "tag": method, "payload": [:], "headers": [],
+            "_tag": "Request", "id": id, "tag": method, "payload": payload, "headers": [],
           ]), as: UTF8.self)))
     while true {
       let frame = try await socket.receive()
@@ -315,6 +390,84 @@ final class T3DesktopClient: ObservableObject {
         return value
       }
     }
+  }
+
+  private func hydrateImages(_ detail: JSON) async -> (JSON, Bool) {
+    var detail = detail
+    guard var thread = detail["thread"] as? JSON else { return (detail, true) }
+    var complete = true
+    var downloads = 0
+    func attachments(_ descriptors: [JSON]) async -> [PromptAttachment] {
+      var result: [PromptAttachment] = []
+      for descriptor in descriptors {
+        guard let id = descriptor["id"] as? String, let base = service?.serverURL else { continue }
+        let key = base.absoluteString + id
+        if let cached = imageCache[key] {
+          result.append(cached)
+          continue
+        }
+        guard downloads < 8 else {
+          complete = false
+          continue
+        }
+        downloads += 1
+        do {
+          let image = try await downloadImage(descriptor)
+          imageCache[key] = image
+          result.append(image)
+        } catch { complete = false }
+      }
+      return result
+    }
+    var activities = thread["activities"] as? [JSON] ?? []
+    for index in activities.indices {
+      var payload = activities[index]["payload"] as? JSON ?? [:]
+      var data = payload["data"] as? JSON ?? [:]
+      if let images = data["images"] as? [JSON], !images.isEmpty {
+        data["localImages"] = await attachments(images)
+        payload["data"] = data
+        activities[index]["payload"] = payload
+      }
+    }
+    thread["activities"] = activities
+    var messages = thread["messages"] as? [JSON] ?? []
+    for index in messages.indices {
+      if let images = messages[index]["attachments"] as? [JSON], !images.isEmpty {
+        messages[index]["localImages"] = await attachments(
+          images.filter { $0["type"] as? String == "image" })
+      }
+    }
+    thread["messages"] = messages
+    detail["thread"] = thread
+    return (detail, complete)
+  }
+
+  private func downloadImage(_ descriptor: JSON) async throws -> PromptAttachment {
+    guard let base = service?.serverURL, let id = descriptor["id"] as? String,
+      let mime = descriptor["mimeType"] as? String,
+      let size = descriptor["sizeBytes"] as? Int, size > 0, size <= T3ToolImageCache.maxBytes,
+      T3ToolImageCache.fileExtension(mime) != nil
+    else { throw ClientError.rejected }
+    let cacheKey = id
+    if let cached = T3ToolImageCache.cached(key: cacheKey, mimeType: mime, size: size) {
+      return cached
+    }
+    let signed = try await rpc(
+      "assets.createUrl", payload: ["resource": ["_tag": "attachment", "attachmentId": id]])
+    guard let relative = signed["relativeUrl"] as? String, relative.hasPrefix("/api/assets/"),
+      let url = URL(string: base.absoluteString + relative), url.host == base.host,
+      url.port == base.port
+    else { throw ClientError.rejected }
+    let current = generation
+    let (bytes, response) = try await session.bytes(from: url)
+    guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ClientError.rejected }
+    var data = Data()
+    for try await byte in bytes {
+      guard data.count < size else { throw ClientError.rejected }
+      data.append(byte)
+    }
+    guard generation == current, data.count == size else { throw ClientError.rejected }
+    return try T3ToolImageCache.store(data, key: cacheKey, mimeType: mime)
   }
 
   // MainActor isolation keeps these reusable formatters serialized.

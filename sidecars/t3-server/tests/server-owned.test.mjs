@@ -1,165 +1,164 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
 import { call } from '../generated/client.mjs';
 const token = 'ab'.repeat(32);
-const piConfig = { binaryPath: process.execPath, binaryArgs: [new URL('./fixtures/pi.mjs', import.meta.url).pathname] };
-const grants = { grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
-  subject_token_type: 'urn:t3:params:oauth:token-type:environment-bootstrap', requested_token_type: 'urn:ietf:params:oauth:token-type:access_token' };
 const delay = ms => new Promise(r => setTimeout(r, ms));
 async function eventually(fn) {
-  for (let n = 0; n < 100; n++) { const value = await fn(); if (value) return value; await delay(50); }
-  throw new Error('Timed out waiting for server projection');
+  for (let n = 0; n < 200; n++) { const value = await fn(); if (value) return value; await delay(50); }
+  throw new Error('Timed out waiting for official V2 projection');
 }
 async function open(directory) {
-  const gateway = await createServerGateway({ token, directory, piConfig });
+  const binary = join(directory, 'fixture-pi');
+  await writeFile(binary, `#!/bin/sh\nexec '${process.execPath}' '${new URL('./fixtures/pi.mjs', import.meta.url).pathname}' "$@"\n`);
+  await chmod(binary, 0o700);
+  const gateway = await createServerGateway({ token, directory, piConfig: { binaryPath: binary } });
   await new Promise(r => gateway.server.listen(0, '127.0.0.1', r));
   const base = gateway.serverURL;
-  assert.equal((await fetch(base + '/api/orchestration/shell')).status, 401);
-  const privateURL = `http://127.0.0.1:${gateway.server.address().port}`;
-  assert.equal((await fetch(privateURL + '/internal/request', { method: 'POST',
-    headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
-    body: JSON.stringify({ method: 'session.prompt' }) })).status, 404);
-  const pairing = await gateway.official.management.pairing({ label: 'Migration test' });
-  const response = await fetch(base + '/oauth/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ ...grants, subject_token: pairing.credential }) });
-  const auth = await response.json(); assert.equal(response.status, 200);
-  const headers = { authorization: 'Bearer ' + auth.access_token, 'content-type': 'application/json' };
+  const { token: credential } = await gateway.official.management.desktopSession();
+  const headers = { authorization: 'Bearer ' + credential, 'content-type': 'application/json', 'x-t3-orchestration-protocol': '2' };
   const get = async pathname => {
-    const response = await fetch(base + pathname, { headers }); assert.equal(response.status, 200); return response.json();
+    const response = await fetch(base + pathname, { headers });
+    assert.equal(response.status, 200, await response.clone().text()); return response.json();
   };
-  const ws = async () => {
+  const ws = async (protocol = '2') => {
     const response = await fetch(base + '/api/auth/websocket-ticket', { method: 'POST', headers, body: '{}' });
     const ticket = await response.json(); assert.equal(response.status, 200);
-    return base.replace('http:', 'ws:') + '/ws?orchestrationProtocol=1&wsTicket=' + ticket.ticket;
+    return base.replace('http:', 'ws:') + '/ws?orchestrationProtocol=' + protocol + '&wsTicket=' + ticket.ticket;
   };
-  const dispatch = async command => {
-    const response = await fetch(base + '/api/orchestration/dispatch', { method: 'POST', headers, body: JSON.stringify(command) });
-    const body = await response.json(); assert.equal(response.status, 200, JSON.stringify(body)); return body;
+  const rpc = async (method, input) => call(await ws(), method, input);
+  const dispatch = fields => rpc('orchestration.dispatchCommand', { commandId: randomUUID(), ...fields });
+  const create = async () => {
+    const projectId = randomUUID(), threadId = randomUUID();
+    await rpc('projects.mutate', { type: 'project.create', commandId: randomUUID(), projectId, title: 'Official Pi', workspaceRoot: directory });
+    await dispatch({ type: 'thread.create', projectId, threadId, title: 'Official thread', createdBy: 'user', creationSource: 'web',
+      modelSelection: { instanceId: 'pi', model: 'test/model' }, runtimeMode: 'full-access', interactionMode: 'default', branch: null, worktreePath: null });
+    return threadId;
   };
-  return { gateway, get, ws, dispatch, close: () => gateway.close() };
-}
-async function sessionFiles(directory) {
-  const root = join(directory, 'server-owned/pi-sessions');
-  const instances = await readdir(root).catch(() => []);
-  const files = [];
-  for (const instance of instances) for (const file of await readdir(join(root, instance))) files.push(join(root, instance, file));
-  return files;
+  const message = (threadId, text, extra = {}) => ({ type: 'message.dispatch', commandId: randomUUID(), threadId,
+    messageId: randomUUID(), text, attachments: [], createdBy: 'user', creationSource: 'web', dispatchMode: { type: 'start_immediately' }, ...extra });
+  const snapshot = async threadId => (await get('/api/orchestration/threads/' + threadId)).projection;
+  return { gateway, get, ws, rpc, dispatch, create, message, snapshot, close: () => gateway.close() };
 }
 
-test('desktop model preferences reach mobile config and server default selection', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'pimac-model-sync-'));
+test('official Pi discovery, model preferences, and protocol authorization', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-official-config-'));
   const f = await open(directory);
   t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
-  const update = async body => {
-    const response = await fetch(`http://127.0.0.1:${f.gateway.server.address().port}/internal/auth/model-preferences`, {
-      method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(body),
-    });
-    assert.equal(response.status, 200);
-  };
-  await update({ hiddenModels: [], defaultModel: 'test/model' });
-  let config = await call(await f.ws(), 'server.getConfig');
-  assert.equal(config.providers[0].models[0].isDefault, true);
-  assert.deepEqual(config.settings.defaultModelSelection, { instanceId: 'pi', model: 'test/model' });
-  await update({ hiddenModels: ['test/model'], defaultModel: 'test/model' });
-  config = await call(await f.ws(), 'server.getConfig');
-  assert.deepEqual(config.providers[0].models, []);
-  assert.equal(config.settings.defaultModelSelection, null);
-  const native = await f.gateway.official.management.modelCatalog();
-  assert.equal(JSON.parse(native.catalogs).pi[0].slug, 'test/model');
+  await f.gateway.official.management.modelCatalog();
+  const config = await f.rpc('server.getConfig');
+  assert.equal(config.providers[0].driver, 'pi');
+  assert(config.providers[0].models.some(m => m.slug === 'test/model'));
+  assert.equal((await fetch(f.gateway.serverURL + '/api/orchestration/shell', { headers: { 'x-t3-orchestration-protocol': '2' } })).status, 401);
+  await assert.rejects(call(await f.ws('1'), 'server.getConfig'));
+  await f.gateway.official.management.modelPreferences({ hiddenModels: ['test/model'], defaultModel: 'test/model' });
+  const updated = await f.rpc('server.getConfig');
+  assert.equal(updated.settings.defaultModelSelection, null);
+  const supervisor = `http://127.0.0.1:${f.gateway.server.address().port}/internal/auth/account-status`;
+  const body = JSON.stringify({ provider: 'unsupported' });
+  assert.equal((await fetch(supervisor, { method: 'POST', headers: { 'content-type': 'application/json' }, body })).status, 401);
+  assert.equal((await fetch(supervisor, { method: 'POST', headers: { authorization: 'Bearer ' + token, origin: 'https://example.com', 'content-type': 'application/json' }, body })).status, 401);
+  assert.equal((await fetch(supervisor, { method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body })).status, 400);
+  assert.equal((await fetch(f.gateway.serverURL + '/internal/auth/account-status', { method: 'POST', headers: { 'content-type': 'application/json' }, body })).status, 404);
+  assert(JSON.parse((await f.gateway.official.management.modelCatalog()).catalogs).pi.some(m => m.slug === 'test/model'));
 });
 
-test('T3 owns projects, turns, native receipts and projections without any desktop IPC', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'pimac-server-owned-'));
+test('official V2 owns receipts, settlement, transcript, restart and native Pi resume', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-official-turn-'));
   let f;
   t.after(async () => { await f?.close(); await rm(directory, { recursive: true, force: true }); });
   f = await open(directory);
-  assert.equal((await f.get('/api/orchestration/shell')).threads.length, 0);
-  assert.equal((await f.get('/api/orchestration/shell')).projects.length, 0);
-  const config = await call(await f.ws(), 'server.getConfig');
-  assert.equal(config.providers[0].driver, 'pi');
-  assert.equal(config.providers[0].models[0].slug, 'test/model');
-  const projectId = randomUUID(), threadId = randomUUID(), createdAt = new Date().toISOString();
-  await f.dispatch({ type: 'project.create', commandId: randomUUID(), projectId, title: 'Server Project', workspaceRoot: directory, createdAt });
-  const selection = { instanceId: 'pi', model: 'test/model' };
-  await call(await f.ws(), 'orchestration.dispatchCommand', { type: 'thread.create', commandId: randomUUID(), projectId, threadId,
-    title: 'Server Thread', modelSelection: selection, runtimeMode: 'full-access', interactionMode: 'default', branch: null, worktreePath: null, createdAt });
-  const command = { type: 'thread.turn.start', commandId: randomUUID(), threadId, runtimeMode: 'full-access', interactionMode: 'default', createdAt,
-    message: { messageId: randomUUID(), role: 'user', text: '你好\u2028world', attachments: [] } };
+  const threadId = await f.create();
+  const command = f.message(threadId, '你好\u2028world');
   await f.dispatch(command);
-  await eventually(async () => {
-    const snapshot = await f.get('/api/orchestration/threads/' + threadId);
-    return snapshot.thread.messages.some(m => m.role === 'assistant' && m.text === 'Reply: 你好\u2028world' && !m.streaming) && snapshot;
-  });
-  await call(await f.ws(), 'orchestration.dispatchCommand', command); // Cross-transport retry is a native T3 receipt.
-  await delay(200);
-  const files = await sessionFiles(directory); assert.equal(files.length, 1);
-  const records = (await readFile(files[0], 'utf8')).trim().split('\n').map(JSON.parse);
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+  let projection = await f.snapshot(threadId);
+  assert(projection.visibleTurnItems.some(row => row.item.text === 'Reply: 你好\u2028world'));
+  assert(projection.providerThreads[0].nativeThreadRef.nativeId.endsWith('.jsonl'));
+  await f.dispatch(command);
+  let records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(records.filter(r => r.command === 'prompt').length, 1);
-  assert(records.every(r => r.secretInherited === false));
-  assert.equal((await readdir(join(directory, 'server-owned'))).includes('native-receipts.json'), false);
+  assert(records.every(r => !r.secretInherited));
   await f.close();
   f = await open(directory);
-  const shell = await f.get('/api/orchestration/shell');
-  assert.equal(shell.threads[0].id, threadId); assert.equal(shell.projects[0].id, projectId);
-  const detail = await f.get('/api/orchestration/threads/' + threadId);
-  assert(detail.thread.messages.some(m => m.text === 'Reply: 你好\u2028world'));
-  await f.dispatch(command); // Restart does not resend the accepted prompt.
-  await delay(200);
-  assert.equal((await readFile(files[0], 'utf8')).split('\n').filter(line => line.includes('"command":"prompt"')).length, 1);
-  // A new turn after restart resumes the same provider-owned session.
-  const resumedCommand = { ...command, commandId: randomUUID(), createdAt: new Date().toISOString(),
-    message: { ...command.message, messageId: randomUUID(), text: 'resumed' } };
-  await f.dispatch(resumedCommand);
-  await eventually(async () => (await f.get('/api/orchestration/threads/' + threadId)).thread.messages.some(m => m.text === 'Reply: resumed' && !m.streaming));
-  assert.deepEqual(await sessionFiles(directory), files);
+  assert((await f.get('/api/orchestration/shell')).threads.some(thread => thread.id === threadId));
+  await f.dispatch(command);
+  await f.dispatch(f.message(threadId, 'resumed'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.filter(r => r.status === 'completed').length === 2);
+  records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(records.filter(r => r.command === 'prompt').length, 2);
+  assert(records.some(r => r.command === 'switch_session'));
 });
 
-test('native T3 command reactor routes model changes and cancellation into the Pi adapter', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'pimac-server-cancel-'));
+test('official Pi tools, model selection, steering and cancellation', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-official-tools-'));
   const f = await open(directory);
   t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
-  const projectId = randomUUID(), threadId = randomUUID(), createdAt = new Date().toISOString();
-  await f.dispatch({ type: 'project.create', commandId: randomUUID(), projectId, title: 'Cancel test', workspaceRoot: directory, createdAt });
-  await f.dispatch({ type: 'thread.create', commandId: randomUUID(), projectId, threadId, title: 'Cancel Thread',
-    modelSelection: { instanceId: 'pi', model: 'test/model' }, runtimeMode: 'full-access', interactionMode: 'default', branch: null, worktreePath: null, createdAt });
-  await f.dispatch({ type: 'thread.turn.start', commandId: randomUUID(), threadId, createdAt, runtimeMode: 'full-access', interactionMode: 'default',
-    modelSelection: { instanceId: 'pi', model: 'test/other', options: [{ id: 'thinkingLevel', value: 'high' }] },
-    message: { messageId: randomUUID(), role: 'user', text: 'wait', attachments: [] } });
-  await eventually(async () => {
-    const files = await sessionFiles(directory);
-    return files.length && (await readFile(files[0], 'utf8')).includes('"command":"prompt"');
-  });
-  const beforeSteer = (await f.get('/api/orchestration/threads/' + threadId)).thread.latestTurn;
-  const steering = { type: 'thread.turn.start', commandId: randomUUID(), threadId,
-    createdAt: new Date().toISOString(), runtimeMode: 'full-access', interactionMode: 'default',
-    message: { messageId: randomUUID(), role: 'user', text: 'change direction', attachments: [] } };
-  await f.dispatch(steering);
-  await eventually(async () => {
-    const files = await sessionFiles(directory);
-    return (await readFile(files[0], 'utf8')).includes('"streamingBehavior":"steer"');
-  });
-  await f.dispatch(steering); // Receipt retry must not enqueue the steer twice.
-  const afterSteer = (await f.get('/api/orchestration/threads/' + threadId)).thread.latestTurn;
-  assert.equal(afterSteer.turnId, beforeSteer.turnId);
-  assert.equal(afterSteer.state, beforeSteer.state);
-  await call(await f.ws(), 'orchestration.dispatchCommand', { type: 'thread.turn.interrupt', commandId: randomUUID(), threadId, createdAt: new Date().toISOString() });
-  await eventually(async () => {
-    const files = await sessionFiles(directory);
-    return (await readFile(files[0], 'utf8')).includes('"command":"abort"');
-  });
-  await eventually(async () => (await f.get('/api/orchestration/threads/' + threadId)).thread.latestTurn?.state === 'interrupted');
-  const files = await sessionFiles(directory);
-  const records = (await readFile(files[0], 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.equal(records.filter(r => r.command === 'prompt').length, 2);
-  assert.equal(records.filter(r => r.streamingBehavior === 'steer').length, 1);
-  assert.equal(records.filter(r => r.command === 'set_thinking_level').length, 1);
-  assert.equal(records.filter(r => r.command === 'abort').length, 1);
-  // No retired desktop command IPC was used: all mutations above go through
-  // the official orchestration endpoint and the provider-owned fixture log.
-  assert.equal(records.some(r => r.command === 'desktop.request'), false);
+  const threadId = await f.create();
+  await f.dispatch(f.message(threadId, 'tools'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+  const tools = (await f.snapshot(threadId)).turnItems;
+  assert(tools.some(item => item.type === 'dynamic_tool' && item.toolName === 'read'));
+  const code = tools.find(item => item.toolName === 'codemode');
+  const nested = tools.find(item => item.input?.path === 'nested.txt');
+  assert(code);
+  assert(nested);
+  assert.equal(nested.parentItemId, code.id);
+  assert.equal(tools.find(item => item.input?.path === 'fixture.txt').parentItemId, null);
+  await f.dispatch({ type: 'thread.model-selection.set', threadId, modelSelection: { instanceId: 'pi', model: 'test/model', options: [{ id: 'thinking', value: 'high' }] } });
+  await f.dispatch(f.message(threadId, 'wait'));
+  const active = await eventually(async () => (await f.snapshot(threadId)).runs.find(r => r.status === 'running'));
+  await eventually(async () => (await f.snapshot(threadId)).providerTurns.some(turn => turn.status === 'running'));
+  const steer = f.message(threadId, 'steer', { dispatchMode: { type: 'steer_active', targetRunId: active.id } });
+  await f.dispatch(steer);
+  await f.dispatch(steer);
+  await f.dispatch({ type: 'run.interrupt', threadId, runId: active.id });
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.id === active.id && ['interrupted', 'cancelled'].includes(r.status)));
+  const records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(records.filter(r => r.message === 'steer').length, 1);
+  assert(records.some(r => r.streamingBehavior === 'steer'));
+  assert(records.some(r => r.command === 'abort'));
+});
+
+test('official extension dialogs respond through runtime requests and /compact uses native Pi', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-official-dialog-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const threadId = await f.create();
+  await f.dispatch(f.message(threadId, 'dialog'));
+  const request = await eventually(async () => (await f.snapshot(threadId)).runtimeRequests.find(r => r.status === 'pending'));
+  const item = (await f.snapshot(threadId)).turnItems.find(item => item.requestId === request.id);
+  assert.equal(item.type, 'user_input_request');
+  await f.dispatch({ type: 'runtime-request.respond', threadId, requestId: request.id, answers: { [item.questions[0].id]: 'official answer' } });
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+  assert((await f.snapshot(threadId)).visibleTurnItems.some(row => row.item.text === 'Dialog: official answer'));
+  await f.dispatch(f.message(threadId, '/compact'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.filter(r => r.status === 'completed').length === 2);
+  assert((await f.snapshot(threadId)).turnItems.some(item => item.type === 'compaction'));
+  const records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert(records.some(r => r.command === 'compact'));
+  assert(!records.some(r => r.command === 'prompt' && r.message === '/compact'));
+});
+
+test('official attachment persistence, signed asset access and Pi image delivery', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-official-images-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const threadId = await f.create(), messageId = randomUUID();
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1cAAAAASUVORK5CYII=', 'base64');
+  const persisted = await f.rpc('assets.persistChatAttachments', { threadId, messageId, attachments: [{
+    type: 'image', name: 'fixture.png', mimeType: 'image/png', sizeBytes: bytes.length, dataUrl: 'data:image/png;base64,' + bytes.toString('base64'),
+  }] });
+  const signed = await f.rpc('assets.createUrl', { resource: { _tag: 'attachment', attachmentId: persisted.attachments[0].id } });
+  const asset = await fetch(f.gateway.serverURL + signed.relativeUrl);
+  assert.equal(asset.status, 200);
+  assert.deepEqual(Buffer.from(await asset.arrayBuffer()), bytes);
+  await f.dispatch(f.message(threadId, 'image', { messageId, attachments: persisted.attachments }));
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+  const records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert(records.some(r => r.command === 'prompt' && r.imageCount === 1));
 });

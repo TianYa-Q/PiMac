@@ -3,7 +3,7 @@
 Desktop, Telegram and the unmodified T3 iOS client now use one native T3 Server:
 
 ```text
-SwiftUI / Telegram / iOS → T3 orchestration → Pi Provider Adapter → Pi runtime
+SwiftUI / Telegram / protocol-2 iOS → official T3 orchestrator V2 → official Pi Provider → Pi runtime
 ```
 
 There is no desktop-state projection, private workspace command bridge or second
@@ -53,12 +53,23 @@ Projects, threads, revisions and continuation identity do not depend on desktop
 tabs, selected projects or a desktop Pi process.
 
 Supported operations include thread creation, text/image turns, model/thinking
-selection and cancellation. The Adapter supports explicit full-access/default
-mode only. Images use T3 attachment storage (PNG/JPEG/WebP, 8 images / 8MiB total).
-Unsupported sandbox/approval, plan, rollback, terminal/worktree operations and
-extension dialogs fail explicitly rather than falling back to desktop RPC.
+selection, steering, cancellation, /compact and official extension runtime requests.
+The desktop selects full-access/default mode; upstream Pi also supports tool
+approval policies (these are not an OS sandbox). Images use official attachment
+persistence and signed asset URLs. Desktop terminal/worktree/rollback controls
+remain unavailable rather than falling back to a private Pi RPC.
+Clients must support orchestration protocol 2; real App Store acceptance remains
+pending. See docs/t3-server-migration.md for wire-output and upgrade limitations.
 Command acceptance is not task completion; unknown outcomes must be inspected
 before resubmitting. `agent_settled`, not `agent_end`, determines completion.
+
+Pi output-speed telemetry is a narrow build-time adapter patch, not a separate
+orchestration or persistence path. It aggregates provider-reported `usage.output`
+from assistant messages into native `turnTokenUsage`, with an optional
+`assistantDurationMs` wire field measured between assistant start/end events.
+Tool time and requests without known output usage are excluded. The desktop can
+show speed without context-window stats; new runs do not reuse old throughput.
+Both server and desktop-client bundles must be rebuilt when this schema changes.
 
 The desktop currently reads native HTTP snapshots by polling. iOS uses upstream
 shell/thread subscriptions and completion markers. Pairing or socket connection
@@ -83,14 +94,24 @@ termination and authentication, not the hosted relay or real mobile device.
 
 ## Ownership and recovery
 
-The supervisor holds `owner.lock` until the Node child exits. A child-side
-`child-owner.json` marker prevents an orphan from sharing the state directory.
-EOF shuts down the scoped Server and Pi runtimes. No automatic lock stealing,
-state reset, history activation or uncertain prompt replay is performed.
+T3 Server is app-owned: it starts with Pi Mac, and Cmd-Q / closing the last
+window waits for Server, Pi and Tunnel finalizers before the app exits. Closing
+or changing a SwiftUI view alone does not stop the service. Development reload
+uses the same shutdown barrier. A rapid relaunch waits up to 15 seconds for the
+old child's kernel lock rather than stealing it. EOF requests shutdown; reparent detection also
+stops Node after the app crashes, even if an inherited pipe keeps EOF delayed.
 
-After a forced crash, verify that the recorded child and all related sidecars
-have exited before moving a stale marker aside. PID alone is not proof of
-identity; never kill unrelated processes or remove live locks/credential files.
+The supervisor holds `owner.lock` until Node exits. Node holds a BSD kernel
+lock on `child-owner.lock` using macOS `lockf` descriptor mode. Locks release on
+process exit, even SIGKILL; never unlink these lock files. `child-owner.json` is
+only diagnostic metadata, not the lock or shutdown barrier. A proven-dead legacy
+PID marker is archived during startup under the kernel lock; a live, malformed
+or unsafe legacy marker remains denied. No live lock stealing, state reset,
+history activation or uncertain prompt replay is performed.
+
+A forced kill of Node itself cannot run provider finalizers; inspect surviving
+sidecars before manual recovery. Never kill unrelated processes or remove live
+locks/credential files.
 
 ## Build and verification
 

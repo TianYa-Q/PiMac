@@ -177,11 +177,15 @@ struct T3SettingsView: View {
     }
   }
 
+  private var connectedClients: [T3PairedClient] {
+    service.clients.filter(\.connected)
+  }
+
   private var devicesView: some View {
     card {
       HStack {
-        Label("已授权设备", systemImage: "iphone").font(.headline)
-        Text("\(service.clients.count)").font(.caption).foregroundStyle(.secondary)
+        Label("当前连接的设备", systemImage: "iphone").font(.headline)
+        Text("\(connectedClients.count)").font(.caption).foregroundStyle(.secondary)
         Spacer()
         Button {
           Task { await service.refreshClients() }
@@ -190,25 +194,22 @@ struct T3SettingsView: View {
         }
         .controlSize(.small).disabled(service.managementBusy)
       }
-      if service.clients.isEmpty {
-        Text("暂无已授权设备，请在 T3 iOS 登录同一账号。")
+      if connectedClients.isEmpty {
+        Text("暂无设备连接，请在 T3 iOS 登录同一账号并连接此 Mac。")
           .font(.caption).foregroundStyle(.secondary).padding(.vertical, 4)
       } else {
-        ForEach(Array(service.clients.enumerated()), id: \.element.id) { index, client in
+        ForEach(Array(connectedClients.enumerated()), id: \.element.id) { index, client in
           if index > 0 { Divider() }
           HStack(spacing: 12) {
             Image(systemName: "iphone")
               .font(.title3).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 4) {
               Text(client.name).font(.body.weight(.medium))
-              Label(client.connected ? "已连接" : "已授权 · 当前未连接",
-                systemImage: client.connected ? "circle.fill" : "circle")
+              Label("已连接", systemImage: "circle.fill")
                 .font(.caption)
-                .foregroundStyle(client.connected ? Color.green : Color.secondary)
+                .foregroundStyle(Color.green)
             }
             Spacer()
-            Button("撤销授权", role: .destructive) { Task { await service.revokeClient(client.id) } }
-              .controlSize(.small).disabled(service.managementBusy)
           }
           .padding(.vertical, 4)
         }

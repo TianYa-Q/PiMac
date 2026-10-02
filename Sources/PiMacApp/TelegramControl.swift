@@ -869,7 +869,7 @@ final class TelegramControl: ObservableObject {
           "\(account.isActive ? "✓ " : "")\(page.start + index + 1). \(TelegramPresentation.compactLabel(account.name, limit: 32))",
           TelegramPresentation.choiceCommand(.account, value: account.name))
       }
-      rows += choices.map { [$0] }
+      if model?.supportsAccountSwitch == true { rows += choices.map { [$0] } }
       // Accept legacy /accounts cards, but emit only the canonical /usage route.
       let navigation = TelegramPresentation.navigation(page, command: "/usage")
       if !navigation.isEmpty { rows.append(navigation) }
@@ -1615,7 +1615,8 @@ final class TelegramControl: ObservableObject {
       let usage = workspace.extensionUI.usage(for: model)
       return Self.usageMessage(
         accounts: usage.accounts, gemini: usage.gemini, updatedAt: usage.updatedAt,
-        page: parts.count == 2 ? Int(parts[1]) ?? 1 : 1)
+        page: parts.count == 2 ? Int(parts[1]) ?? 1 : 1,
+        supportsAccountSwitch: model?.supportsAccountSwitch == true)
     }
     guard
       let model = await
@@ -1631,7 +1632,7 @@ final class TelegramControl: ObservableObject {
     case let action
     where (action.hasPrefix("accountid:") || action.hasPrefix("account:")) && fromCallback:
       guard model.supportsAccountSwitch else {
-        return "当前账户扩展未报告此提供商的切换能力，请升级 account-usage。"
+        return "当前额度列表为只读，暂不支持从 Telegram 切换线程账户；请在 Mac 使用账户管理。"
       }
       let accounts = workspace.extensionUI.usage(for: model).accounts
       guard
@@ -2462,10 +2463,10 @@ final class TelegramControl: ObservableObject {
 
   static func usageMessage(
     accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?, now: Date = .now,
-    page requestedPage: Int = 1
+    page requestedPage: Int = 1, supportsAccountSwitch: Bool = false
   ) -> String {
     guard !accounts.isEmpty || gemini?.isConfigured == true else {
-      return "暂无账户额度数据\n请在 Mac 启用 account-usage 并等待同步。"
+      return "暂无账户额度数据\n请在 Mac 点击账户额度刷新。"
     }
     let page = TelegramPresentation.page(
       requestedPage, count: accounts.count, size: TelegramPresentation.accountPageSize)
@@ -2509,9 +2510,11 @@ final class TelegramControl: ObservableObject {
       lines.append("⚠️ 缓存较旧 · 以实际额度为准")
     }
     if !accounts.isEmpty {
-      lines.append(
-        "当前 Codex：\(TelegramPresentation.compactLabel(accounts.first(where: \.isActive)?.name ?? "待同步", limit: 32))"
-      )
+      if let active = accounts.first(where: \.isActive) {
+        lines.append("当前 Codex：\(TelegramPresentation.compactLabel(active.name, limit: 32))")
+      } else {
+        lines.append("当前线程账户：未确认（额度列表不代表线程绑定）")
+      }
     }
     for (offset, account) in accounts.dropFirst(page.start).prefix(page.end - page.start)
       .enumerated()
@@ -2552,7 +2555,9 @@ final class TelegramControl: ObservableObject {
       }
     }
     if page.number > 1, gemini?.isConfigured == true { lines.append("\nGemini 额度在第 1 页") }
-    lines.append("\n● 当前账户 · 空闲时可切换\n仅本地缓存，不主动刷新额度。")
+    lines.append(supportsAccountSwitch
+      ? "\n● 当前账户 · 空闲时可切换\n仅本地缓存，不主动刷新额度。"
+      : "\n只读额度列表 · 不支持直接切换线程账户\n仅本地缓存，不主动刷新额度。")
     return lines.joined(separator: "\n")
   }
 

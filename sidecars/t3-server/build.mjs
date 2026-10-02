@@ -20,12 +20,16 @@ export const plugin = { name: 'pimac-native-backend', setup(builder) {
     const spec = manifest.exports[rest.length ? `./${rest.join('/')}` : '.'];
     return { path: resolve(pkg, typeof spec === 'string' ? spec : spec.import) };
   });
-  builder.onResolve({ filter: /^effect-(acp|codex-app-server)\// }, args => {
-    const [name, ...rest] = args.path.split('/'); return { path: join(upstream, 'packages', name, 'src', rest.join('/') + '.ts') };
+  builder.onResolve({ filter: /^effect-(acp|codex-app-server)\// }, async args => {
+    const [name, ...rest] = args.path.split('/');
+    const pkg = join(upstream, 'packages', name);
+    const manifest = JSON.parse(await readFile(join(pkg, 'package.json'), 'utf8'));
+    const spec = manifest.exports['./' + rest.join('/')];
+    return { path: resolve(pkg, typeof spec === 'string' ? spec : spec.import) };
   });
   builder.onResolve({ filter: /^pimac:/ }, args => ({ path: join(root, args.path.slice(6) + (args.path.endsWith('.mjs') ? '' : '.mjs')) }));
   builder.onResolve({ filter: /^(node-pty|@ff-labs\/fff-node|@napi-rs\/keyring|@anthropic-ai\/claude-agent-sdk|@opencode-ai\/sdk)(\/.*)?$/ }, args => ({ path: args.path, namespace: 'disabled-native' }));
-  builder.onLoad({ filter: /.*/, namespace: 'disabled-native' }, () => ({ contents: `const unavailable=()=>{throw new Error('Disabled in the Pi Mac host')}; export default {spawn:unavailable}; export {unavailable as spawn,unavailable as query,unavailable as Entry,unavailable as createOpencodeClient,unavailable as createOpencodeServer};`, loader: 'js' }));
+  builder.onLoad({ filter: /.*/, namespace: 'disabled-native' }, () => ({ contents: `const unavailable=()=>{throw new Error('Disabled in the Pi Mac host')}; export default {spawn:unavailable}; export {unavailable as spawn,unavailable as query,unavailable as Entry,unavailable as createOpencodeClient,unavailable as createOpencodeServer,unavailable as forkSession,unavailable as getSubagentMessages};`, loader: 'js' }));
   builder.onResolve({ filter: /^(effect|@effect\/[^/]+|jose|yaml|diff|proper-lockfile|stream-chain|stream-json|yauzl|@noble\/[^/]+)(\/.*)?$/ }, args => ({ path: require.resolve(args.path) }));
   builder.onLoad({ filter: /\.ts$/ }, async args => {
     if (!args.path.startsWith(upstream)) return;
@@ -41,7 +45,7 @@ export const plugin = { name: 'pimac-native-backend', setup(builder) {
 const result = await build({ absWorkingDir: root, entryPoints: [join(root, 'server.mjs')], bundle: true, platform: 'node', target: 'node24', format: 'esm',
   // Effect's cyclic modules produce unstable initializer elimination when both
   // orchestration paths are bundled. Preserve initializers for reproducible builds.
-  write: false, treeShaking: false, minify: true, plugins: [plugin], banner: { js: '// Pinned T3 Server with a Pi provider adapter and an explicit desktop migration bridge. See T3-SERVER-LICENSE.txt.\nimport {createRequire as __createRequire} from "node:module"; const require=__createRequire(import.meta.url);' },
+  write: false, treeShaking: false, minify: true, plugins: [plugin], banner: { js: '// Pinned official T3 Server with its native Pi driver and Pi Mac host policy. See T3-SERVER-LICENSE.txt.\nimport {createRequire as __createRequire} from "node:module"; const require=__createRequire(import.meta.url);' },
   define: { __T3CODE_BUILD_RELAY_URL__: '"https://relay.t3.codes"', __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: '"pk_live_Y2xlcmsudDMuY29kZXMk"', __T3CODE_BUILD_CLERK_CLI_OAUTH_CLIENT_ID__: '"hzxSgY2cH10sDU2r"' },
 });
 const out = resolve(root, '../../Sources/PiMacApp/Resources/t3-bridge/vendor/t3-server.mjs');

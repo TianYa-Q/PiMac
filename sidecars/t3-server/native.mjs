@@ -1,7 +1,5 @@
 // Pi Mac host policy only. T3 owns the engine, receipts, projections and reactors.
-import { ServerOwnedPiDriver } from './pi-provider.mjs';
 import { createConnectionDiagnostics } from './connection-diagnostics.mjs';
-export const PiDriver = ServerOwnedPiDriver;
 let host;
 export function configureNative({ environmentId, directory }) {
   if (host && !host.closed) throw new Error('Server host already owned');
@@ -12,12 +10,13 @@ export function configureNative({ environmentId, directory }) {
 }
 export function getNative() { if (!host) throw new Error('Server host unavailable'); return host; }
 const methods = new Set(['server.probe', 'server.getConfig', 'server.getSettings', 'subscribeServerConfig', 'subscribeServerLifecycle',
-  'orchestration.dispatchCommand', 'orchestration.subscribeShell', 'orchestration.subscribeThread', 'auth.subscribeAccess']);
+  'orchestration.dispatchCommand', 'orchestration.subscribeShell', 'orchestration.subscribeThread', 'auth.subscribeAccess',
+  'projects.mutate', 'assets.persistChatAttachments', 'assets.createUrl']);
 export const rpcAllowed = method => methods.has(method);
 export const httpAllowed = (method, url) => {
   const pathname = url.split('?')[0];
   return (method === 'GET' && (pathname === '/ws' || pathname === '/.well-known/t3/environment' || pathname.startsWith('/api/auth/') ||
-    pathname === '/api/orchestration/shell' || /^\/api\/orchestration\/threads\/[^/]+$/.test(pathname) || pathname === '/api/connect/link-state')) ||
+    pathname.startsWith('/api/assets/') || pathname === '/api/orchestration/shell' || /^\/api\/orchestration\/threads\/[^/]+$/.test(pathname) || pathname === '/api/connect/link-state')) ||
     (method === 'POST' && (pathname === '/oauth/token' || pathname.startsWith('/api/auth/') ||
       ['/api/orchestration/dispatch', '/api/t3-connect/health', '/api/t3-connect/mint-credential', '/api/connect/mint-credential', '/api/connect/preferences'].includes(pathname)));
 };

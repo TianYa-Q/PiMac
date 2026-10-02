@@ -112,6 +112,16 @@ final class ExtensionUIModel: ObservableObject {
     }
   }
 
+  /// Expired or closed server requests must disappear without replaying a reply.
+  func reconcileRequests(ids: Set<String>, from source: AppModel) {
+    queuedDialogs.removeAll { $0.source === source && !ids.contains($0.dialog.id) }
+    if let presentedDialog, presentedDialog.source === source, !ids.contains(presentedDialog.dialog.id) {
+      self.presentedDialog = nil
+      dialog = nil
+      presentNextDialog()
+    }
+  }
+
   func hasPendingRequests(from source: AppModel) -> Bool {
     (presentedDialog?.source === source) || queuedDialogs.contains { $0.source === source }
   }
@@ -297,7 +307,8 @@ final class ExtensionUIModel: ObservableObject {
     // selected account; it must not replace an existing application-wide quota snapshot.
     // Subsequent payloads from the process are periodic or user-requested refreshes.
     let mayUpdateUsage =
-      usageSnapshot.accounts.isEmpty && usageSnapshot.gemini == nil
+      payload["source"] as? String == "host-query"
+      || usageSnapshot.accounts.isEmpty && usageSnapshot.gemini == nil
       || (!isInitialStatusFromSource && !isFirstStatusAfterSessionChange)
     let usageIsCurrent =
       updatedAt.map { incoming in

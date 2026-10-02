@@ -33,7 +33,7 @@ test('removed LAN endpoint cannot be opened by gateway callers', async () => {
 test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-tunnel-'));
   const gateway = await createServerGateway({ token: 'ab'.repeat(32), directory,
-    piConfig: { binaryPath: process.execPath, binaryArgs: [new URL('./fixtures/pi.mjs', import.meta.url).pathname] } });
+    piConfig: { enabled: false } });
   t.after(async () => { await gateway.close(); await rm(directory, { recursive: true, force: true }); });
   const publicBase = 'https://tunnel.example.test';
   const forwarded = { host: 'tunnel.example.test', 'x-forwarded-proto': 'https' };
@@ -76,7 +76,7 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
       const result = await mintTicket(); assert.equal(result.status, 200);
       secret = (await result.json()).ticket;
     }
-    const socket = new WebSocket(gateway.serverURL.replace('http:', 'ws:') + '/ws?orchestrationProtocol=1&wsTicket=' + secret,
+    const socket = new WebSocket(gateway.serverURL.replace('http:', 'ws:') + '/ws?orchestrationProtocol=2&wsTicket=' + secret,
       { origin, headers: forwarded });
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => { socket.terminate(); reject(new Error('Handshake timeout')); }, 5000);

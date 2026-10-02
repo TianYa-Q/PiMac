@@ -1,40 +1,53 @@
-# T3 Server 底层架构迁移
+# 官方 T3 Server / Pi 迁移
+
+## 固定版本与所有权
+
+当前使用 `pingdotgg/t3code` 官方 main 提交 **`cc1e634bfa62edd56ff792eea666e436fdef788f`**（2026-10-02 UTC），包含 #2829 的 orchestrator V2 和官方 Pi Provider。
 
 ```text
-桌面 SwiftUI / T3 iOS / Telegram
-              ↓ 原生 HTTP / RPC 命令与读取
-T3 Server：原生编排、事件存储、回执、投影、reactors
-              ↓ Pi Provider Adapter
-Pi RPC runtime（Server 独占进程和会话）
+SwiftUI / Telegram / T3 iOS（需要支持 orchestration protocol 2）
+                        ↓ 官方 HTTP / Effect RPC
+T3 Server：orchestrator V2、SQLite、原生回执、投影、运行队列
+                        ↓ 官方 PiDriver / PiAdapterV2 / PiRpc
+Pi runtime：原生认证、模型、扩展、skills、上下文和 session 文件
 ```
 
-## 所有权
+- 已删除自研 `pi-provider.mjs`、`pi-rpc.mjs` 及私有 session-control、extension-response、metrics、account-status 通道。不再自行持有或复刻 Pi runtime。
+- 桌面写入走官方 `projects.mutate` 和 `orchestration.dispatchCommand`。消息、模型、取消、扩展回答分别使用 `message.dispatch`、`thread.model-selection.set`、`run.interrupt` 和 `runtime-request.respond`。
+- HTTP 快照读取必须带 `x-t3-orchestration-protocol: 2`；WebSocket 必须带 `orchestrationProtocol=2`。旧客户端不兼容，不绕过服务端版本检查。
+- `T3V2Presentation.swift` 只将官方 V2 快照映射为既有 SwiftUI 展示结构，不写入第二套投影或回执。桌面仍轮询快照（运行中 250ms，空闲 1000ms）；手机使用官方订阅。
+- `native.mjs` / `management.mjs` 仅提供 Mac 宿主访问策略、桌面凭据和 T3 Connect 管理。上游源码通过 SHA-256 manifest 固定，构建补丁仅保留宿主所需的 loopback/auth/Connect 和未打包其他 provider/native dependency 的策略；PiDriver、PiAdapterV2、PiRpc 本身不打补丁。
 
-- `AppModel` 只处理选择、输入和显示；不启动或持有 Pi 进程。
-- `WorkspaceModel` 的项目和线程来自 Server。Telegram 也通过相同的模型提交原生命令，不再扫描 JSONL 决定运行目标。
-- `T3DesktopClient` 读取原生 shell/thread HTTP 快照，通过原生命令创建项目/线程、发送、取消和修改模型。当前桌面用 250ms（运行中）/1000ms（空闲）快照轮询，而非 WebSocket 订阅；iOS 仍使用上游订阅。
-- `T3BridgeService` 只监督本机 Server。Server 随应用启动；关闭局域网访问不会关闭本机 Server 或取消任务。stdin/stdout 只用于生命周期/就绪，不承载桌面工作区命令。
-- `native.mjs` 只提供宿主能力和访问策略，**不替换**原生 OrchestrationLayer、事件存储、投影或 reactors。
-- `pi-provider.mjs` 是实际 ProviderDriver/ProviderAdapter；`pi-rpc.mjs` 是其私有 JSONL 传输，不是第二套客户端 API。
-- 已删除 DesktopBridge、桌面反向投影、私有 workspace IPC、移动线程路径绑定、独立 command receipts 和旧桥接鉴权入口。HTTP/RPC 共用 T3 自己的持久化回执。
+## 已接入
 
-## 运行与安全边界
+- 官方模型发现及 `thinking` 选项（包括模型支持的 xhigh/max）；切换模型和思考等级。
+- 发消息、插入消息、取消、`agent_settled` 终结、原生回执去重和重启恢复。
+- 先通过官方 `assets.persistChatAttachments` 存储图片，再发送附件；图片读取使用官方签名 URL。
+- 官方 `runtimeRequests` 中的单问题 select/input/editor 和 confirm/工具审批通过桌面对话框回答。editor 遵循上游的文本问题表示，不保留旧私有 prefill 协议。
+- 手动压缩走官方 `/compact` 消息，不直接调用私有 Pi RPC。
+- 上下文与 token 指标来自官方 `providerTurns.tokenUsage`。当前上游 Pi 未提供 per-turn usage/费用字段，因此速度和费用保持不可用；不把累计输出除以单 turn 时长，也不显示虚构的 $0。
 
-Pi runtime 使用 Server 的私有 `pi-sessions/<instance-hash>` 目录；线程映射为稳定 Pi session ID，Provider 实例互相隔离。不使用 `--continue`，不隐式接管旧桌面 JSONL。
+## 状态、升级与安全
 
-并发相同 session start 合并，运行中第二个 turn 拒绝。请求有界、LF/UTF-8 分帧、背压和超时；stderr 只排空，不输出秘密。`agent_end` 不代表完成，`agent_settled` 才终结 T3 turn；中断投影为 aborted。未知提交结果不会自动重发 prompt。Pi 子进程不继承 `PIMAC_T3_*` 管理凭据。
+- 继续使用 `server-owned/` 和已有环境身份。SQLite schema 与旧 T3 V1 历史导入由上游负责；桌面不扫描或重写 JSONL。原始旧 `pi-sessions/` 文件不删除。
+- 自研 Adapter 的 continuation cursor 不是官方 Pi native session 文件路径，**不能承诺旧自研线程原样续接同一 Pi runtime**。上游 V1 历史恢复/portable-context handoff 与原生新线程续接是不同路径；既有真实历史升级仍需单独验收。
+- 首次遇到旧 `binaryArgs` 配置，先保存准确的 `settings.json.before-official-pi`，再转换为官方 `launchArgs`。只剔除旧宿主注入的 pimac-fast/pimac-compaction 扩展，保留用户扩展参数和其他设置。新线程使用官方 Pi 原生 session 存储。
+- 不再自动注入 Fast/压缩模型扩展。用户自己安装的 Pi 扩展继续由 Pi 加载，自动压缩和压缩模型遵循 Pi 配置。
+- 所有监听保持 loopback；远程仅通过官方授权的托管 Cloudflare Tunnel。运行 Pi 前清除宿主管理环境凭据，Pi 子进程不继承 `PIMAC_T3_*` token。
+- 未确认提交不自动重发，不自动重启正在运行的应用。首次启动新构建前，先等待任务结束，并备份真实 Server 状态目录；SQLite 升级后不要直接用旧构建打开升级后的数据库。
 
-桌面通过私有 supervisor 获取标准 T3 本机客户端凭据；原生 Server 处理读取与命令授权。局域网暴露需要单独明确同意，不监听通配、公网或任意 DNS 地址。配对、授权和撤销使用上游 AuthService。
+## 明确的功能差异
 
-## 历史与尚未支持的能力
+- 官方 V2 的 wire projection 会移除任意工具输出、完整 diff 和工具生成图片；当前桌面保留工具名称/输入/状态，不恢复旧私有富输出链路。
+- codemode 的嵌套调用按上游提供的独立工具项展示，不再自研聚合 runtime 事件。
+- Pi 的 setStatus/title/widget 等终端装饰上游忽略。账户额度现在由独立的本机只读管理模块查询，不依赖 runtime status：支持 openai/openai-codex 的原生 OAuth 和 account-usage 多账户存储，按 Provider 隔离，缓存一分钟，手动刷新绕过缓存。读取仅接受当前用户的私有普通文件，返回字段白名单，不返回凭据、不写 auth/session、不触发付费 warm-up。过期授权明确报错，刷新授权仍由 Pi/扩展负责。Gemini 额度、reset credits 和线程授权绑定尚未补齐。
+- 原生 auth 与多账户列表按稳定 ChatGPT account ID（含 token 内的身份信息）合并，不因 token 刷新重复显示。匹配后保留用户账户名称，只为本次查询选用更新的授权，不改写存储；未匹配项标为“Pi 已保存授权”，不标为默认或当前线程账户。Telegram 未确认线程绑定时明确显示“未确认”，只读列表不提供切换按钮。
+- 桌面“管理”通过官方 message.dispatch 提交 `/accounts`，需要已安装 account-usage 扩展；命令提交不等于管理已打开。桌面直接账户切换保持禁用，不能把全局授权误认为某个线程的当前账户。额度接口只在独立 supervisor socket 上开放，需要宿主管理凭据，拒绝浏览器 Origin，不开放到 Tunnel。
+- 模型隐藏是桌面展示偏好；服务器共享默认模型仍同步。手机模型可见性由手机客户端管理，不声称桌面隐藏会过滤官方 provider catalog。
+- 独立压缩模型选择、旧 Fast 选项不再由桌面覆盖 Pi。
+- 真实模型/账号、旧真实数据升级、App Store iOS protocol 2、Apple 登录和 APNs 尚需实机验收。
 
-- 状态使用 `server-owned/`，不与旧兼容目录混写。保留原始历史文件，不自动导入、激活或双写旧会话。旧 Telegram 文件路径绑定不会获得新线程写权限。
-- 当前支持显式 `full-access`、`default`、文字、模型/思考级别、取消及最多 8 张 PNG/JPEG/WebP 图片（总计 8MiB）。图片先由 T3 存储，再由 Adapter 安全读取。
-- 审批/sandbox、plan、回滚、手动压缩、text-generation、扩展交互对话、账户切换和 Fast mode 未实现，不能绕过 Server 降级为桌面 Pi RPC。
-- 桌面 Pi steering/follow-up 队列不再提供；运行时显示不可继续发送，完成后才能发下一条。
-- 历史导入、完整历史分页、生成图片的富内容呈现以及物理 iPhone/App Store、真实账号/模型验收仍待完成。
-
-## 精简验证
+## 验证
 
 ```sh
 ./scripts/prepare-t3-server.sh
@@ -43,6 +56,4 @@ npm --prefix sidecars/t3-server test
 swift test
 ```
 
-旧兼容后端、进程池和反向投影测试已删除。重点保留真实打包 T3 Server + 协议 Pi fixture 的端到端测试，以及 Adapter 所有权、settlement、未知结果 deadline、实例隔离和 OAuth 策略测试；不访问真实模型或账号。
-
-架构切换完成后统一执行测试，不用已退役链路的测试结果证明新链路可用。自动化结果不代表实际 iPhone、Apple 登录或 APNs 已验收。
+Server 测试使用真实打包官方 Server 和协议 Pi fixture，不访问账号或模型，覆盖模型发现、protocol 1 拒绝、V2 回执、session 文件续接、steering/取消、扩展回答、/compact、附件签名访问、Connect/TLS/DPoP 及配置迁移。fixture 测试不替代真实数据和手机验收。

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import UserNotifications
 
@@ -57,7 +58,7 @@ final class TaskStatusNotifications: NSObject, UNUserNotificationCenterDelegate 
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    completionHandler([.banner, .list, .sound])
+    completionHandler([.banner, .list])
   }
 
   func requestPermission() async {
@@ -74,12 +75,25 @@ final class TaskStatusNotifications: NSObject, UNUserNotificationCenterDelegate 
     let content = UNMutableNotificationContent()
     content.title = String(event.title.prefix(100))
     content.body = event.message
-    content.sound = .default
+    // NSSound.beep() follows the alert sound selected in macOS Sound settings.
+    // Keep the notification silent so it does not also play the default sound.
+    content.sound = nil
     // Do not include prompts, outputs, paths or credentials in system notifications.
     let request = UNNotificationRequest(
       identifier: "task-\(event.threadID)-\(event.turnID)", content: content, trigger: nil)
-    center.add(request) { error in
-      if error != nil { NSLog("Pi Mac task notification could not be delivered") }
+    Task { @MainActor in
+      let settings = await center.notificationSettings()
+      do {
+        try await center.add(request)
+        // Respect the application's system notification sound preference.
+        if settings.soundSetting == .enabled,
+          settings.authorizationStatus == .authorized
+            || settings.authorizationStatus == .provisional {
+          NSSound.beep()
+        }
+      } catch {
+        NSLog("Pi Mac task notification could not be delivered")
+      }
     }
   }
 }

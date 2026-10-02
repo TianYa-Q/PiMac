@@ -11,7 +11,7 @@ import { ServerConfig, deriveServerPaths, ensureServerDirectories } from './upst
 import { DEFAULT_SIGNAL_EXPORT } from '@t3tools/shared/observability';
 import * as OtelEnvironment from '@t3tools/shared/otelEnvironment';
 import { configureNative } from './native.mjs';
-import { configureAccountStatuses } from './account-status.mjs';
+import { migratePiSettings } from './settings-migration.mjs';
 import { configureModelPreferences } from './model-preferences.mjs';
 export { rpcAllowed, httpAllowed } from './native.mjs';
 export { originAllowed } from './origin-policy.mjs';
@@ -30,14 +30,18 @@ function checkPrivateTree(directory, toolsDirectory, inTools = false) {
   }
 }
 
-export async function startPiServer({ directory, environmentId, onFailure, piConfig = {} }) {
+export async function startPiServer({ directory, environmentId, onFailure, piConfig = {}, signal }) {
   process.umask(0o077);
+  // Supervisor credentials have already been captured by the gateway. They
+  // must not enter upstream's inherited environment or any provider subprocess.
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith('PIMAC_T3_') && key !== 'PIMAC_T3_TEST_LOG_ERRORS') delete process.env[key];
+  }
   fs.mkdirSync(directory, { mode: 0o700, recursive: true });
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('Unsafe T3 Server directory');
   checkPrivateTree(directory, path.join(directory, 'tools'));
   const broker = configureNative({ environmentId, directory });
-  configureAccountStatuses(directory);
   configureModelPreferences(directory);
   broker.controlToken = randomBytes(32).toString('hex');
   const configLayer = Layer.effect(ServerConfig, Effect.gen(function* () {
@@ -45,6 +49,7 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
     yield* ensureServerDirectories(derived);
     if (!fs.existsSync(derived.environmentIdPath)) fs.writeFileSync(derived.environmentIdPath, environmentId, { mode: 0o600, flag: 'wx' });
     if (fs.readFileSync(derived.environmentIdPath, 'utf8').trim() !== environmentId) throw new Error('Foreign T3 environment identity');
+    migratePiSettings(derived.settingsPath, piConfig);
     if (!fs.existsSync(derived.settingsPath)) fs.writeFileSync(derived.settingsPath, JSON.stringify({
       providerInstances: { pi: { driver: 'pi', config: piConfig, enabled: true } }, enableProviderUpdateChecks: false,
       defaultThreadEnvMode: 'local', defaultRuntimeMode: 'full-access', defaultAutoPull: false,
@@ -62,6 +67,12 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   const controller = new AbortController();
   let resolveManagement, rejectManagement, failed = false;
   const ready = new Promise((resolve, reject) => { resolveManagement = resolve; rejectManagement = reject; });
+  const cancel = () => {
+    rejectManagement(new Error('T3 Server startup cancelled'));
+    controller.abort();
+  };
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (signal?.aborted) cancel();
   broker.onManagementReady = resolveManagement;
   const program = runServer.pipe(Effect.provide(configLayer), Effect.provide(Logger.layer([])),
     Effect.provideService(Console.Console, quietConsole));
@@ -82,5 +93,5 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
     }
     throw new Error('T3 Server routes unavailable');
   } catch (error) { controller.abort(); await completion; broker.close(); throw error; }
-  finally { clearTimeout(timeout); }
+  finally { clearTimeout(timeout); signal?.removeEventListener('abort', cancel); }
 }

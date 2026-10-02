@@ -1,61 +1,50 @@
-# Pi Mac native T3 Server adapter
+# Official T3 Server sidecar
 
-The pinned upstream Server is the sole orchestration engine for desktop, iOS and
-Telegram. It owns projects, threads, receipts, persistence, projections and
-reactors. `pi-provider.mjs` owns Pi runtimes through private `pi-rpc.mjs` transport.
-There is no architecture switch, desktop projection or desktop command IPC.
+Pinned upstream: `pingdotgg/t3code@cc1e634bfa62edd56ff792eea666e436fdef788f`.
+This uses upstream orchestrator V2 and its official `PiDriver`, `PiAdapterV2`,
+and `PiRpc`, without modifying those implementations. The former custom Pi
+adapter, transport, runtime controls, and their tests have been removed.
 
-See [architecture and current limits](../../docs/t3-server-migration.md) and
-[iOS integration](../../docs/t3-code-integration.md).
+Pi Mac retains only host policy and management: loopback listeners, explicit
+RPC/HTTP allowlists, supervisor credentials, managed T3 Connect, diagnostics,
+and desktop model preferences. The supervisor has no workspace/Pi command API.
+Provider subprocesses must not inherit supervisor secrets.
 
-## Source and artifacts
+## Reproducible build
 
-Commit host/adapter sources, `patches.json`, fetch/build scripts, tests, locked
-npm dependencies and `upstream-pin.json`. Preserve the shipped
-`vendor/T3-SERVER-LICENSE.txt` notice.
-
-Do not commit generated dependencies/artifacts:
-
-- `upstream/`: 673 unchanged files restored from the pinned Git revision and
-  individually SHA-256 verified.
-- `node_modules/`: installed with `npm ci --ignore-scripts`.
-- `generated/`: test client/provider harness bundles.
-- `Sources/PiMacApp/Resources/t3-bridge/vendor/t3-server.mjs`: generated app bundle.
-
-Patches are applied in memory; the cached upstream sources remain unchanged.
-They register Pi and enforce host capabilities/network policy, not replace the
-native orchestration engine. The historical `sidecars/t3-rpc` subset is no longer
-installed, bundled or checked by the application build pipeline.
-
-## Clean build
-
-Requires Node.js 24+, npm, Git and tar:
+Commit host sources, patches, tests, dependency locks, and `upstream-pin.json`.
+The manifest hashes 1,742 upstream files. `upstream/`, `node_modules/`,
+`generated/` and the app's generated `vendor/t3-server.mjs` are build artifacts.
+The upstream MIT license is copied to `vendor/T3-SERVER-LICENSE.txt`.
 
 ```sh
 ./scripts/prepare-t3-server.sh
 npm --prefix sidecars/t3-server run check
 npm --prefix sidecars/t3-server test
-swift test
 ```
 
-Preparation installs this sidecar's locked dependencies, restores pinned source
-and generates the resource. Packaging/CI run it before Swift compilation. It
-never launches Pi or the app; installed applications do not download source/npm.
-
-For offline upstream restoration from a checkout containing the pinned commit:
+Offline restore from a checkout containing the pinned revision:
 
 ```sh
 node sidecars/t3-server/fetch-upstream.mjs --source /path/to/t3code
 ```
 
-A valid cache needs no source download. A modified cache fails rather than being
-silently overwritten; move it aside explicitly before recreating it.
+The fetcher refuses to overwrite a changed or incompatible upstream cache.
+When deliberately changing the pin, archive the existing cache first.
 
-## Verification scope
+## Protocol / upgrade
 
-The reduced suite focuses on native command/receipt/projection persistence,
-continuation, model changes/cancellation, sole runtime ownership, settlement,
-bounded RPC unknown outcomes, provider isolation and loopback OAuth policy.
-Tests use protocol-only Pi fixtures, not real models or credentials.
-Actual Pi account/model behavior and physical iPhone/Apple/APNs acceptance remain
-separate manual checks.
+Clients require orchestration protocol **2**. Project mutations and orchestration
+commands use official Effect RPC; HTTP serves V2 shell/thread projections.
+`settings-migration.mjs` backs up obsolete launch settings and converts only
+legacy `binaryArgs`, removing old host-injected extensions. Upstream owns
+SQLite and V1 transcript migration; do not reinterpret old private Pi cursors
+as native file paths. Back up real Server state before first upgraded startup.
+
+The desktop uses official runtime requests for extension dialogs and `/compact`
+for compaction. Arbitrary tool output, full diffs and tool images are omitted
+by upstream wire projection. Terminal-only extension status and old private
+account/Fast/compaction-model overrides are not preserved.
+
+See `docs/t3-server-migration.md` for capabilities, limitations and acceptance
+boundaries. Protocol-fixture tests do not prove real-model or App Store acceptance.

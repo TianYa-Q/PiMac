@@ -73,6 +73,22 @@ final class TelegramUsagePresentationTests: XCTestCase {
   }
 
   @MainActor
+  func testReadOnlyQuotaDoesNotImplyThreadBindingOrAccountSwitching() {
+    let account = CodexAccountStatus(
+      name: "X", isActive: false, isDefault: false, isHidden: false,
+      primary: nil, secondary: nil, resetCredits: nil, error: nil)
+    let message = TelegramControl.usageMessage(accounts: [account], gemini: nil, updatedAt: nil)
+    XCTAssertTrue(message.contains("当前线程账户：未确认"))
+    XCTAssertTrue(message.contains("不支持直接切换线程账户"))
+    XCTAssertFalse(message.contains("待同步"))
+    XCTAssertFalse(message.contains("空闲时可切换"))
+    XCTAssertFalse(message.contains("默认"))
+    let switchable = TelegramControl.usageMessage(
+      accounts: [account], gemini: nil, updatedAt: nil, supportsAccountSwitch: true)
+    XCTAssertTrue(switchable.contains("空闲时可切换"))
+  }
+
+  @MainActor
   func testStatusHighlightsConfirmationAndHighContext() {
     let status = TelegramControl.statusMessage(
       project: "demo", session: "任务", connection: .connected, busy: true,

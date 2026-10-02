@@ -25,6 +25,14 @@ struct ConversationTurn: Identifiable, Equatable {
     var turns: [ConversationTurn] = []
     var current: [ChatEntry] = []
     for entry in messages {
+      // Account management is a UI action, not a conversational prompt.
+      // Keep the command in session history, but omit its chat bubble.
+      if entry.kind == .user,
+        entry.text.trimmingCharacters(in: .whitespacesAndNewlines) == "/accounts",
+        entry.attachments.isEmpty
+      {
+        continue
+      }
       if entry.kind == .user, !current.isEmpty {
         turns.append(ConversationTurn(entries: current))
         current = []

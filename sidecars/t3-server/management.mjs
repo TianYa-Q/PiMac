@@ -18,14 +18,12 @@ import { RelayClient } from '@t3tools/shared/relayClient';
 import { getNative, httpAllowed } from './native.mjs';
 import { loopbackOAuthCallbackAllowed } from './oauth-policy.mjs';
 export { oauthAwareCommandReadiness } from './oauth-readiness.mjs';
-import { accountStatus } from './account-status.mjs';
-import { controlSession } from './session-controls.mjs';
-import { sessionMetrics } from './session-metrics.mjs';
+
 import { originAllowed } from './origin-policy.mjs';
 import { connectionRoute } from './connection-diagnostics.mjs';
-import { setModelPreferences, nativeModelCatalog } from './model-preferences.mjs';
+import { setModelPreferences } from './model-preferences.mjs';
 import { ServerSettingsService } from './upstream/apps/server/src/serverSettings.ts';
-import { ProviderService } from './upstream/apps/server/src/provider/Services/ProviderService.ts';
+
 import { ProviderRegistry } from './upstream/apps/server/src/provider/Services/ProviderRegistry.ts';
 
 export const NativeHttpPolicy = HttpRouter.middleware(effect => Effect.flatMap(HttpServerRequest.HttpServerRequest, request => {
@@ -57,7 +55,6 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
   const relayClient = yield* RelayClient;
   const settings = yield* ServerSettingsService;
   const providers = yield* ProviderRegistry;
-  const providerService = yield* ProviderService;
   const controlContext = yield* Effect.context();
   const localURL = `http://127.0.0.1:${server.address.port}`;
   const originalApply = runtime.applyConfig;
@@ -164,7 +161,10 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
   };
   broker.management = {
     localURL, status,
-    async modelCatalog() { return { catalogs: JSON.stringify(nativeModelCatalog()) }; },
+    async modelCatalog() {
+      const snapshots = await run(providers.refreshInstance('pi'));
+      return { catalogs: JSON.stringify(Object.fromEntries(snapshots.map(p => [p.instanceId, p.models]))) };
+    },
     async modelPreferences(value) {
       setModelPreferences(value);
       const model = value.defaultModel && !value.hiddenModels.includes(value.defaultModel) ? value.defaultModel : null;
@@ -172,23 +172,6 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
       await run(providers.refreshInstance('pi'));
       return { ok: true };
     },
-    async sessionControl(input) {
-      if (typeof input.threadId !== 'string' || !['compact', 'switch-account', 'abort-compaction'].includes(input.operation)) throw new Error('Invalid control');
-      if (input.operation === 'switch-account' && !/^[A-Za-z0-9._-]{1,64}$/.test(input.accountName ?? '')) throw new Error('Invalid account');
-      const detail = await localRequest('/api/orchestration/threads/' + encodeURIComponent(input.threadId));
-      const thread = detail.thread;
-      if (!thread || thread.modelSelection?.instanceId !== 'pi') throw new Error('Not a Pi thread');
-      if (input.operation !== 'abort-compaction') {
-        if (thread.latestTurn?.state === 'running' || ['starting', 'running'].includes(thread.session?.status)) throw new Error('Thread busy');
-        const shell = await localRequest('/api/orchestration/shell');
-        const project = shell.projects?.find(project => project.id === thread.projectId);
-        await run(providerService.startSession(input.threadId, { threadId: input.threadId, provider: 'pi', providerInstanceId: 'pi',
-          cwd: thread.worktreePath ?? project?.workspaceRoot, runtimeMode: 'full-access', modelSelection: thread.modelSelection }));
-      }
-      return controlSession(input.threadId, input.operation, input.accountName, thread.modelSelection);
-    },
-    async sessionMetrics(threadId) { return { stats: await sessionMetrics(threadId) }; },
-    async accountStatus(threadId, provider) { const value = accountStatus(threadId, provider); return { status: value ? JSON.stringify(value) : null }; },
     async desktopSession() {
       const session = await run(auth.issueSession({ subject: 'pimac-desktop', scopes: AuthStandardClientScopes }));
       return { token: session.token };

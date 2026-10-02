@@ -7,9 +7,9 @@
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-000000?logo=apple)](https://github.com/TianYa-Q/PiMac)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-一个使用 SwiftUI 构建的原生 macOS [Pi coding agent](https://github.com/earendil-works/pi) 客户端。桌面、iOS 与 Telegram 统一使用 T3 Server 原生编排，由 Pi Provider Adapter 独占 Pi runtime。
+一个使用 SwiftUI 构建的原生 macOS [Pi coding agent](https://github.com/earendil-works/pi) 客户端。桌面、iOS 与 Telegram 统一使用官方 T3 Server orchestrator V2 和内置 Pi Provider，不再使用自研 Pi Adapter。
 
-> **源码架构更新：**旧桌面后端已删除。下方发行版功能与 Telegram 说明不代表当前迁移已达到全部功能对等；历史导入、扩展对话/账户切换、Fast mode、手动压缩和桌面 steering 尚未支持。以[当前架构与限制](docs/t3-server-migration.md)为准。
+> **源码架构更新：**已迁移至官方 main 的 Pi Provider 和 orchestration protocol 2。支持原生扩展对话、/compact 和 steering；旧私有账户状态、Fast/独立压缩模型和工具富输出不再提供。下方发行版说明不代表当前源码功能对等；真实历史升级和手机验收仍待完成。以[当前架构与限制](docs/t3-server-migration.md)为准。
 
 ![Pi Mac 主界面](docs/images/pi-mac-overview-new.png)
 

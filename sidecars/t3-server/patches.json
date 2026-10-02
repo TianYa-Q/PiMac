@@ -1,8 +1,65 @@
 {
-  "apps/server/src/provider/Layers/ProviderRegistry.ts": [
+  "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts": [
     {
-      "oldText": "const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {",
-      "newText": "const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {\n  // Pi snapshots are authoritative, including deliberately hidden models.\n  if (provider.driver === ProviderDriverKind.make('pi')) return false;",
+      "oldText": "  readonly toolArgs: Map<string, unknown>;",
+      "newText": "  readonly toolArgs: Map<string, unknown>;\n  readonly toolParents: Map<string, string>;",
+      "count": 1
+    },
+    {
+      "oldText": "              toolArgs: new Map(),",
+      "newText": "              toolArgs: new Map(),\n              toolParents: new Map(),",
+      "count": 1
+    },
+    {
+      "oldText": "        const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);",
+      "newText": "        const parentToolCallId = recordString(event, \"parentToolCallId\");\n        if (parentToolCallId !== undefined) turn.toolParents.set(toolCallId, parentToolCallId);\n        const parentId = turn.toolParents.get(toolCallId);\n        const base = {\n          ...baseItemFields(turn, toolCallId, startedAt, emittedAt),\n          parentItemId: parentId === undefined ? null : idAllocator.derive.turnItemFromProviderItem({ driver: PI_PROVIDER, nativeItemId: parentId }),\n        };",
+      "count": 1
+    },
+    {
+      "oldText": "import * as Cause from \"effect/Cause\";",
+      "newText": "import { observePiOutputUsage, piOutputUsage } from \"pimac:pi-output-usage.mjs\";\nimport { piFileChangeDetails } from \"pimac:pi-file-change.mjs\";\nimport * as Cause from \"effect/Cause\";", 
+      "count": 1
+    },
+    {
+      "oldText": "if (toolName === \"edit\" || toolName === \"write\") {",
+      "newText": "if (!isError && (toolName === \"edit\" || toolName === \"write\")) {",
+      "count": 1
+    },
+    {
+      "oldText": "                type: \"file_change\",\n                fileName,",
+      "newText": "                type: \"file_change\",\n                fileName,\n                ...piFileChangeDetails(toolName, args, resultRecord),",
+      "count": 1
+    },
+    {
+      "oldText": "              turn.messageOrdinal += 1;",
+      "newText": "              turn.messageOrdinal += 1;\n              observePiOutputUsage(turn, event);",
+      "count": 1
+    },
+    {
+      "oldText": "            yield* reportLiveUsage(turn, event[\"usage\"]);",
+      "newText": "            observePiOutputUsage(turn, event);\n            yield* reportLiveUsage(turn, event[\"usage\"] ?? (event[\"assistantMessageEvent\"] as any)?.partial?.usage);",
+      "count": 1
+    },
+    {
+      "oldText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            yield* completeOpenStreamItems(turn);",
+      "newText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            observePiOutputUsage(turn, event);\n            yield* reportLiveUsage(turn, (message as any)?.usage);\n            yield* emit({ type: \"provider_turn.updated\", driver: PI_PROVIDER, threadId: turn.turnInput.threadId, providerTurn: { ...turn.providerTurn, ...piOutputUsage(turn) } });\n            yield* completeOpenStreamItems(turn);",
+      "count": 1
+    },
+    {
+      "oldText": "              ...turn.providerTurn,\n              tokenUsage: {",
+      "newText": "              ...turn.providerTurn,\n              ...piOutputUsage(turn),\n              tokenUsage: {",
+      "count": 1
+    },
+    {
+      "oldText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),",
+      "newText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),\n            ...piOutputUsage(turn),",
+      "count": 1
+    }
+  ],
+  "packages/contracts/src/providerRuntime.ts": [
+    {
+      "oldText": "const TurnTokenUsageCommonFields = {",
+      "newText": "const TurnTokenUsageCommonFields = {\n  assistantDurationMs: Schema.optional(Schema.Number),",
       "count": 1
     }
   ],
@@ -37,18 +94,6 @@
       "count": 1
     }
   ],
-  "apps/server/src/orchestration/ActivityPayloadProjection.ts": [
-    {
-      "oldText": "import { projectQuestionToolInput } from \"@t3tools/shared/toolActivity\";",
-      "newText": "import { projectPiToolActivityData } from \"pimac:pi-tool-activity.mjs\";\nimport { projectQuestionToolInput } from \"@t3tools/shared/toolActivity\";",
-      "count": 1
-    },
-    {
-      "oldText": "  const itemStatus = asRecord(data.item)?.status;",
-      "newText": "  if (data.piTool === true) {\n    return { ...activity, payload: { ...payload, data: projectPiToolActivityData(data) } };\n  }\n\n  const itemStatus = asRecord(data.item)?.status;",
-      "count": 1
-    }
-  ],
   "apps/server/src/auth/dpop.ts": [
     {
       "oldText": "import {\n  type DpopVerificationFailureCode",
@@ -61,7 +106,6 @@
       "count": 1
     }
   ],
-  "apps/server/src/orchestration/http.ts": [],
   "apps/server/src/serverRuntimeStartup.ts": [
     {
       "oldText": "            const accessInfo = yield* issueHeadlessServeAccessInfo();\n            yield* runStartupPhase(\n              \"headless.output\",\n              Console.log(formatHeadlessServeOutput(accessInfo)),\n            );",
@@ -76,7 +120,7 @@
       "count": 1
     },
     {
-      "oldText": "const ProviderInstallationRefreshLive = Layer.effectDiscard(\n  Effect.gen(function* () {\n    const antigravity = yield* AntigravityInstallation;\n    const codex = yield* CodexInstallation;\n    const instances = yield* ProviderInstanceRegistry;\n    const providers = yield* ProviderRegistry;\n    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(\n      Stream.runForEach((state) =>\n        instances.listInstances.pipe(\n          Effect.flatMap((entries) =>\n            Effect.forEach(\n              entries.filter((instance) => instance.driverKind === state.driver),\n              (instance) => providers.refreshInstance(instance.instanceId),\n              { discard: true },\n            ),\n          ),\n        ),\n      ),\n      Effect.forkScoped,\n    );\n  }),\n);\n",
+      "oldText": "const ProviderInstallationRefreshLive = Layer.effectDiscard(\n  Effect.gen(function* () {\n    const antigravity = yield* AntigravityInstallation.AntigravityInstallation;\n    const codex = yield* CodexInstallation.CodexInstallation;\n    const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;\n    const providers = yield* ProviderRegistry.ProviderRegistry;\n    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(\n      Stream.runForEach((state) =>\n        instances.listInstances.pipe(\n          Effect.flatMap((entries) =>\n            Effect.forEach(\n              entries.filter((instance) => instance.driverKind === state.driver),\n              (instance) => providers.refreshInstance(instance.instanceId),\n              { discard: true },\n            ),\n          ),\n        ),\n      ),\n      Effect.forkScoped,\n    );\n  }),\n);\n",
       "newText": "const ProviderInstallationRefreshLive = Layer.empty;\n",
       "count": 1
     },
@@ -98,8 +142,8 @@
   ],
   "apps/server/src/provider/builtInDrivers.ts": [
     {
-      "oldText": "/**\n * BUILT_IN_DRIVERS \u2014 the static set of `ProviderDriver`s this build ships\n * with.\n *\n * Every driver that the server knows how to instantiate from settings is\n * listed here. The `ProviderInstanceRegistry` iterates this array when\n * resolving `providerInstances` entries; anything not in the array surfaces\n * as an `\"unavailable\"` shadow snapshot at runtime (see\n * `buildUnavailableProviderSnapshot`).\n *\n * Adding a new first-party driver means:\n *   1. implement `ProviderDriver` in a sibling `Drivers/<Name>Driver.ts`,\n *   2. add it to this array,\n *   3. ensure the runtime layer satisfies its declared `R`.\n *\n * The aggregated `BuiltInDriversEnv` type is the union of every driver's\n * env requirement \u2014 the registry layer's `R` is this type, and the runtime\n * layer (ChildProcessSpawner, FileSystem, Path, ServerConfig,\n * OpenCodeRuntime, \u2026) must satisfy it.\n *\n * @module provider/builtInDrivers\n */\nimport { ClaudeDriver, type ClaudeDriverEnv } from \"./Drivers/ClaudeDriver.ts\";\nimport { CodexDriver, type CodexDriverEnv } from \"./Drivers/CodexDriver.ts\";\nimport { CursorDriver, type CursorDriverEnv } from \"./Drivers/CursorDriver.ts\";\nimport { GrokDriver, type GrokDriverEnv } from \"./Drivers/GrokDriver.ts\";\nimport { OpenCodeDriver, type OpenCodeDriverEnv } from \"./Drivers/OpenCodeDriver.ts\";\nimport { AntigravityDriver, type AntigravityDriverEnv } from \"./Drivers/AntigravityDriver.ts\";\nimport type { AnyProviderDriver } from \"./ProviderDriver.ts\";\n\n/**\n * Union of infrastructure services required to construct any built-in\n * driver. The registry layer declares `R = BuiltInDriversEnv`; the runtime\n * layer must provide every service in this union.\n */\nexport type BuiltInDriversEnv =\n  | ClaudeDriverEnv\n  | CodexDriverEnv\n  | CursorDriverEnv\n  | GrokDriverEnv\n  | OpenCodeDriverEnv\n  | AntigravityDriverEnv;\n\n/**\n * Ordered list of built-in drivers. Order matters only for tie-breaking in\n * UI presentation \u2014 the registry itself is keyed by `driverKind`, so\n * iteration order has no functional effect on instance lookup.\n */\nexport const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [\n  CodexDriver,\n  ClaudeDriver,\n  CursorDriver,\n  GrokDriver,\n  OpenCodeDriver,\n  AntigravityDriver,\n];\n",
-      "newText": "import { PiDriver } from \"pimac:native.mjs\";\nexport type BuiltInDriversEnv = never;\nexport const BUILT_IN_DRIVERS = [PiDriver];\n",
+      "oldText": "/**\n * BUILT_IN_DRIVERS — the static set of `ProviderDriver`s this build ships\n * with.\n *\n * Every driver that the server knows how to instantiate from settings is\n * listed here. The `ProviderInstanceRegistry` iterates this array when\n * resolving `providerInstances` entries; anything not in the array surfaces\n * as an `\"unavailable\"` shadow snapshot at runtime (see\n * `buildUnavailableProviderSnapshot`).\n *\n * Adding a new first-party driver means:\n *   1. implement `ProviderDriver` in a sibling `Drivers/<Name>Driver.ts`,\n *   2. add it to this array,\n *   3. ensure the runtime layer satisfies its declared `R`.\n *\n * The aggregated `BuiltInDriversEnv` type is the union of every driver's\n * env requirement — the registry layer's `R` is this type, and the runtime\n * layer (ChildProcessSpawner, FileSystem, Path, ServerConfig,\n * OpenCodeRuntime, …) must satisfy it.\n *\n * @module provider/builtInDrivers\n */\nimport { AcpRegistryDriver, type AcpRegistryDriverEnv } from \"./Drivers/AcpRegistryDriver.ts\";\nimport { AntigravityDriver, type AntigravityDriverEnv } from \"./Drivers/AntigravityDriver.ts\";\nimport { ClaudeDriver, type ClaudeDriverEnv } from \"./Drivers/ClaudeDriver.ts\";\nimport { CodexDriver, type CodexDriverEnv } from \"./Drivers/CodexDriver.ts\";\nimport { CursorDriver, type CursorDriverEnv } from \"./Drivers/CursorDriver.ts\";\nimport { GrokDriver, type GrokDriverEnv } from \"./Drivers/GrokDriver.ts\";\nimport { OpenCodeDriver, type OpenCodeDriverEnv } from \"./Drivers/OpenCodeDriver.ts\";\nimport { PiDriver, type PiDriverEnv } from \"./Drivers/PiDriver.ts\";\nimport type { AnyProviderDriver } from \"./ProviderDriver.ts\";\n\n/**\n * Union of infrastructure services required to construct any built-in\n * driver. The registry layer declares `R = BuiltInDriversEnv`; the runtime\n * layer must provide every service in this union.\n */\nexport type BuiltInDriversEnv =\n  | AcpRegistryDriverEnv\n  | AntigravityDriverEnv\n  | ClaudeDriverEnv\n  | CodexDriverEnv\n  | CursorDriverEnv\n  | GrokDriverEnv\n  | OpenCodeDriverEnv\n  | PiDriverEnv;\n\n/**\n * Ordered list of built-in drivers. Order matters only for tie-breaking in\n * UI presentation — the registry itself is keyed by `driverKind`, so\n * iteration order has no functional effect on instance lookup.\n */\nexport const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [\n  CodexDriver,\n  ClaudeDriver,\n  CursorDriver,\n  GrokDriver,\n  OpenCodeDriver,\n  AntigravityDriver,\n  PiDriver,\n  AcpRegistryDriver,\n];\n",
+      "newText": "import { PiDriver, type PiDriverEnv } from \"./Drivers/PiDriver.ts\";\nexport type BuiltInDriversEnv = PiDriverEnv;\nexport const BUILT_IN_DRIVERS = [PiDriver];\n",
       "count": 1
     }
   ],
@@ -155,6 +199,18 @@
     {
       "oldText": "      const terminalInput = yield* input.terminal.readInput;",
       "newText": "      yield* input.launchBrowser(input.authorizationUrl);\n      return yield* input.callback.pipe(Effect.map(code => ({ _tag: \"AuthorizationCode\", code } as const)));\n      const terminalInput = yield* input.terminal.readInput;",
+      "count": 1
+    }
+  ],
+  "apps/server/src/provider/cursorSdk.ts": [
+    {
+      "oldText": "installCursorShellSpawnGuard();",
+      "newText": "// Cursor is not shipped in the Pi Mac host.",
+      "count": 1
+    },
+    {
+      "oldText": "requireCursorSdk(\"@cursor/sdk\") as typeof import(\"@cursor/sdk\")",
+      "newText": "new Proxy({}, { get: () => class { constructor() { throw new Error(\"Cursor is disabled in the Pi Mac host\"); } } }) as typeof import(\"@cursor/sdk\")",
       "count": 1
     }
   ]

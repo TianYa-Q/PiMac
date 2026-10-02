@@ -56,10 +56,11 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
   /// Only explicit parent links determine ownership; concurrent top-level tools stay separate.
   static func groupingToolEntries(_ entries: [ChatEntry]) -> [ChatEntry] {
     let ids = Set(entries.map(\.id))
-    let children = Dictionary(grouping: entries.filter {
-      $0.parentToolEntryID != nil && ids.contains($0.parentToolEntryID!)
-        && $0.parentToolEntryID != $0.id
-    }, by: { $0.parentToolEntryID! })
+    let children = Dictionary(
+      grouping: entries.filter {
+        $0.parentToolEntryID != nil && ids.contains($0.parentToolEntryID!)
+          && $0.parentToolEntryID != $0.id
+      }, by: { $0.parentToolEntryID! })
     func grouped(_ entry: ChatEntry, ancestors: Set<String>) -> ChatEntry {
       var result = entry
       result.childToolEntries = (children[entry.id] ?? [])
@@ -152,13 +153,14 @@ struct PiModel: Identifiable, Hashable {
 }
 
 struct SessionStats: Codable {
-  let cost: Double
+  let cost: Double?
   let contextPercent: Double?
   let totalTokens: Int
   let inputTokens: Int
   let cacheReadTokens: Int
   let cacheWriteTokens: Int
   var outputTokensPerSecond: Double? = nil
+  var contextWindow: Int? = nil
 
   var cacheHitPercent: Double? {
     let promptTokens = inputTokens + cacheReadTokens + cacheWriteTokens

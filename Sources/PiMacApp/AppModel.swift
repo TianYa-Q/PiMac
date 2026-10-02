@@ -14,7 +14,6 @@ final class AppModel: ObservableObject {
   @Published var allModels: [PiModel] = []
   @Published var modelDefaultThinkingLevels: [String: String] = [:]
   @Published var globalDefaultThinkingLevel = "medium"
-  @Published var compactionModelID: String?
   @Published var defaultModelID: String? = UserDefaults.standard.string(
     forKey: "defaultNewSessionModelID")
   @Published var selectedModelId = ""
@@ -26,6 +25,11 @@ final class AppModel: ObservableObject {
   @Published private(set) var outputTokensPerSecond: Double?
   @Published private(set) var streamActivity = StreamActivity()
   @Published private(set) var codexRotationInFlight = false
+  @Published private(set) var isManagingAccounts = false
+  private var startingAccountManagement = false
+  private var extensionUIEpoch = ""
+  private var extensionUISerial = 0
+  private var answeredDialogIDs: Set<String> = []
   @Published private(set) var awaitingAgentStart = false
   @Published private(set) var lastSettledTurnID: String?
   private(set) var terminalStopReason: String?
@@ -60,6 +64,7 @@ final class AppModel: ObservableObject {
   private var modelPreferenceKey = "defaultNewSessionModelID"
   private var speed = OutputSpeedTracker()
   private var accountStatusTask: Task<Void, Never>?
+  private var accountQuotaRefreshPolicy = AccountQuotaRefreshPolicy()
   var threadID: String? { Self.threadID(from: currentSessionPath) }
 
   var piPath: String {
@@ -79,12 +84,19 @@ final class AppModel: ObservableObject {
   }
   var showsStatusProgress: Bool { isBusy || isLoadingConfiguration }
   var isProcessRunning: Bool { server?.isConnected == true && threadID != nil }
-  var isBusy: Bool { isStreaming || isCompacting || submitting || awaitingAgentStart || pendingSelection != nil || codexRotationInFlight || isChangingFastMode }
+  var isBusy: Bool {
+    isStreaming || isCompacting || submitting || awaitingAgentStart || pendingSelection != nil
+      || codexRotationInFlight || isChangingFastMode || isManagingAccounts
+      || startingAccountManagement || extensionUI?.hasPendingDialog(for: self) == true
+  }
   var canRestartSafely: Bool { !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty }
   var canReloadModelList: Bool { server?.isConnected == true && !isBusy }
   var canSubmitPrompt: Bool {
     server?.isConnected == true && connectionState == .connected && !isLoadingConfiguration
-      && !isCompacting && !codexRotationInFlight && !submitting && !awaitingAgentStart && pendingSelection == nil
+      && !isCompacting && !codexRotationInFlight && !submitting && !awaitingAgentStart
+      && pendingSelection == nil
+      && !isManagingAccounts && !startingAccountManagement
+      && extensionUI?.hasPendingDialog(for: self) != true
   }
   var canReuseProcessForNewSession: Bool { false }  // A tab is a view, not a process pool slot.
   var hasUserMessage: Bool { messages.contains { $0.kind == .user } }
@@ -92,8 +104,10 @@ final class AppModel: ObservableObject {
     !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
   }
   var supportsFastMode: Bool { fastModeAvailable }
-  var canManageAccounts: Bool { false }
-  var supportsAccountSwitch: Bool { accountUsageProvider != nil && isProcessRunning }
+  @Published var accountQuotaMessage = ""
+  @Published private(set) var isRefreshingAccountQuota = false
+  var canManageAccounts: Bool { accountUsageProvider != nil && isProcessRunning && canRestartSafely && threadID != nil }
+  var supportsAccountSwitch: Bool { false }
   var supportsAccountRotation: Bool { false }
   var accountUsageProvider: AccountUsageProvider? { AccountUsageProvider(modelID: selectedModelId) }
   var remotePendingMessages: [ChatEntry] { [] }
@@ -104,8 +118,11 @@ final class AppModel: ObservableObject {
     initialComposerText: String = "", remembersDesktopProject: Bool = true,
     modelPreferenceKey: String = "defaultNewSessionModelID", thinkingPreferenceKey: String? = nil
   ) {
-    globalDefaultThinkingLevel = UserDefaults.standard.string(forKey: "t3DefaultThinkingLevel") ?? "medium"
-    modelDefaultThinkingLevels = UserDefaults.standard.dictionary(forKey: "t3ModelDefaultThinkingLevels") as? [String: String] ?? [:]
+    globalDefaultThinkingLevel =
+      UserDefaults.standard.string(forKey: "t3DefaultThinkingLevel") ?? "medium"
+    modelDefaultThinkingLevels =
+      UserDefaults.standard.dictionary(forKey: "t3ModelDefaultThinkingLevels") as? [String: String]
+      ?? [:]
     selectedThinkingLevel = globalDefaultThinkingLevel
     projectURL = startupProjectURL?.standardizedFileURL
     pendingThreadPath = startupSessionPath
@@ -128,6 +145,12 @@ final class AppModel: ObservableObject {
     open(project: projectURL, path: nil)
   }
   private func open(project: URL, path: String?, completion: ((Bool) -> Void)? = nil) {
+    extensionUI?.removeRequests(from: self)
+    extensionUIEpoch = ""
+    extensionUISerial = 0
+    answeredDialogIDs.removeAll()
+    isManagingAccounts = false
+    queuedPrompts.removeAll()
     connectTask?.cancel()
     server?.unwatch(owner: observerID)
     generation = UUID()
@@ -171,7 +194,12 @@ final class AppModel: ObservableObject {
         self.connectionState = .connected
         self.isLoadingConfiguration = false
         self.statusText = ""
-        server.watch(id, owner: self.observerID) { [weak self] detail in self?.apply(detail) }
+        server.watch(
+          id, owner: self.observerID,
+          receiveUI: { [weak self] snapshot in
+            self?.applyExtensionUI(snapshot)
+          }
+        ) { [weak self] detail in self?.apply(detail) }
         completion?(true)
       } catch {
         guard self.generation == current else { return }
@@ -205,8 +233,12 @@ final class AppModel: ObservableObject {
       project: projectURL,
       path: sessionPath ?? (currentSessionPath.isEmpty ? nil : currentSessionPath))
   }
-  func suspendProcess() { /* UI selection never suspends a Provider runtime. */  }
+  // UI selection never suspends a Provider runtime.
+  func suspendProcess() {}
   func disconnect() {
+    extensionUI?.removeRequests(from: self)
+    isManagingAccounts = false
+    queuedPrompts.removeAll()
     generation = UUID()
     connectTask?.cancel()
     connectTask = nil
@@ -226,7 +258,7 @@ final class AppModel: ObservableObject {
   private var modelSelection: [String: Any] {
     [
       "instanceId": "pi", "model": selectedModelId,
-      "options": [["id": "thinkingLevel", "value": selectedThinkingLevel], ["id": "fastMode", "value": fastModeEnabled ? "on" : "off"]],
+      "options": [["id": "thinking", "value": selectedThinkingLevel]],
     ]
   }
   func sendPrompt(delivery: QueuedPromptDelivery = .steer) {
@@ -259,7 +291,10 @@ final class AppModel: ObservableObject {
     submit(prompt) { [weak self] accepted in
       guard let self, !accepted else { return }
       self.statusText = "排队消息提交未确认，不会自动重发：\(prompt.text.prefix(120))"
-      if self.composerText.isEmpty { self.composerText = prompt.text; self.attachments = prompt.attachments }
+      if self.composerText.isEmpty {
+        self.composerText = prompt.text
+        self.attachments = prompt.attachments
+      }
     }
   }
 
@@ -287,6 +322,7 @@ final class AppModel: ObservableObject {
     awaitingAgentStart = !isSteering
     submittedFromTurnID = lastTurnID
     let selection = modelSelection
+    let submittedMessageID = messageID ?? UUID().uuidString
     let shouldNameThread = !hasUserMessage && (sessionName.isEmpty || sessionName == "新任务")
     Task { [weak self] in
       guard let self else { return }
@@ -303,22 +339,25 @@ final class AppModel: ObservableObject {
           ]
         }
         try await server.dispatch([
-          "type": "thread.turn.start", "threadId": id, "runtimeMode": "full-access",
-          "interactionMode": "default",
+          "type": "message.dispatch", "threadId": id,
           "modelSelection": selection,
-          "message": [
-            "messageId": messageID ?? UUID().uuidString, "role": "user", "text": prompt.rpcText,
-            "attachments": images,
-          ],
+          "messageId": submittedMessageID, "text": prompt.rpcText,
+          "attachments": try await server.persistAttachments(
+            images, threadID: id, messageID: submittedMessageID),
+          "dispatchMode": isSteering
+            ? ["type": "steer_active", "targetRunId": try requireActiveRunID()]
+            : ["type": "start_immediately"],
         ])
         completion(true)
         self.statusText = isSteering ? "已提交插入消息，当前工具调用结束后处理。" : "已提交到 T3 Server"
         if shouldNameThread {
-          let title = String(prompt.text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(60))
+          let title = String(
+            prompt.text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(60)
+          )
           if !title.isEmpty {
             do {
               try await server.dispatch([
-                "type": "thread.meta.update", "threadId": id, "title": title,
+                "type": "thread.metadata.update", "threadId": id, "title": title,
               ])
             } catch {
               // Naming failure must not turn an accepted prompt into a failed submission.
@@ -332,14 +371,19 @@ final class AppModel: ObservableObject {
       }
     }
   }
+  private func requireActiveRunID() throws -> String {
+    guard let id = lastTurnID else { throw T3DesktopClient.ClientError.rejected }
+    return id
+  }
   func abort() {
+    queuedPrompts.removeAll()
     guard let id = threadID, let server else { return }
     Task {
       do {
         if isCompacting {
-          try await server.sessionControl(threadID: id, operation: "abort-compaction")
+          try await server.interrupt(threadID: id)
         } else {
-          try await server.dispatch(["type": "thread.turn.interrupt", "threadId": id])
+          try await server.interrupt(threadID: id)
         }
       } catch {
         statusText = "取消未确认，请刷新状态。"
@@ -375,13 +419,16 @@ final class AppModel: ObservableObject {
     Task {
       do {
         try await server.dispatch([
-          "type": "thread.meta.update", "threadId": id, "modelSelection": selection,
+          "type": "thread.model-selection.set", "threadId": id, "modelSelection": selection,
         ])
       } catch {
         guard generation == current else { return }
         pendingSelection = nil
         if let selection = server.thread(id)?["modelSelection"] as? [String: Any] {
-          fastModeEnabled = (selection["options"] as? [[String: Any]])?.first { $0["id"] as? String == "fastMode" }?["value"] as? String == "on"
+          fastModeEnabled =
+            (selection["options"] as? [[String: Any]])?.first {
+              $0["id"] as? String == "fastMode"
+            }?["value"] as? String == "on"
         }
         statusText = "模型/推理级别/Fast 变更未确认，请刷新 Server 状态。"
         server.requestRefresh()
@@ -398,7 +445,7 @@ final class AppModel: ObservableObject {
       }
       let capabilities = model["capabilities"] as? [String: Any]
       let descriptor = (capabilities?["optionDescriptors"] as? [[String: Any]])?.first {
-        $0["id"] as? String == "thinkingLevel"
+        $0["id"] as? String == "thinking"
       }
       let levels =
         (descriptor?["options"] as? [[String: Any]])?.compactMap { $0["id"] as? String } ?? ["off"]
@@ -418,19 +465,23 @@ final class AppModel: ObservableObject {
     fastModeAvailable = fastModeSupported(selectedModelId)
     thinkingLevels = allModels.first { $0.id == selectedModelId }?.thinkingLevels ?? ["off"]
     if selectingDefault {
-      selectedThinkingLevel = modelDefaultThinkingLevels[selectedModelId] ?? globalDefaultThinkingLevel
+      selectedThinkingLevel =
+        modelDefaultThinkingLevels[selectedModelId] ?? globalDefaultThinkingLevel
     }
     if !thinkingLevels.contains(selectedThinkingLevel) { selectedThinkingLevel = "off" }
   }
   private func fastModeSupported(_ modelID: String) -> Bool {
     let provider = server?.providers.first { $0["instanceId"] as? String == "pi" }
-    let model = (provider?["models"] as? [[String: Any]])?.first { $0["slug"] as? String == modelID }
+    let model = (provider?["models"] as? [[String: Any]])?.first {
+      $0["slug"] as? String == modelID
+    }
     let capabilities = model?["capabilities"] as? [String: Any]
-    return (capabilities?["optionDescriptors"] as? [[String: Any]])?.contains { $0["id"] as? String == "fastMode" } == true
+    return (capabilities?["optionDescriptors"] as? [[String: Any]])?.contains {
+      $0["id"] as? String == "fastMode"
+    } == true
   }
   func updateCatalog(_ values: [SessionItem]) { sessions = values }
   private func apply(_ detail: [String: Any]) {
-    refreshCodexAccounts()
     guard let thread = detail["thread"] as? [String: Any], thread["id"] as? String == threadID
     else { return }
     connectionState = .connected
@@ -439,12 +490,14 @@ final class AppModel: ObservableObject {
       pendingSelection == nil || NSDictionary(dictionary: pendingSelection!).isEqual(to: selection)
     {
       pendingSelection = nil
-      fastModeEnabled = (selection["options"] as? [[String: Any]])?.first { $0["id"] as? String == "fastMode" }?["value"] as? String == "on"
+      fastModeEnabled =
+        (selection["options"] as? [[String: Any]])?.first { $0["id"] as? String == "fastMode" }?[
+          "value"] as? String == "on"
       selectedModelId = selection["model"] as? String ?? selectedModelId
       fastModeAvailable = fastModeSupported(selectedModelId)
       thinkingLevels = allModels.first { $0.id == selectedModelId }?.thinkingLevels ?? ["off"]
       if let options = selection["options"] as? [[String: Any]],
-        let thinking = options.first(where: { $0["id"] as? String == "thinkingLevel" })?["value"]
+        let thinking = options.first(where: { $0["id"] as? String == "thinking" })?["value"]
           as? String
       {
         selectedThinkingLevel = thinking
@@ -459,7 +512,8 @@ final class AppModel: ObservableObject {
       state == "interrupted" ? "aborted" : (state == "error" || sessionFailed) ? "error" : nil
     isStreaming =
       state == "running"
-      || ["starting", "running"].contains((thread["session"] as? [String: Any])?["status"] as? String ?? "")
+      || ["starting", "running"].contains(
+        (thread["session"] as? [String: Any])?["status"] as? String ?? "")
     if isStreaming || (turnID != submittedFromTurnID && turnID != nil)
       || (thread["session"] as? [String: Any])?["status"] as? String == "error"
     {
@@ -474,6 +528,16 @@ final class AppModel: ObservableObject {
     if lastTurnState != state, !isStreaming, turnID != nil {
       statusText = state == "error" ? "Pi 执行失败（Server 已记录）" : state == "interrupted" ? "任务已取消" : ""
     }
+    // Metrics arrive with the thread snapshot, independently of account/quota
+    // extensions (which can be unavailable or fail).
+    if let metrics = detail["sessionStats"] as? [String: Any],
+      let data = try? JSONSerialization.data(withJSONObject: metrics),
+      let stats = try? JSONDecoder().decode(SessionStats.self, from: data)
+    {
+      self.stats = stats
+      outputTokensPerSecond = stats.outputTokensPerSecond
+    }
+    refreshCodexAccounts()
     lastTurnID = turnID
     lastTurnState = state
     var entries = (thread["messages"] as? [[String: Any]] ?? []).map { message -> ChatEntry in
@@ -484,6 +548,7 @@ final class AppModel: ObservableObject {
         title: role == "user" ? "你" : role == "reasoning" ? "思考过程" : "Pi",
         text: message["text"] as? String ?? "",
         isRunning: message["streaming"] as? Bool ?? false,
+        attachments: message["localImages"] as? [PromptAttachment] ?? [],
         timestamp: T3DesktopClient.date(message["createdAt"]))
     }
     var toolEntries: [String: ChatEntry] = [:]
@@ -498,27 +563,29 @@ final class AppModel: ObservableObject {
       let rawOutput = data["rawOutput"] as? [String: Any]
       let output = rawOutput.map { Self.contentText($0["content"]) }
       let toolCallID = payload["toolCallId"] as? String ?? activity["id"] as? String ?? ""
-      let entryID = kind.hasPrefix("tool.")
+      let entryID =
+        kind.hasPrefix("tool.")
         ? "\(activity["turnId"] as? String ?? ""):\(toolCallID)" : toolCallID
       var entry = ChatEntry(
-          id: entryID,
-          kind: kind.hasPrefix("tool.") ? .tool : .system,
-          title: activity["summary"] as? String ?? kind,
-          text: output ?? payload["detail"] as? String ?? payload["message"] as? String ?? "",
-          isRunning: payload["status"] as? String == "inProgress",
-          isError: payload["status"] as? String == "failed" || kind.contains("error"),
-          toolName: data["toolName"] as? String ?? payload["title"] as? String,
-          toolInput: Self.toolInputText(
-            toolName: data["toolName"] as? String ?? payload["title"] as? String ?? "",
-            args: data["input"]
-          ) ?? (data["command"] as? String).map { "$ \($0)" },
-          parentToolEntryID: (data["parentToolCallId"] as? String).map {
-            "\(activity["turnId"] as? String ?? ""):\($0)"
-          },
-          nestedCalls: NestedToolCall.from(data["nestedCalls"]),
-          nestedCallsComplete: (data["nestedCalls"] as? [String: Any])?["complete"] as? Bool ?? true,
-          diff: data["diff"] as? String,
-          timestamp: T3DesktopClient.date(activity["createdAt"]))
+        id: entryID,
+        kind: kind.hasPrefix("tool.") ? .tool : .system,
+        title: activity["summary"] as? String ?? kind,
+        text: output ?? payload["detail"] as? String ?? payload["message"] as? String ?? "",
+        isRunning: payload["status"] as? String == "inProgress",
+        isError: payload["status"] as? String == "failed" || kind.contains("error"),
+        toolName: data["toolName"] as? String ?? payload["title"] as? String,
+        toolInput: Self.toolInputText(
+          toolName: data["toolName"] as? String ?? payload["title"] as? String ?? "",
+          args: data["input"]
+        ) ?? (data["command"] as? String).map { "$ \($0)" },
+        parentToolEntryID: (data["parentToolCallId"] as? String).map {
+          "\(activity["turnId"] as? String ?? ""):\($0)"
+        },
+        nestedCalls: NestedToolCall.from(data["nestedCalls"]),
+        nestedCallsComplete: (data["nestedCalls"] as? [String: Any])?["complete"] as? Bool ?? true,
+        diff: data["diff"] as? String,
+        attachments: data["localImages"] as? [PromptAttachment] ?? [],
+        timestamp: T3DesktopClient.date(activity["createdAt"]))
       if kind.hasPrefix("tool.") {
         entry.toolInput = entry.toolInput ?? toolEntries[entryID]?.toolInput
         entry.parentToolEntryID = entry.parentToolEntryID ?? toolEntries[entryID]?.parentToolEntryID
@@ -575,7 +642,6 @@ final class AppModel: ObservableObject {
     modelDefaultThinkingLevels[modelID] = level
     UserDefaults.standard.set(modelDefaultThinkingLevels, forKey: "t3ModelDefaultThinkingLevels")
   }
-  func setCompactionModel(_ id: String?) { unsupported("压缩模型管理") }
   func compact() {
     guard canRestartSafely, isProcessRunning else { return }
     performSessionControl("compact")
@@ -583,7 +649,13 @@ final class AppModel: ObservableObject {
   private func performSessionControl(_ operation: String, accountName: String? = nil) {
     guard let id = threadID, let server else { return }
     let current = generation
-    if operation == "compact" { isCompacting = true } else { codexRotationInFlight = true }
+    if operation == "compact" {
+      isCompacting = true
+      awaitingAgentStart = true
+      submittedFromTurnID = lastTurnID
+    } else {
+      codexRotationInFlight = true
+    }
     statusText = operation == "compact" ? "正在压缩上下文…" : "正在切换账户…"
     Task { [weak self] in
       guard let self else { return }
@@ -596,11 +668,14 @@ final class AppModel: ObservableObject {
         }
       }
       do {
-        try await server.sessionControl(threadID: id, operation: operation, accountName: accountName)
+        try await server.sessionControl(
+          threadID: id, operation: operation, accountName: accountName)
         guard self.generation == current else { return }
-        self.statusText = operation == "compact" ? "上下文压缩完成" : "已切换到 \(accountName ?? "")"
+        self.statusText =
+          operation == "compact" ? "压缩请求已提交；等待 Server 完成。" : "已切换到 \(accountName ?? "")"
       } catch {
         guard self.generation == current else { return }
+        if operation == "compact" { self.awaitingAgentStart = false }
         self.statusText = "操作未确认；请检查会话状态和扩展配置，不会自动重试。"
       }
     }
@@ -610,35 +685,84 @@ final class AppModel: ObservableObject {
     guard canRestartSafely, supportsAccountSwitch else { return }
     performSessionControl("switch-account", accountName: accountName)
   }
-  func refreshCodexAccounts() {
+  func refreshCodexAccounts(force: Bool = false) {
     guard accountStatusTask == nil, let server else { return }
+    guard let provider = accountUsageProvider else {
+      if !accountQuotaMessage.isEmpty { accountQuotaMessage = "" }
+      return
+    }
+    guard accountQuotaRefreshPolicy.shouldRefresh(
+      generation: generation, provider: provider, isActive: isBusy, force: force
+    ) else { return }
     let threadID = self.threadID ?? "@discovery"
     let current = generation
+    isRefreshingAccountQuota = true
     accountStatusTask = Task { [weak self] in
       guard let self else { return }
-      defer { self.accountStatusTask = nil }
+      defer { self.accountStatusTask = nil; self.isRefreshingAccountQuota = false }
       do {
-        // Show persisted quotas before waiting for a live runtime's metrics.
+        // Host quotas are independent of official per-thread token metrics.
         if let payload = try await server.accountStatus(
-          threadID: threadID, provider: AccountUsageProvider(modelID: selectedModelId)?.rawValue),
-          self.generation == current
+          threadID: threadID, provider: provider.rawValue, force: force),
+          self.generation == current, self.accountUsageProvider == provider
         {
+          self.accountQuotaMessage = ""
           let data = try JSONSerialization.data(withJSONObject: payload)
-          self.extensionUI?.handle([
-            "method": "setStatus", "id": "server-account-status",
-            "statusKey": "account-usage-gui", "statusText": String(decoding: data, as: UTF8.self),
-          ], from: self)
-        }
-        if let stats = try? await server.sessionMetrics(threadID: threadID), self.generation == current {
-          self.stats = stats
-          self.outputTokensPerSecond = stats.outputTokensPerSecond
+          self.extensionUI?.handle(
+            [
+              "method": "setStatus", "id": "server-account-status",
+              "statusKey": "account-usage-gui", "statusText": String(decoding: data, as: UTF8.self),
+            ], from: self)
+        } else if self.generation == current, self.accountUsageProvider == provider {
+          self.accountQuotaMessage = ""
         }
       } catch {
-        if self.generation == current { self.statusText = "账户额度读取失败；请检查本机 Server。" }
+        if self.generation == current, self.accountUsageProvider == provider {
+          self.accountQuotaMessage = "账户额度查询失败；已有数据仅为旧缓存。请检查授权、文件权限及本机 Server。"
+        }
       }
     }
   }
-  func openCodexAccountManager() { unsupported("账户管理") }
+  func openCodexAccountManager() {
+    guard canManageAccounts, let id = threadID, let server else { return }
+    let current = generation
+    startingAccountManagement = true
+    statusText = "正在打开账户管理…"
+    Task {
+      defer { if generation == current { startingAccountManagement = false } }
+      do {
+        try await server.sessionControl(threadID: id, operation: "manage-accounts")
+        guard generation == current else { return }
+        statusText = "已提交 /accounts；需要安装 account-usage 扩展，请等待 Pi 的回复或对话框。"
+      } catch {
+        guard generation == current else { return }
+        statusText = "账户管理未确认；请检查扩展配置，不会自动重试。"
+      }
+    }
+  }
+
+  func applyExtensionUI(_ snapshot: [String: Any]) {
+    let epoch = snapshot["epoch"] as? String ?? ""
+    if extensionUIEpoch != epoch {
+      extensionUIEpoch = epoch
+      extensionUISerial = 0
+      answeredDialogIDs.removeAll()
+    }
+    isManagingAccounts = snapshot["busy"] as? Bool ?? false
+    let requests = snapshot["requests"] as? [[String: Any]] ?? []
+    let ids = Set(requests.compactMap { $0["id"] as? String })
+    answeredDialogIDs.formIntersection(ids)
+    extensionUI?.reconcileRequests(ids: ids.subtracting(answeredDialogIDs), from: self)
+    for event in snapshot["events"] as? [[String: Any]] ?? [] {
+      guard let serial = event["serial"] as? Int, serial > extensionUISerial else { continue }
+      extensionUISerial = serial
+      extensionUI?.handle(event, from: self)
+    }
+    for request in requests {
+      guard let id = request["id"] as? String, !answeredDialogIDs.contains(id) else { continue }
+      extensionUI?.handle(request, from: self)
+    }
+  }
   func changeFastMode(to enabled: Bool) {
     guard canRestartSafely, fastModeAvailable else { return }
     fastModeEnabled = enabled
@@ -646,15 +770,55 @@ final class AppModel: ObservableObject {
   }
   func sendExtensionResponse(
     id: String, value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false
-  ) { unsupported("扩展对话") }
+  ) {
+    guard let threadID, let server else { return }
+    let current = generation
+    answeredDialogIDs.insert(id)
+    Task {
+      do {
+        try await server.extensionResponse(
+          threadID: threadID, id: id, value: value, confirmed: confirmed, cancelled: cancelled)
+      } catch {
+        guard generation == current else { return }
+        statusText = "扩展回复未确认或已过期；不会自动重发，请检查会话状态。"
+      }
+    }
+  }
   func appendExtensionNotification(_ text: String) { statusText = text }
   private func unsupported(_ name: String) {
     statusText = "\(name)尚未接入 Pi Provider Adapter；不会回退到桌面 RPC。"
   }
   func removeQueuedPrompt(id: UUID) { queuedPrompts.removeAll { $0.id == id } }
-  func editQueuedPrompt(id: UUID) {}
-  func queuedPromptMoveTarget(id: UUID, direction: Int) -> UUID? { nil }
-  func moveQueuedPrompt(id: UUID, direction: Int) {}
+  func editQueuedPrompt(id: UUID) {
+    guard let index = queuedPrompts.firstIndex(where: { $0.id == id }) else { return }
+    guard !hasUnsubmittedInput else {
+      statusText = "请先发送或清空输入框，避免覆盖尚未提交的草稿。"
+      return
+    }
+    let prompt = queuedPrompts.remove(at: index)
+    composerText = prompt.text
+    attachments = prompt.attachments
+    statusText = "已移出等待队列，编辑后可重新发送。"
+  }
+  func queuedPromptMoveTarget(id: UUID, direction: Int) -> UUID? {
+    guard direction == -1 || direction == 1,
+      let index = queuedPrompts.firstIndex(where: { $0.id == id })
+    else { return nil }
+    let prompt = queuedPrompts[index]
+    let candidates =
+      direction == -1
+      ? Array(queuedPrompts[..<index].reversed()) : Array(queuedPrompts.dropFirst(index + 1))
+    return candidates.first {
+      $0.delivery == prompt.delivery && $0.waitsForCompaction == prompt.waitsForCompaction
+    }?.id
+  }
+  func moveQueuedPrompt(id: UUID, direction: Int) {
+    guard let target = queuedPromptMoveTarget(id: id, direction: direction),
+      let from = queuedPrompts.firstIndex(where: { $0.id == id }),
+      let to = queuedPrompts.firstIndex(where: { $0.id == target })
+    else { return }
+    queuedPrompts.swapAt(from, to)
+  }
   func editMessage(_ text: String) { composerText = text }
   func removeAttachment(_ attachment: PromptAttachment) {
     attachments.removeAll { $0.id == attachment.id }

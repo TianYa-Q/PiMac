@@ -9,10 +9,11 @@ struct T3DesktopTests {
     let suite = "pimac-cache-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
-    defaults.set(try JSONSerialization.data(withJSONObject: [
-      "projects": [["id": "project-1", "workspaceRoot": "/tmp/project"]],
-      "threads": [["id": "thread-1", "projectId": "project-1"]],
-    ]), forKey: "t3DesktopShellCache")
+    defaults.set(
+      try JSONSerialization.data(withJSONObject: [
+        "projects": [["id": "project-1", "workspaceRoot": "/tmp/project"]],
+        "threads": [["id": "thread-1", "projectId": "project-1"]],
+      ]), forKey: "t3DesktopShellCache")
     let client = T3DesktopClient(defaults: defaults)
     #expect(client.projects.count == 1)
     #expect(client.thread("thread-1") != nil)
@@ -24,7 +25,8 @@ struct T3DesktopTests {
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     let snapshot: [String: Any] = ["threads": [["id": "thread-1", "title": "Before"]]]
-    defaults.set(try JSONSerialization.data(withJSONObject: snapshot), forKey: "t3DesktopShellCache")
+    defaults.set(
+      try JSONSerialization.data(withJSONObject: snapshot), forKey: "t3DesktopShellCache")
     let client = T3DesktopClient(defaults: defaults)
     var deliveries = 0
     client.onShell = { _ in deliveries += 1 }
@@ -40,14 +42,17 @@ struct T3DesktopTests {
   }
 
   @Test func connectionFailuresShowStageWithoutLeakingErrorDetails() {
-    let error = NSError(domain: NSURLErrorDomain, code: URLError.timedOut.rawValue,
+    let error = NSError(
+      domain: NSURLErrorDomain, code: URLError.timedOut.rawValue,
       userInfo: [NSLocalizedDescriptionKey: "secret-token private-prompt"])
     let status = T3DesktopClient.connectionFailureStatus(error, phase: "同步模型配置")
     #expect(status.contains("同步模型配置：请求超时"))
     #expect(!status.contains("secret-token"))
     #expect(!status.contains("private-prompt"))
-    #expect(T3DesktopClient.connectionFailureStatus(
-      T3DesktopClient.ClientError.unauthorized, phase: "读取会话状态").contains("授权已失效"))
+    #expect(
+      T3DesktopClient.connectionFailureStatus(
+        T3DesktopClient.ClientError.unauthorized, phase: "读取会话状态"
+      ).contains("授权已失效"))
   }
 
   @Test(.timeLimit(.minutes(1)))
@@ -69,9 +74,14 @@ struct T3DesktopTests {
     let workspace = WorkspaceModel(restoreUserState: false)
     let service = T3BridgeService(defaults: defaults)
     let client = T3DesktopClient(defaults: defaults)
-    defer { client.stop(); service.stop(); workspace.disconnectAll() }
+    defer {
+      client.stop()
+      service.stop()
+      workspace.disconnectAll()
+    }
     let state = root.appendingPathComponent("state")
-    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
+    try service.start(
+      workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
     client.start(service: service)
     try await client.waitUntilReady()
     #expect(!client.providers.isEmpty)
@@ -84,12 +94,14 @@ struct T3DesktopTests {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(!client.isConnected)
-    // A forced/crashed child can leave a marker: do not delete it or relaunch.
+    // A leftover diagnostic file is no longer confused with a live OS lock.
     try Data("stale marker".utf8).write(to: marker)
-    #expect(await service.stopAndWait() == false)
+    #expect(await service.stopAndWait())
     #expect(FileManager.default.fileExists(atPath: marker.path))
+    // Malformed legacy ownership still needs explicit operator recovery.
     try FileManager.default.removeItem(at: marker)
-    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
+    try service.start(
+      workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
     try await client.waitUntilReady()
     #expect(!client.providers.isEmpty)
     #expect(client.status == "T3 Server 已连接")
@@ -131,8 +143,11 @@ struct T3DesktopTests {
       ["id": "other", "projectId": "other"],
     ]
     let expected = ["t3:a", "t3:b"]
-    #expect(WorkspaceModel.sessionCatalog(threads: threads, projectID: "project").map(\.path) == expected)
-    #expect(WorkspaceModel.sessionCatalog(threads: threads.reversed(), projectID: "project").map(\.path) == expected)
+    #expect(
+      WorkspaceModel.sessionCatalog(threads: threads, projectID: "project").map(\.path) == expected)
+    #expect(
+      WorkspaceModel.sessionCatalog(threads: threads.reversed(), projectID: "project").map(\.path)
+        == expected)
   }
 
   @Test func historicalPathsCannotBecomeRuntimeTargets() {
@@ -184,9 +199,11 @@ struct T3DesktopTests {
     }
     #expect(model.canSubmitPrompt)
     #expect(model.currentSessionPath.hasPrefix("t3:"))
+    model.changeModel(to: "test/model")
+    for _ in 0..<200 where model.isBusy { try await Task.sleep(for: .milliseconds(50)) }
     #expect(model.thinkingLevels.contains("xhigh"))
     #expect(model.thinkingLevels.contains("max"))
-    #expect(model.selectedThinkingLevel == model.globalDefaultThinkingLevel)
+    #expect(model.selectedModelId == "test/model")
     model.changeThinkingLevel(to: "xhigh")
     for _ in 0..<200 where model.isBusy {
       try await Task.sleep(for: .milliseconds(50))
@@ -199,17 +216,16 @@ struct T3DesktopTests {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(model.messages.contains { $0.kind == .user && $0.text == "tools" })
-    let read = try #require(model.messages.first { $0.toolName == "read" })
-    #expect(read.text == "done\nsecond line\nthird line")
+    let read = try #require(
+      model.messages.first { $0.toolName == "read" && $0.toolInput == "fixture.txt" })
+    // Official V2 wire projection deliberately omits arbitrary tool output.
+    #expect(read.text.isEmpty)
     #expect(read.toolInput == "fixture.txt")
     #expect(!read.isRunning)
     let code = try #require(model.messages.first { $0.toolName == "codemode" })
     #expect(code.toolInput == "const value = 1;\ntext(value);")
-    #expect(code.text == "Script completed\nOutput:\n1")
-    #expect(code.nestedCalls.first?.input == "nested.txt")
-    #expect(code.childToolEntries.count == 1)
-    #expect(code.childToolEntries.first?.toolInput == "nested.txt")
-    #expect(code.childToolEntries.first?.text == "nested output")
+    #expect(code.text.isEmpty)
+    #expect(code.childToolEntries.contains { $0.toolInput == "nested.txt" })
     #expect(!model.messages.contains { $0.toolInput == "nested.txt" })
     #expect(model.messages.contains { $0.kind == .assistant })
     #expect(model.lastSettledTurnID != nil)  // Also covers turns completed between polls.
@@ -220,10 +236,17 @@ struct T3DesktopTests {
     }
     #expect(model.stats?.contextPercent == 2)
     #expect(model.stats?.totalTokens == 200)
-    #expect(model.stats?.cost == 0.012)
+    #expect(model.stats?.cost == nil)  // Upstream V2 does not report Pi cost.
     #expect(defaults.data(forKey: "t3DesktopShellCache") != nil)
-    #expect(defaults.data(forKey: "t3DesktopMetrics.\(model.threadID!)") != nil)
-    #expect((model.outputTokensPerSecond ?? 0) > 0)
+    #expect(defaults.data(forKey: "t3DesktopV2Metrics.\(model.threadID!)") != nil)
+    #expect((model.outputTokensPerSecond ?? 0) > 0)  // Actual Pi response usage survives V2 wire decoding.
+    let beforeCompact = model.lastSettledTurnID
+    model.compact()
+    for _ in 0..<200 where model.lastSettledTurnID == beforeCompact || model.isBusy {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(model.lastSettledTurnID != beforeCompact)
+    #expect(!model.isBusy)
     model.composerText = "slow"
     model.sendPrompt()
     for _ in 0..<100 where !model.isStreaming {
@@ -244,14 +267,20 @@ struct T3DesktopTests {
     #expect(model.queuedPrompts.count == 1)
     #expect(model.composerText.isEmpty)
     #expect(!model.canRestartSafely)
-    for _ in 0..<200 where !model.messages.contains(where: { $0.kind == .assistant && $0.text == "Reply: queued-followup" }) {
+    for _ in 0..<200
+    where !model.messages.contains(where: {
+      $0.kind == .assistant && $0.text == "Reply: queued-followup"
+    }) {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(model.queuedPrompts.isEmpty)
-    #expect(model.messages.contains { $0.kind == .assistant && $0.text == "Reply: queued-followup" })
+    #expect(
+      model.messages.contains { $0.kind == .assistant && $0.text == "Reply: queued-followup" })
     let id = try #require(model.threadID)
     let detail = try await client.request("/api/orchestration/threads/\(id)")
-    #expect((detail["thread"] as? [String: Any])?["id"] as? String == id)
+    #expect(
+      ((detail["projection"] as? [String: Any])?["thread"] as? [String: Any])?["id"] as? String
+        == id)
     // Phone transport is Tunnel-only; the desktop retains its loopback Server.
     #expect(service.serverURL?.host == "127.0.0.1")
     let shell = try await client.request("/api/orchestration/shell")

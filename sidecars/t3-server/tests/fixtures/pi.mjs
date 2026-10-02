@@ -3,34 +3,53 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 const args = process.argv.slice(2);
+if (args.includes('--version')) { console.log('1.0.0'); process.exit(0); }
 const option = name => args[args.indexOf(name) + 1];
-const sessionId = args.includes('--session-id') ? option('--session-id') : undefined;
+let sessionId = args.includes('--session-id') ? option('--session-id') : 'fixture-session';
+let sessionFile = args.includes('--session') ? option('--session') : '/tmp/pimac-fixture-session.jsonl';
 const directory = args.includes('--session-dir') ? option('--session-dir') : undefined;
 if (directory) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 const file = directory && path.join(directory, sessionId + '.jsonl');
 let model = { provider: 'test', id: 'model', name: 'Test Model', reasoning: true,
   thinkingLevelMap: { xhigh: 'xhigh', max: 'max' }, contextWindow: 10000 }, running = false, completion;
-let thinkingLevel = 'off';
+let thinkingLevel = 'off', pendingDialog = false;
 const send = value => process.stdout.write(JSON.stringify(value) + '\r\n');
 const decoder = new StringDecoder('utf8'); let buffer = '';
 process.stdin.on('data', chunk => {
   buffer += decoder.write(chunk); let end;
   while ((end = buffer.indexOf('\n')) !== -1) {
     const command = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
-    if (file) fs.appendFileSync(file, JSON.stringify({ command: command.type, message: command.message, streamingBehavior: command.streamingBehavior, sessionId,
-      secretInherited: !!process.env.PIMAC_T3_BRIDGE_TOKEN }) + '\n', { mode: 0o600 });
+    fs.appendFileSync(file ?? path.join(process.cwd(), 'fixture-rpc.ndjson'), JSON.stringify({ command: command.type, message: command.message, streamingBehavior: command.streamingBehavior, sessionId,
+      imageCount: command.images?.length ?? 0, secretInherited: !!process.env.PIMAC_T3_BRIDGE_TOKEN }) + '\n', { mode: 0o600 });
     const response = data => send({ id: command.id, type: 'response', command: command.type, success: true, ...(data ? { data } : {}) });
     switch (command.type) {
-      case 'get_state': response({ sessionId, isStreaming: running, model, thinkingLevel }); break;
+      case 'get_state': response({ sessionId, sessionFile, isStreaming: running, isCompacting: false, model, thinkingLevel }); break;
+      case 'get_entries': response({ entries: [] }); break;
+      case 'get_messages': response({ messages: [] }); break;
+      case 'new_session': sessionId = 'fixture-' + process.pid; sessionFile = path.join(process.cwd(), sessionId + '.jsonl');
+        fs.writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + '\n', { mode: 0o600 });
+        response({ cancelled: false }); break;
+      case 'switch_session': sessionFile = command.sessionPath; response({ cancelled: false }); break;
       case 'get_session_stats': response({ tokens: { input: 100, output: 20, cacheRead: 80, cacheWrite: 0, total: 200 },
         cost: 0.012, contextUsage: { tokens: 200, contextWindow: 10000, percent: 2 } }); break;
-      case 'compact': response({ summary: 'Fixture summary', tokensBefore: 200, estimatedTokensAfter: 100 }); break;
+      case 'compact': {
+        const result = { summary: 'Fixture summary', tokensBefore: 200, estimatedTokensAfter: 100 };
+        send({ type: 'compaction_start' }); send({ type: 'compaction_end', result }); response(result); break;
+      }
       case 'get_commands': response({ commands: [{ name: 'pimac-fast', source: 'extension' }, { name: 'accounts', source: 'extension' }] }); break;
       case 'get_available_models': response({ models: [model] }); break;
       case 'set_model': model = { provider: command.provider, id: command.modelId, name: command.modelId, api: command.provider === 'openai' ? 'openai-responses' : command.provider === 'openai-codex' ? 'openai-codex-responses' : 'test' }; response(model); break;
       case 'set_thinking_level': thinkingLevel = command.level; response(); break;
       case 'set_session_name': case 'clear_queue': response(); break;
-      case 'extension_ui_response': break;
+      case 'extension_ui_response':
+        if (pendingDialog) {
+          pendingDialog = false; running = false;
+          send({ type: 'message_start', message: { role: 'assistant', content: [] } });
+          send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Dialog: ' + (command.value ?? 'cancelled') } });
+          send({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Dialog: ' + (command.value ?? 'cancelled') }], stopReason: 'stop' } });
+          send({ type: 'agent_settled' });
+        }
+        break;
       case 'abort':
         clearTimeout(completion); running = false; send({ type: 'agent_settled' }); response(); break;
       case 'prompt': {
@@ -52,6 +71,24 @@ process.stdin.on('data', chunk => {
         if (command.message === '/handled') break;
         running = true; send({ type: 'agent_start' });
         if (command.message === 'wait') break;
+        if (command.message === 'dialog') {
+          pendingDialog = true;
+          send({ type: 'extension_ui_request', id: 'fixture-input', method: 'input', title: 'Official Pi dialog', placeholder: 'Enter text' });
+          break;
+        }
+        if (command.message.startsWith('failure:')) {
+          const mode = command.message.slice('failure:'.length);
+          send({ type: 'message_start', message: { role: 'assistant', content: [] } });
+          send({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error',
+            errorMessage: mode === 'missing' ? '  ' : '429 配额不足\nPlease check your billing.' } });
+          if (mode.startsWith('retry')) send({ type: 'auto_retry_end', success: false,
+            ...(mode === 'retry-final' ? { finalError: '503 upstream unavailable' } : {}) });
+          if (mode === 'recovered') {
+            send({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'stop' } });
+            send({ type: 'auto_retry_end', success: true });
+          }
+          running = false; send({ type: 'agent_settled' }); break;
+        }
         if (command.message === 'tools') {
           send({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'fixture.txt' } });
           send({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'read', partialResult: { content: [{ type: 'text', text: 'partial' }] } });
