@@ -108,6 +108,8 @@ swift run PiMac
 
 For development, run `python3 scripts/dev.py` instead: it coalesces source changes and waits until all desktop and Telegram sessions are idle, with no queued prompts or extension dialogs, before building. After a successful build, Pi Mac rechecks idle status before relaunching. Changes during a build defer the reload until a fresh build succeeds. Failed builds do not restart the app. On exit (including Ctrl-C or SIGTERM), the watcher stops this project's Pi Mac instances, T3 Server and child services, including hot-relaunched apps; remaining processes are force-stopped after a short grace period. This interrupts active tasks. A second watcher is refused; if an old app is still running, it is cleaned up on exit before you start the watcher again. Normal and packaged runs do not auto-restart.
 
+The watcher builds and runs `.build/Pi Mac Dev.app`, enabling native notifications with the app icon. Allow notifications on first launch. The development app has its own identity (`com.jianfeng.pi-mac.dev`), with notification permissions and preferences separate from the release app. Task completion notifications appear in both foreground and background and use the default system sound. Bare executables launched with `swift run` do not support system notifications.
+
 The watcher prints compact timestamped build/change/reload statuses. Full output is saved to `.build/dev-build.log` (latest build) and `.build/dev-app.log` (current watcher run); failed builds also print the last 40 lines. Use `python3 scripts/dev.py --verbose` to show build details and live app logs in the terminal.
 
 With the full Xcode installation, you can also open `Package.swift` directly.

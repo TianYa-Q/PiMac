@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import plistlib
 import signal
 import subprocess
 import sys
@@ -66,6 +67,62 @@ class DevWatcherTests(unittest.TestCase):
             with contextlib.redirect_stdout(terminal):
                 dev.run_build_command([sys.executable, '-c', 'print("details")'])
             self.assertEqual(terminal.getvalue(), 'details\n')
+
+    def test_development_bundle_has_notification_identity_icon_and_resources(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.root = Path(directory)
+            binary_dir = dev.root / 'debug'
+            bundle = binary_dir / 'PiMac_PiMacApp.bundle'
+            bundle.mkdir(parents=True)
+            (bundle / 'resource').write_text('first')
+            (binary_dir / 'PiMac').write_text('executable')
+            (binary_dir / 'PiMac').chmod(0o755)
+            icon = dev.root / 'Sources/PiMacApp/Resources/AppIcon.icns'
+            icon.parent.mkdir(parents=True)
+            icon.write_bytes(b'icon')
+            with patch.object(dev, 'run_build_command', return_value=(0, '')) as command:
+                binary = dev.bundle_development_app(binary_dir)
+                contents = binary.parent.parent
+                self.assertEqual(binary.read_text(), 'executable')
+                self.assertTrue(os.access(binary, os.X_OK))
+                with (contents / 'Info.plist').open('rb') as file:
+                    info = plistlib.load(file)
+                self.assertEqual(info['CFBundleIdentifier'], 'com.jianfeng.pi-mac.dev')
+                self.assertEqual(info['CFBundleIconFile'], 'AppIcon')
+                self.assertEqual((contents / 'Resources/AppIcon.icns').read_bytes(), b'icon')
+                copied = contents / 'Resources/PiMac_PiMacApp.bundle'
+                self.assertEqual((copied / 'resource').read_text(), 'first')
+                (copied / 'obsolete').touch()
+                (bundle / 'resource').write_text('second')
+                (binary_dir / 'PiMac').write_text('new executable')
+                self.assertEqual(dev.bundle_development_app(binary_dir), binary)
+                self.assertEqual(binary.read_text(), 'new executable')
+                self.assertEqual((copied / 'resource').read_text(), 'second')
+                self.assertFalse((copied / 'obsolete').exists())
+                self.assertEqual(command.call_args_list[0].args[0][0], 'codesign')
+                self.assertEqual(command.call_args_list[1].args[0][-2:], ['-f', str(contents.parent)])
+
+    def test_running_apps_matches_bundle_paths_with_spaces_and_old_debug_app(self):
+        dev = self.load_dev()
+        binary = dev.root / '.build/Pi Mac Dev.app/Contents/MacOS/PiMac'
+        processes = (f'101 {binary}\n102 {dev.root}/.build/debug/PiMac\n'
+                     '103 /Applications/Pi Mac.app/Contents/MacOS/PiMac\n')
+        with patch.object(dev.subprocess, 'check_output', return_value=processes):
+            self.assertEqual(dev.running_apps(binary), [101, 102])
+
+    def test_development_bundle_signing_failure_does_not_return_binary(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.root = Path(directory)
+            binary_dir = dev.root / 'debug'
+            (binary_dir / 'PiMac_PiMacApp.bundle').mkdir(parents=True)
+            (binary_dir / 'PiMac').touch()
+            icon = dev.root / 'Sources/PiMacApp/Resources/AppIcon.icns'
+            icon.parent.mkdir(parents=True)
+            icon.touch()
+            with patch.object(dev, 'run_build_command', return_value=(1, '')):
+                self.assertIsNone(dev.bundle_development_app(binary_dir))
 
     def test_change_summary_includes_added_modified_and_removed_files(self):
         dev = self.load_dev()

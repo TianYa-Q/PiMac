@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
+import shutil
 import subprocess
 import signal
 import sys
@@ -42,7 +44,7 @@ def snapshot():
             directories[:] = [name for name in directories if name not in excluded]
             for name in files:
                 path = Path(base) / name
-                if path.suffix in {".swift", ".mjs", ".js", ".ts", ".json", ".py", ".sh", ".png"}:
+                if path.suffix in {".swift", ".mjs", ".js", ".ts", ".json", ".py", ".sh", ".png", ".icns"}:
                     paths.append(path)
     result = []
     for path in set(paths):
@@ -109,10 +111,19 @@ def running_apps(binary):
         ["ps", "-axo", "pid=,command="], text=True, errors="replace"
     )
     executable = str(binary.resolve())
+    build_root = str(root / ".build") + "/"
     result = []
     for line in output.splitlines():
         fields = line.strip().split(None, 1)
-        if len(fields) == 2 and fields[1].split(" ", 1)[0] == executable:
+        if len(fields) != 2:
+            continue
+        command = fields[1]
+        # Bundle paths contain spaces. Also catch the old bare debug executable
+        # when upgrading a watcher, so it cannot run alongside the new app.
+        exact = command == executable or command.startswith(executable + " ")
+        old_debug = command.startswith(build_root) and (
+            command.endswith("/PiMac") or "/PiMac " in command)
+        if exact or old_debug:
             result.append(int(fields[0]))
     return result
 
@@ -177,8 +188,57 @@ def build():
         print(output, end="", file=sys.stderr, flush=True)
         status(f"Build #{build_number} failed (binary path); no restart.")
         return None
+    binary = bundle_development_app(Path(output.strip()))
+    if binary is None:
+        status(f"Build #{build_number} failed (development app); no restart. Details: {build_log.relative_to(root)}")
+        return None
     status(f"Build #{build_number} ready · {time.monotonic() - started:.1f}s")
-    return Path(output.strip()) / "PiMac"
+    return binary
+
+
+def bundle_development_app(binary_dir):
+    """Give debug builds a real application identity for macOS notifications.
+
+    Keep the executable path stable for DevelopmentReloader; replace the file
+    atomically so an already running process keeps its original executable.
+    The dev identity is separate from the release app's permissions/defaults.
+    """
+    app = root / ".build" / "Pi Mac Dev.app"
+    contents = app / "Contents"
+    macos = contents / "MacOS"
+    resources = contents / "Resources"
+    macos.mkdir(parents=True, exist_ok=True)
+    resources.mkdir(parents=True, exist_ok=True)
+    binary = macos / "PiMac"
+    staged = macos / "PiMac.next"
+    shutil.copy2(binary_dir / "PiMac", staged)
+    staged.replace(binary)
+    resource_bundle = resources / "PiMac_PiMacApp.bundle"
+    if resource_bundle.exists():
+        shutil.rmtree(resource_bundle)
+    shutil.copytree(binary_dir / "PiMac_PiMacApp.bundle", resource_bundle)
+    shutil.copy2(root / "Sources/PiMacApp/Resources/AppIcon.icns", resources / "AppIcon.icns")
+    with (contents / "Info.plist").open("wb") as plist:
+        plistlib.dump({
+            "CFBundleDisplayName": "Pi Mac Dev",
+            "CFBundleExecutable": "PiMac",
+            "CFBundleIdentifier": "com.jianfeng.pi-mac.dev",
+            "CFBundleIconFile": "AppIcon",
+            "CFBundleName": "Pi Mac Dev",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleVersion": "1",
+            "LSMinimumSystemVersion": "14.0",
+            "NSHighResolutionCapable": True,
+            "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
+        }, plist)
+    if run_build_command(["codesign", "--force", "--deep", "--sign",
+                          os.environ.get("CODE_SIGN_IDENTITY", "-"), str(app)])[0] != 0:
+        return None
+    register = Path("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
+    if run_build_command([str(register), "-f", str(app)])[0] != 0:
+        return None
+    return binary
 
 
 def process_table():
