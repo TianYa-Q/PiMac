@@ -53,9 +53,9 @@
     "@earendil-works/pi-tui": ">=0.99.1"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.99.1",
-    "@earendil-works/pi-coding-agent": "0.99.1",
-    "@earendil-works/pi-tui": "0.99.1",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/pi-tui": "1.0.0",
     "@types/proper-lockfile": "4.1.4",
     "jiti": "^2.7.0",
     "oxlint": "^1.14.0",

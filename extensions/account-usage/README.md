@@ -1,6 +1,6 @@
 # account-usage
 
-Pi Mac's companion extension, maintained in `extensions/account-usage/` in the same repository as the Swift app. Requires Pi **0.99.1+** for OpenAI ChatGPT support.
+Pi Mac's companion extension, maintained in `extensions/account-usage/` in the same repository as the Swift app. Requires Pi **0.99.1+** for OpenAI ChatGPT support; development dependencies and compatibility tests now target **Pi 1.0.0**.
 
 ## Local development / installation
 
@@ -73,6 +73,6 @@ node scripts/test-pi-compatibility.mjs
 
 Tests use temporary agent directories and synthetic credentials; they do not access real accounts or invoke paid models. Full project validation: `./scripts/check.sh`.
 
-Pi 0.99.1's coding-agent npm package bundles `brace-expansion@5.0.9`, which `npm audit` flags for a high-severity denial-of-service issue. It is an upstream bundled dependency: `npm audit fix` cannot replace it. The lockfile preserves Pi 0.99.1; recheck the audit when upgrading Pi rather than silently modifying host package internals.
+Pi 1.0.0's coding-agent npm package still bundles `brace-expansion@5.0.9`, which `npm audit` flags for a high-severity denial-of-service issue. It is an upstream bundled dependency: `npm audit fix` cannot replace it. The lockfile now targets Pi 1.0.0; recheck the audit when upgrading Pi rather than silently modifying host package internals.
 
 MIT licensed. Extensions run with the user's OS permissions; review source before loading.
