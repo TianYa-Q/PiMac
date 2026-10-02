@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-/// Owns T3 transport and private IPC. Network and message-sending consent are separate.
+/// Owns T3 transport and private IPC. Paired devices can send while the connection is enabled.
 @MainActor
 final class T3BridgeService: ObservableObject {
   @Published private(set) var port: Int?
@@ -9,9 +9,6 @@ final class T3BridgeService: ObservableObject {
   @Published private(set) var isEnabled = false
   @Published private(set) var isStopping = false
   @Published private(set) var rememberedNetwork: T3NetworkEndpoint?
-  @Published var allowsMessageSending = false {
-    didSet { defaults.set(allowsMessageSending, forKey: "t3AllowsMessageSending") }
-  }
   private let commands = T3WorkspaceCommands()
   private let defaults: UserDefaults
   private let stateDirectory: URL?
@@ -38,7 +35,6 @@ final class T3BridgeService: ObservableObject {
     self.defaults = defaults
     self.stateDirectory = stateDirectory
     rememberedNetwork = T3ConnectionPreferences.load(from: defaults)
-    allowsMessageSending = defaults.bool(forKey: "t3AllowsMessageSending")
   }
 
   /// Only user actions clear consent. Process shutdown/failure preserves it.
@@ -103,7 +99,7 @@ final class T3BridgeService: ObservableObject {
     writer = DispatchQueue(label: "pimac.t3.bridge.writer.\(current)")
     bridge = RemoteWorkspaceBridge(
       workspace: workspace, commands: commands,
-      canSend: { [weak self] in self?.allowsMessageSending == true && self?.isEnabled == true })
+      canSend: { [weak self] in self?.isEnabled == true })
     child.executableURL = URL(fileURLWithPath: "/bin/zsh")
     child.arguments = [
       "-lc", "exec node \"$1\"", "pimac-t3", resource.appendingPathComponent("gateway.mjs").path,

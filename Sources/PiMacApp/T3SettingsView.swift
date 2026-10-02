@@ -26,9 +26,8 @@ struct T3SettingsView: View {
   var body: some View {
     GroupBox("T3 iOS 连接") {
       VStack(alignment: .leading, spacing: 12) {
-        Text("可读取历史与实时会话；开启发送权限后，可发送文字及 PNG/JPEG/WebP 图片。忙碌时拒绝发送，不切换桌面选择。取消任务和新建会话尚未支持。")
-        Toggle("允许手机发送消息", isOn: $service.allowsMessageSending)
-        Text("开启后，已配对且有操作权限的设备可在 Mac 上执行 Pi 任务；图片每条最多 8 张、合计 8 MiB。旧只读连接不会自动获得发送权限。")
+        Text("可读取历史与实时会话，并发送文字及 PNG/JPEG/WebP 图片。忙碌时拒绝发送，不切换桌面选择。取消任务和新建会话尚未支持。")
+        Text("已配对的手机可在 Mac 上执行 Pi 任务；图片每条最多 8 张、合计 8 MiB。")
           .font(.caption)
           .foregroundStyle(.secondary)
         Toggle("允许手机访问（可信局域网 IPv4）", isOn: $allowNetwork)
@@ -169,7 +168,7 @@ struct T3SettingsView: View {
       Button("取消", role: .cancel) {}
     } message: {
       Text(
-        "普通局域网 HTTP 不加密。仅在可信局域网使用。手机将能读取项目目录和历史会话正文；开启「允许手机发送消息」后还能执行 Pi 任务。确认后会记住此 IP 和端口，软件重启时自动恢复，直到手动停止连接或取消允许访问。"
+        "普通局域网 HTTP 不加密。仅在可信局域网使用。手机将能读取项目目录和历史会话正文，并可发送消息执行 Pi 任务。确认后会记住此 IP 和端口，软件重启时自动恢复，直到手动停止连接或取消允许访问。"
       )
     }
   }

@@ -5,14 +5,7 @@ import Testing
 
 @MainActor
 struct RemoteWorkspaceBridgeTests {
-  @Test func mobileSendingRequiresSeparateConsentAndPersistsIt() throws {
-    let suite = "PiMac.T3SendConsent.\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
-    let service = T3BridgeService(defaults: defaults)
-    #expect(!service.allowsMessageSending)
-    service.allowsMessageSending = true
-    #expect(T3BridgeService(defaults: defaults).allowsMessageSending)
+  @Test func stoppedConnectionRejectsMobileWrites() {
     let workspace = WorkspaceModel(restoreUserState: false)
     defer { workspace.disconnectAll() }
     let bridge = RemoteWorkspaceBridge(workspace: workspace)

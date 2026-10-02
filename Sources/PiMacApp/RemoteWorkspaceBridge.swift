@@ -108,7 +108,7 @@ final class RemoteWorkspaceBridge {
     if request.method == "session.send" {
       guard canSend() else {
         fail(
-          "sending_disabled", "Enable mobile message sending in Pi Mac settings; nothing was sent")
+          "sending_disabled", "T3 connection is stopped; nothing was sent")
         return
       }
       Task { @MainActor in

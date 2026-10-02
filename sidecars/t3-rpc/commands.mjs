@@ -56,8 +56,8 @@ export class CommandDispatcher {
     const nativeCommand = { ...command, commandId: createHash('sha256').update(key).digest('hex') };
     const result = this.workspace.dispatch(nativeCommand, signal).catch(error => {
       if (error.code === 'sending_disabled') {
-        this.commands.delete(key); // Definitive pre-submit refusal, safe to retry after consent.
-        throw fail('请在 Pi Mac 的 T3 设置开启「允许手机发送消息」。这条消息未发送。');
+        this.commands.delete(key); // Definitive pre-submit refusal, safe to retry after reconnect.
+        throw fail('Pi Mac 的 T3 连接已停止。这条消息未发送，请重新连接。');
       }
       throw fail('Pi did not confirm message acceptance. Check this conversation before retrying.');
     });

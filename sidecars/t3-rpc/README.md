@@ -38,4 +38,5 @@ Codex/Claude provider; existing-thread sends use the shared native Pi runtime.
 
 See `docs/t3-code-integration.md` for settings, network warnings, budgets, crash
 ownership/recovery and remaining work. Public and private listeners are separate;
-network exposure and mobile sending each require explicit, default-off consent.
+network exposure requires explicit, default-off consent; paired devices can send
+while that connection is enabled.

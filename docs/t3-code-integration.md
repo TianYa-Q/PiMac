@@ -5,7 +5,7 @@ by Pi Mac, synchronized with desktop and Telegram. No Pi extension, independent
 agent, second session-file writer, or arbitrary-path session activation.
 
 **Current scope: pairing, client initialization, bounded historical/live snapshots,
-subscriptions, and opt-in text/inline-image sending to existing sessions.
+subscriptions, and authenticated text/inline-image sending to existing sessions.
 Cancelling tasks, creating sessions, arbitrary file uploads, terminal/review,
 provider management and T3 Connect are NOT implemented. Actual
 App Store/iPhone compatibility has not been verified.** The audited source is a
@@ -129,8 +129,8 @@ are suppressed to avoid logging credentials or leaking payloads into JSONL.
 
 ### Mobile message sending
 
-Enable **允许手机发送消息** in desktop T3 settings (off by default, separately
-from network consent). Existing read-only grants do not implicitly enable writes.
+Enabling the T3 connection allows paired devices to send messages; there is no
+separate message-sending toggle. Stopping the connection blocks new submissions.
 `orchestration.dispatchCommand` accepts only `thread.turn.start` for a catalog
 thread, checks `orchestration:operate`, and revalidates project/session/runtime
 identity natively. A saved conversation can start its existing shared tab/runtime
