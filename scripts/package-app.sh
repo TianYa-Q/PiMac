@@ -43,6 +43,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
   <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSLocalNetworkUsageDescription</key><string>Allow T3 iOS to read Pi Mac sessions and, with separate permission, send messages on your trusted local network.</string>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict>
 </plist>
 PLIST

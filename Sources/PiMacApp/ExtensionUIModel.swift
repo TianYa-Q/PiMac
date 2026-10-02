@@ -116,6 +116,10 @@ final class ExtensionUIModel: ObservableObject {
     (presentedDialog?.source === source) || queuedDialogs.contains { $0.source === source }
   }
 
+  func hasPendingDialog(for source: AppModel) -> Bool {
+    presentedDialog?.source === source || queuedDialogs.contains { $0.source === source }
+  }
+
   func answerDialog(value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false) {
     guard let pending = presentedDialog else { return }
     pending.source.sendExtensionResponse(

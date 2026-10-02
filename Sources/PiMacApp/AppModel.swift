@@ -44,6 +44,7 @@ final class AppModel: ObservableObject {
   @Published private(set) var fastModeAvailable = false
   @Published private(set) var isChangingFastMode = false
   @Published private(set) var outputTokensPerSecond: Double?
+  @Published private(set) var streamActivity = StreamActivity()
   private var outputSpeedTracker = OutputSpeedTracker()
   private var lastOutputSpeedPublish: TimeInterval = 0
 
@@ -59,6 +60,11 @@ final class AppModel: ObservableObject {
     return AccountUsageProvider(rawValue: model.provider)
   }
 
+  /// Read-only quota refresh and opening the manager do not interrupt the agent.
+  var canManageAccounts: Bool {
+    connectionState == .connected && !isLoadingConfiguration
+  }
+
   var supportsAccountSwitch: Bool {
     guard let provider = accountUsageProvider else { return false }
     // The v1 extension only reported legacy Codex accounts, without capabilities.
@@ -71,7 +77,12 @@ final class AppModel: ObservableObject {
         || extensionUI?.managesSelectedAuth(for: self) == true)
   }
   @Published var isStreaming = false {
-    didSet { if !isStreaming { scheduleCodexAccountRotation() } }
+    didSet {
+      if !isStreaming {
+        streamActivity = StreamActivity()
+        scheduleCodexAccountRotation()
+      }
+    }
   }
   @Published var isCompacting = false {
     didSet { if !isCompacting { scheduleCodexAccountRotation() } }
@@ -415,49 +426,12 @@ final class AppModel: ObservableObject {
   }
 
   func sendPrompt(delivery: QueuedPromptDelivery = .steer) {
-    let text = composerText.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !text.isEmpty || !attachments.isEmpty, client.isRunning,
-      !isLoadingConfiguration, !isRewritingQueue, case .connected = connectionState
+    guard canSubmitPrompt,
+      let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
     else { return }
-    let sentAttachments = attachments
     composerText = ""
     attachments = []
-    let displayText = text.isEmpty ? "请查看附件。" : text
-    let rpcText = Self.rpcText(for: displayText, attachments: sentAttachments)
-
-    if isCompacting || codexRotationInFlight {
-      queuedPrompts.append(
-        QueuedPrompt(
-          id: UUID(),
-          text: displayText,
-          rpcText: rpcText,
-          delivery: delivery,
-          attachments: sentAttachments,
-          waitsForCompaction: true
-        ))
-      return
-    }
-
-    if isStreaming {
-      submitQueuedPrompt(
-        QueuedPrompt(
-          id: UUID(),
-          text: displayText,
-          rpcText: rpcText,
-          delivery: delivery,
-          attachments: sentAttachments
-        ))
-      return
-    }
-
-    submitImmediatePrompt(
-      QueuedPrompt(
-        id: UUID(),
-        text: displayText,
-        rpcText: rpcText,
-        delivery: delivery,
-        attachments: sentAttachments
-      ))
+    submitPrompt(prompt)
   }
 
   func removeQueuedPrompt(id: UUID) {
@@ -628,29 +602,55 @@ final class AppModel: ObservableObject {
 
   /// Remote input must not consume or overwrite the local composer draft and attachments.
   func sendRemotePrompt(
-    _ text: String, attachments: [PromptAttachment] = [], completion: @escaping (Bool) -> Void
+    _ text: String, attachments: [PromptAttachment] = [], messageID: String? = nil,
+    completion: @escaping (Bool) -> Void
   ) {
-    guard clientConnectedForCommands, client.isRunning, !isLoadingConfiguration,
-      !isBusy, queuedPrompts.isEmpty,
-      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    guard canSubmitPrompt, !isBusy, queuedPrompts.isEmpty,
+      let prompt = Self.makePrompt(text, attachments: attachments, delivery: .steer)
     else {
       completion(false)
       return
     }
-    submitImmediatePrompt(
-      QueuedPrompt(
-        id: UUID(), text: text, rpcText: Self.rpcText(for: text, attachments: attachments),
-        delivery: .steer, attachments: attachments),
-      completion: completion)
+    submitImmediatePrompt(prompt, messageID: messageID, completion: completion)
+  }
+
+  var canSubmitPrompt: Bool {
+    clientConnectedForCommands && client.isRunning && !isLoadingConfiguration && !isRewritingQueue
+  }
+
+  /// Normalize every input identically, regardless of transport. Composer state is not touched.
+  nonisolated static func makePrompt(
+    _ text: String, attachments: [PromptAttachment], delivery: QueuedPromptDelivery
+  ) -> QueuedPrompt? {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty || !attachments.isEmpty else { return nil }
+    let displayText = trimmed.isEmpty ? "请查看附件。" : trimmed
+    return QueuedPrompt(
+      id: UUID(), text: displayText,
+      rpcText: rpcText(for: displayText, attachments: attachments),
+      delivery: delivery, attachments: attachments)
+  }
+
+  private func submitPrompt(_ prompt: QueuedPrompt, completion: ((Bool) -> Void)? = nil) {
+    if isCompacting || codexRotationInFlight {
+      var deferred = prompt
+      deferred.waitsForCompaction = true
+      queuedPrompts.append(deferred)
+    } else if isStreaming {
+      submitQueuedPrompt(prompt)
+    } else {
+      submitImmediatePrompt(prompt, completion: completion)
+    }
   }
 
   private func submitImmediatePrompt(
     _ prompt: QueuedPrompt,
+    messageID: String? = nil,
     completion: ((Bool) -> Void)? = nil
   ) {
     messages.append(
       ChatEntry(
-        id: UUID().uuidString,
+        id: messageID ?? UUID().uuidString,
         kind: .user,
         title: "你",
         text: prompt.text,
@@ -1694,29 +1694,27 @@ final class AppModel: ObservableObject {
     guard
       let enumerator = FileManager.default.enumerator(
         at: sessionSearchRoot(for: projectPath, root: root),
-        includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+        includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey],
         options: [.skipsHiddenFiles]
       )
     else { return [] }
 
     var result: [SessionItem] = []
     for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-      guard let preview = sessionPreview(inFile: url, projectPath: projectPath) else { continue }
-      let header = preview.header
-      let firstUserText = preview.text
-      var title = (header["name"] as? String) ?? (header["sessionName"] as? String) ?? ""
-      if title.isEmpty { title = firstUserText }
-      if title.isEmpty { title = "未命名会话" }
-      title = String(title.prefix(70))
-      // 会话顺序只取决于用户最后一次发送消息的时间。助手回复、工具调用以及仅仅
-      // 打开会话都可能继续写入文件，但这些操作不应把会话移到列表顶部。
-      let lastUserMessageAt = latestUserMessageDate(inFile: url)
-      result.append(
-        SessionItem(
-          path: url.path,
-          title: title,
-          modifiedAt: lastUserMessageAt ?? recordDate(header) ?? .distantPast
-        ))
+      let item = SessionDiscoveryCache.shared.item(at: url, project: projectPath) {
+        guard let preview = sessionPreview(inFile: url, projectPath: projectPath) else {
+          return nil
+        }
+        let header = preview.header
+        var title = (header["name"] as? String) ?? (header["sessionName"] as? String) ?? ""
+        if title.isEmpty { title = preview.text }
+        if title.isEmpty { title = "未命名会话" }
+        // Only user messages affect ordering, not tool output or opening a session.
+        return SessionItem(
+          path: url.path, title: String(title.prefix(70)),
+          modifiedAt: latestUserMessageDate(inFile: url) ?? recordDate(header) ?? .distantPast)
+      }
+      if let item { result.append(item) }
     }
     return result.sorted { $0.modifiedAt > $1.modifiedAt }
   }
@@ -1910,6 +1908,9 @@ final class AppModel: ObservableObject {
   /// RPC 事件种类较多，这里只把会影响原生界面的状态集中映射，避免视图层理解协议细节。
   private func handle(_ event: PiRPCClient.JSON) {
     guard let type = event["type"] as? String else { return }
+    var activity = streamActivity
+    activity.consume(event)
+    if activity != streamActivity { streamActivity = activity }
     if type == "agent_start" { outputSpeedTracker.reset() }
     let now = ProcessInfo.processInfo.systemUptime
     outputSpeedTracker.consume(event, now: now)
@@ -2268,7 +2269,9 @@ final class AppModel: ObservableObject {
           id: id,
           kind: .tool,
           title: "工具 · \(name)",
-          text: Self.prettyJSON(event["args"]),
+          text: name == "codemode"
+            ? Self.toolInputText(toolName: name, args: event["args"]) ?? ""
+            : Self.prettyJSON(event["args"]),
           isRunning: true,
           toolName: name,
           toolInput: Self.toolInputText(toolName: name, args: event["args"])
@@ -2287,6 +2290,9 @@ final class AppModel: ObservableObject {
       // command arguments visible until actual output arrives instead of replacing
       // them with the protocol envelope.
       if !text.isEmpty { messages[index].text = text }
+      if type == "tool_execution_end" {
+        messages[index].attachments = Self.restoreImageAttachments(from: result["content"])
+      }
       if result["nestedCalls"] != nil {
         messages[index].nestedCalls = NestedToolCall.from(result["nestedCalls"])
         messages[index].nestedCallsComplete =
@@ -2609,6 +2615,7 @@ final class AppModel: ObservableObject {
           ?? true,
         diff: (message["details"] as? PiRPCClient.JSON)?["diff"] as? String
           ?? (message["details"] as? PiRPCClient.JSON)?["patch"] as? String,
+        attachments: restoreImageAttachments(from: message["content"]),
         timestamp: messageDate(message)
       )
     case "bashExecution":
@@ -2715,8 +2722,13 @@ final class AppModel: ObservableObject {
   }
 
   nonisolated static func toolInputText(toolName: String, args: Any?) -> String? {
+    // Pi exposes codemode as raw JavaScript to providers, while normal RPC tool
+    // events/history use { code }. Accept both forms without re-encoding the script.
+    if toolName == "codemode", let code = args as? String { return code }
     guard let args = args as? PiRPCClient.JSON else { return nil }
     switch toolName {
+    case "codemode":
+      return args["code"] as? String
     case "bash":
       guard let command = args["command"] as? String, !command.isEmpty else { return nil }
       return "$ \(command)"

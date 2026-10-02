@@ -7,7 +7,27 @@ enum TelegramMarkdown {
   static func html(_ text: String) -> String {
     var result: [String] = []
     var inFence = false
-    for line in text.components(separatedBy: "\n") {
+    let lines = text.components(separatedBy: "\n")
+    var index = 0
+    while index < lines.count {
+      let line = lines[index]
+      index += 1
+      // Telegram HTML has no table tags. Reuse the desktop parser, but present
+      // each row as labelled fields so long cells wrap naturally on phones.
+      if !inFence, line.contains("|") {
+        var end = index
+        while end < lines.count, lines[end].contains("|"),
+          !lines[end].trimmingCharacters(in: .whitespaces).hasPrefix("```")
+        {
+          end += 1
+        }
+        let blocks = MarkdownParser.parse(lines[(index - 1)..<end].joined(separator: "\n"))
+        if blocks.count == 1, case .table(let headers, let rows, _) = blocks[0] {
+          result.append(table(headers: headers, rows: rows))
+          index = end
+          continue
+        }
+      }
       let trimmed = line.trimmingCharacters(in: .whitespaces)
       if trimmed.hasPrefix("```") {
         if inFence {
@@ -32,6 +52,19 @@ enum TelegramMarkdown {
     }
     if inFence { result.append("</pre>") }
     return result.joined(separator: "\n")
+  }
+
+  private static func table(headers: [String], rows: [[String]]) -> String {
+    guard !rows.isEmpty else {
+      return headers.map { "<b>\(inline($0[...]))</b>" }.joined(separator: " · ")
+    }
+    return rows.map { row in
+      row.enumerated().map { column, cell in
+        let value = inline(cell[...])
+        guard column < headers.count, !headers[column].isEmpty else { return value }
+        return "<b>\(inline(headers[column][...]))</b>：\(value)"
+      }.joined(separator: "\n")
+    }.joined(separator: "\n\n")
   }
 
   private static func inline(_ content: Substring) -> String {

@@ -244,7 +244,10 @@ struct ContentView: View {
       if case .success(let urls) = result { addAttachmentsAtSelection(urls) }
     }
     .sheet(isPresented: $showingSettings) {
-      SettingsView(path: app.piPath, projectURL: app.projectURL, telegram: workspace.telegram) {
+      SettingsView(
+        path: app.piPath, projectURL: app.projectURL, telegram: workspace.telegram,
+        workspace: workspace
+      ) {
         app.piPath = $0
       }
     }
@@ -907,6 +910,10 @@ struct ContentView: View {
             // Height caches and viewport coordinates must never leak across sessions.
             .id("\(tabID)-\(app.currentSessionPath)")
 
+            if app.isStreaming && app.streamActivity.phase != nil {
+              streamActivityIndicator
+            }
+
             // The footer is the real content edge as well as the auto-scroll anchor.
             Color.clear
               .frame(height: ConversationLayout.contentInset)
@@ -989,6 +996,22 @@ struct ContentView: View {
           scheduleInitialSessionScroll(proxy)
         }
       }
+    }
+  }
+
+  private var streamActivityIndicator: some View {
+    TimelineView(.periodic(from: .now, by: 1)) { context in
+      let status = app.streamActivity.label(at: context.date) ?? ""
+      HStack(spacing: 8) {
+        ProgressView()
+          .controlSize(.small)
+          .frame(width: 18, height: 18)
+        Text(status)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .accessibilityLabel(status)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
     }
   }
 
@@ -1202,29 +1225,30 @@ struct ContentView: View {
       }
       .controlSize(.small)
 
-      if app.stats != nil || app.outputTokensPerSecond != nil || app.isStreaming
-        || !app.statusText.isEmpty
-      {
-        Rectangle()
-          .fill(Color.primary.opacity(0.06))
-          .frame(height: 1)
-        HStack(spacing: 12) {
-          ScrollView(.horizontal, showsIndicators: false) {
-            sessionMetrics
-          }
-          .frame(height: 18)
-          if !app.statusText.isEmpty {
-            ProgressView().controlSize(.small)
-            Text(app.statusText)
-              .font(.caption)
-              .foregroundStyle(.secondary)
-              .lineLimit(1)
-              .help(app.statusText)
-          }
+      // Session switching clears stats before the new RPC result arrives. Keep the footer
+      // mounted, with the same height for metrics and loading status, so controls don't jump.
+      Rectangle()
+        .fill(Color.primary.opacity(0.06))
+        .frame(height: 1)
+      HStack(spacing: 12) {
+        ScrollView(.horizontal, showsIndicators: false) {
+          sessionMetrics
         }
-        .padding(.horizontal, 2)
-        .padding(.vertical, 2)
+        .frame(height: 18)
+        if !app.statusText.isEmpty {
+          ProgressView().controlSize(.small)
+            .frame(width: 18, height: 18)
+          Text(app.statusText)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .help(app.statusText)
+            .accessibilityLabel(app.statusText)
+        }
       }
+      .frame(height: 18)
+      .padding(.horizontal, 2)
+      .padding(.vertical, 2)
     }
     .padding(10)
     .background(.quaternary.opacity(0.42), in: RoundedRectangle(cornerRadius: 14))
@@ -1999,6 +2023,7 @@ private struct ActivityEntryView: View {
                 if entry.kind == .tool, let toolInput = entry.toolInput, !toolInput.isEmpty {
                   Text(toolInput)
                     .font(.system(.caption, design: .monospaced))
+                    .lineLimit(entry.toolName == "codemode" ? 3 : nil)
                     .foregroundStyle(.primary.opacity(0.88))
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2018,8 +2043,21 @@ private struct ActivityEntryView: View {
           .buttonStyle(.plain)
 
           if expanded && hasVisibleDetails {
+            if entry.toolName == "codemode", let code = entry.toolInput,
+              !code.isEmpty, code != entry.text
+            {
+              Text(code)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 31)
+            }
             activityContent
               .padding(.leading, 31)
+            if !entry.attachments.isEmpty {
+              MessageAttachmentsView(attachments: entry.attachments)
+                .padding(.leading, 31)
+            }
             ForEach(entry.nestedCalls) { call in
               VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -2104,6 +2142,7 @@ private struct ActivityEntryView: View {
     case "bash": .blue
     case "read": .teal
     case "edit", "write": .orange
+    case "codemode": .indigo
     case "web_search", "fetch_content", "source_check": .purple
     default: .secondary
     }
@@ -2115,6 +2154,7 @@ private struct ActivityEntryView: View {
     case "read": "读取文件"
     case "edit": "编辑文件"
     case "write": "写入文件"
+    case "codemode": "Code Mode · 执行脚本"
     case "web_search": "搜索网页"
     case "fetch_content": "读取网页"
     case "source_check": "核查来源"
@@ -2126,6 +2166,8 @@ private struct ActivityEntryView: View {
 
   private var hasVisibleDetails: Bool {
     if entry.kind == .thinking { return !entry.text.isEmpty }
+    if !entry.attachments.isEmpty { return true }
+    if entry.toolName == "codemode", entry.toolInput?.isEmpty == false { return true }
     if !entry.nestedCalls.isEmpty || !entry.nestedCallsComplete { return true }
     guard entry.toolName != "read" else { return false }
     return entry.diff?.isEmpty == false || !entry.text.isEmpty
@@ -2143,28 +2185,21 @@ private struct ActivityEntryView: View {
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
     } else if !entry.text.isEmpty {
-      ScrollView([.horizontal, .vertical]) {
-        Text(entry.text)
-          .font(.system(.caption, design: .monospaced))
-          .textSelection(.enabled)
-          .fixedSize(horizontal: true, vertical: true)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .padding(9)
-      }
-      .frame(maxHeight: 300)
-      .background(Color(nsColor: .textBackgroundColor).opacity(0.46))
-      .clipShape(RoundedRectangle(cornerRadius: 7))
-      .overlay {
-        RoundedRectangle(cornerRadius: 7)
-          .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
-      }
+      ToolOutputView(text: entry.text)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.46))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .overlay {
+          RoundedRectangle(cornerRadius: 7)
+            .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+        }
     }
   }
 
   private var activityIcon: String {
     switch entry.kind {
     case .thinking: "brain.head.profile"
-    case .tool: "wrench.and.screwdriver"
+    case .tool: entry.toolName == "codemode" ? "curlybraces" : "wrench.and.screwdriver"
     case .assistant: "sparkles"
     case .user: "person.crop.circle"
     case .compaction: "arrow.down.right.and.arrow.up.left"
@@ -2456,11 +2491,11 @@ private struct CodexAccountsView: View {
           }
           .buttonStyle(.plain)
           .help("刷新额度")
-          .disabled(app.isBusy)
+          .disabled(!app.canManageAccounts)
           Button("管理") { app.openCodexAccountManager() }
             .buttonStyle(.plain)
             .font(.caption)
-            .disabled(app.isBusy)
+            .disabled(!app.canManageAccounts)
           Button {
             withAnimation(.easeInOut(duration: 0.16)) { isExpanded.toggle() }
           } label: {
@@ -2470,13 +2505,11 @@ private struct CodexAccountsView: View {
           .help(isExpanded ? "折叠账户额度" : "展开全部账户额度")
         }
 
-        if AccountUsageProvider(modelID: app.selectedModelId) == .chatGPT {
-          Text(
-            app.supportsAccountSwitch
-              ? "ChatGPT 订阅账户与 Codex legacy 分开保存；API Key 不会被自动覆盖。"
-              : "新版 OpenAI 账户管理需要支持 v2 协议的 account-usage 扩展。"
-          )
-          .font(.caption2).foregroundStyle(.secondary)
+        if AccountUsageProvider(modelID: app.selectedModelId) == .chatGPT,
+          !app.supportsAccountSwitch
+        {
+          Text("新版 OpenAI 账户管理需要支持 v2 协议的 account-usage 扩展。")
+            .font(.caption2).foregroundStyle(.secondary)
         }
         if isExpanded {
           expandedAccounts
@@ -2786,15 +2819,15 @@ private struct ModelSettingsView: View {
         Picker(
           "默认模型",
           selection: Binding(
-            get: { app.defaultModelID },
+            get: {
+              app.models.contains(where: { $0.id == app.defaultModelID })
+                ? app.defaultModelID : nil
+            },
             set: { app.setDefaultModel($0) }
           )
         ) {
           Text("未指定 · 由 Pi 决定").tag(nil as String?)
-          if let id = app.defaultModelID, !app.allModels.contains(where: { $0.id == id }) {
-            Text("\(id)（不可用）").tag(Optional(id))
-          }
-          ForEach(app.allModels) { model in
+          ForEach(app.models) { model in
             Text("\(model.name) · \(model.provider)").tag(Optional(model.id))
           }
         }
@@ -2844,12 +2877,15 @@ private struct ModelSettingsView: View {
         Picker(
           "压缩使用的模型",
           selection: Binding(
-            get: { app.compactionModelID },
+            get: {
+              app.models.contains(where: { $0.id == app.compactionModelID })
+                ? app.compactionModelID : nil
+            },
             set: { app.setCompactionModel($0) }
           )
         ) {
           Text("当前对话模型 · Current").tag(nil as String?)
-          ForEach(app.allModels) { model in
+          ForEach(app.models) { model in
             Text("\(model.name) · \(model.provider)").tag(Optional(model.id))
           }
         }
@@ -2931,15 +2967,19 @@ private struct SettingsView: View {
   @StateObject private var versions: VersionManagerModel
   let projectURL: URL?
   let telegram: TelegramControl
+  let workspace: WorkspaceModel
   let save: (String) -> Void
 
-  init(path: String, projectURL: URL?, telegram: TelegramControl, save: @escaping (String) -> Void)
-  {
+  init(
+    path: String, projectURL: URL?, telegram: TelegramControl, workspace: WorkspaceModel,
+    save: @escaping (String) -> Void
+  ) {
     _path = State(initialValue: path)
     _versions = StateObject(
       wrappedValue: VersionManagerModel(piPath: path, projectURL: projectURL))
     self.projectURL = projectURL
     self.telegram = telegram
+    self.workspace = workspace
     self.save = save
   }
 
@@ -2986,6 +3026,7 @@ private struct SettingsView: View {
             .padding(.vertical, 4)
           }
 
+          T3SettingsView(service: workspace.t3Bridge, workspace: workspace)
           TelegramSettingsView(control: telegram)
 
           GroupBox("Pi 版本") {
@@ -3138,18 +3179,56 @@ private struct ExtensionDialogView: View {
   @State private var text = ""
 
   var body: some View {
+    if let presentation = AccountManagementPresentation(dialog: dialog) {
+      AccountManagementDialogView(presentation: presentation) { option in
+        extensionUI.answerDialog(value: option)
+      }
+    } else if let presentation = AccountVisibilityPresentation(dialog: dialog) {
+      AccountVisibilityDialogView(
+        presentation: presentation,
+        answer: { extensionUI.answerDialog(value: $0) },
+        cancel: { extensionUI.answerDialog(cancelled: true) })
+    } else {
+      standardDialog
+    }
+  }
+
+  private var standardDialog: some View {
     VStack(alignment: .leading, spacing: 16) {
       Text(dialog.title).font(.headline)
       switch dialog.kind {
       case .select(let options):
-        ForEach(options, id: \.self) { option in
-          Button(option) { extensionUI.answerDialog(value: option) }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        ScrollView {
+          VStack(spacing: 8) {
+            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
+              Button {
+                extensionUI.answerDialog(value: option)
+              } label: {
+                HStack {
+                  Text(option).multilineTextAlignment(.leading)
+                  Spacer()
+                  Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+                .contentShape(Rectangle())
+              }
+              .buttonStyle(.plain)
+            }
+          }
+        }
+        .frame(maxHeight: 320)
+        Divider()
+        HStack {
+          Spacer()
+          Button("取消") { extensionUI.answerDialog(cancelled: true) }
+            .keyboardShortcut(.cancelAction)
         }
       case .confirm(let message):
         Text(message)
         HStack {
           Button("取消") { extensionUI.answerDialog(confirmed: false) }
+            .keyboardShortcut(.cancelAction)
           Button("确认") { extensionUI.answerDialog(confirmed: true) }
             .buttonStyle(.borderedProminent)
         }
@@ -3161,6 +3240,7 @@ private struct ExtensionDialogView: View {
         }
         HStack {
           Button("取消") { extensionUI.answerDialog(cancelled: true) }
+            .keyboardShortcut(.cancelAction)
           Button("提交") { extensionUI.answerDialog(value: text) }
             .buttonStyle(.borderedProminent)
         }

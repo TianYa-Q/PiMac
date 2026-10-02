@@ -28,7 +28,8 @@ final class WorkspaceModel: ObservableObject {
   @Published private(set) var loadingSessionCatalogs: Set<String> = []
   @Published var selectedTabID: UUID?
   let extensionUI = ExtensionUIModel()
-  let telegram = TelegramControl()
+  let telegram: TelegramControl
+  let t3Bridge = T3BridgeService()
 
   private static let savedProjectsKey = "workspaceProjectPaths"
   private static let activeProjectKey = "workspaceActiveProjectPath"
@@ -53,7 +54,20 @@ final class WorkspaceModel: ObservableObject {
   private var idleProcessTasks: [UUID: Task<Void, Never>] = [:]
   private var archivedSessionPaths: Set<String>
 
-  init() {
+  init(telegram: TelegramControl? = nil, restoreUserState: Bool = true) {
+    self.telegram = telegram ?? TelegramControl()
+    archivedSessionPaths = []
+    sessionCatalogs = [:]
+    lastSessionByProject = [:]
+    composerDrafts = [:]
+    // Bridge fixtures must not restore user conversations, poll a real bot,
+    // or start a development sidecar while testing their isolated child.
+    if !restoreUserState {
+      addTab(
+        model: AppModel(restoreLastProjectOnLaunch: false, remembersDesktopProject: false),
+        requestedSessionPath: nil, isDraft: false)
+      return
+    }
     let defaults = UserDefaults.standard
     archivedSessionPaths = Set(defaults.stringArray(forKey: Self.archivedSessionsKey) ?? [])
     sessionCatalogs = Self.readSessionCatalogs(from: defaults)
@@ -92,11 +106,22 @@ final class WorkspaceModel: ObservableObject {
 
     // Cached catalogs are immediately available for the sidebar. Refresh a project when it is
     // selected (or its active RPC session loads), not every saved project during app launch.
-    telegram.start(workspace: self)
+    self.telegram.start(workspace: self)
+    // Restore only explicitly confirmed network consent and the exact endpoint.
+    // A development-only loopback opt-in must not replace the saved connection.
+    let restoredT3Connection = t3Bridge.restoreRememberedConnection(workspace: self)
+    let environment = ProcessInfo.processInfo.environment
+    if !restoredT3Connection, environment["PIMAC_T3_BRIDGE"] == "1",
+      let token = environment["PIMAC_T3_BRIDGE_TOKEN"]
+    {
+      do { try t3Bridge.start(workspace: self, token: token) } catch {
+        NSLog("Pi Mac internal T3 bridge could not start")
+      }
+    }
   }
 
   var canRestartSafely: Bool {
-    telegram.canRestartSafely
+    remoteSubmissionHolds.isEmpty && telegram.canRestartSafely
       && tabs.allSatisfy { tab in
         let model = tab.model
         return model.canRestartSafely && !extensionUI.hasPendingRequests(from: model)
@@ -248,6 +273,7 @@ final class WorkspaceModel: ObservableObject {
       // An idle RPC process can replace its active session in place. Busy sessions still get a
       // separate process so background work remains genuinely concurrent.
       if tab.model.canReuseProcessForNewSession,
+        !telegram.retainsSession(tab.model),
         !tab.model.hasUnsubmittedInput,
         !extensionUI.hasPendingRequests(from: tab.model)
       {
@@ -293,6 +319,7 @@ final class WorkspaceModel: ObservableObject {
         && ($0.requestedSessionPath == path || $0.model.currentSessionPath == path)
     }) {
       if existing.id != selectedTabID, !existing.model.isProcessRunning,
+        !telegram.retainsSession(existing.model),
         !existing.model.hasUnsubmittedInput, reusableTab() != nil
       {
         // Keep the suspended tab until Pi confirms the switch, so a rejected switch
@@ -378,8 +405,7 @@ final class WorkspaceModel: ObservableObject {
     addProject(projectURL)
   }
 
-  /// Telegram uses separate RPC processes. Refresh the sidebar catalog and any desktop tab
-  /// showing the same persisted session after that process writes to disk.
+  /// Refresh persisted session metadata after a remote task updates its conversation.
   func remoteSessionChanged(in projectURL: URL?, sessionPath: String) {
     guard let projectURL else { return }
     refreshSessionCatalog(for: projectURL)
@@ -486,7 +512,29 @@ final class WorkspaceModel: ObservableObject {
     })?.model
   }
 
+  /// Resolve remote input without changing the desktop selection. Both surfaces own the
+  /// same tab/runtime for a persisted conversation, so there is only one JSONL writer.
+  func taskModel(in projectURL: URL, sessionPath: String?) -> AppModel {
+    if let sessionPath, let existing = model(forSessionPath: sessionPath),
+      existing.projectURL?.standardizedFileURL == projectURL.standardizedFileURL
+    {
+      if !existing.isProcessRunning, case .disconnected = existing.connectionState {
+        existing.resumeProcess(sessionPath: sessionPath, continueLastSession: false)
+      }
+      return existing
+    }
+    let model = AppModel(
+      startupProjectURL: projectURL, continueLastSession: false,
+      startupSessionPath: sessionPath, restoreLastProjectOnLaunch: false,
+      remembersDesktopProject: false)
+    addTab(
+      model: model, requestedSessionPath: sessionPath, isDraft: sessionPath == nil,
+      select: false)
+    return model
+  }
+
   func disconnectAll() {
+    t3Bridge.stop()
     telegram.stop()
     if let selected = tabs.first(where: { $0.id == selectedTabID }),
       selected.model.hasUserMessage,
@@ -518,7 +566,9 @@ final class WorkspaceModel: ObservableObject {
     ]).eraseToAnyPublisher()
   }
 
-  private func addTab(model: AppModel, requestedSessionPath: String?, isDraft: Bool) {
+  private func addTab(
+    model: AppModel, requestedSessionPath: String?, isDraft: Bool, select: Bool = true
+  ) {
     model.extensionUI = extensionUI
     let tab = Tab(
       id: UUID(), model: model, requestedSessionPath: requestedSessionPath, createdAt: .now,
@@ -575,7 +625,7 @@ final class WorkspaceModel: ObservableObject {
     }
     // AppModel's initializer schedules its own connection; selecting a brand-new tab must not
     // start a second RPC process before that deferred connection runs.
-    selectTab(tab.id, startProcessIfNeeded: false)
+    if select { selectTab(tab.id, startProcessIfNeeded: false) }
   }
 
   static func shouldDiscardDraftOnTabSwitch(from previousProject: URL?, to nextProject: URL?)
@@ -622,6 +672,34 @@ final class WorkspaceModel: ObservableObject {
     trimProcessPool()
   }
 
+  private var remoteSubmissionHolds: [ObjectIdentifier: Int] = [:]
+
+  func holdRemoteSubmission(_ model: AppModel) {
+    let key = ObjectIdentifier(model)
+    remoteSubmissionHolds[key, default: 0] += 1
+  }
+
+  func releaseRemoteSubmission(_ model: AppModel) {
+    let key = ObjectIdentifier(model)
+    if let count = remoteSubmissionHolds[key], count > 1 {
+      remoteSubmissionHolds[key] = count - 1
+    } else {
+      remoteSubmissionHolds.removeValue(forKey: key)
+    }
+    remoteSelectionChanged()
+  }
+
+  private func hasRemoteSubmission(_ model: AppModel) -> Bool {
+    remoteSubmissionHolds[ObjectIdentifier(model)] != nil
+  }
+
+  /// Apply the same process policy after a remote selection changes. Warm remote
+  /// selections and the desktop selection are protected by suspendProcess's guard.
+  func remoteSelectionChanged() {
+    for tab in tabs where tab.id != selectedTabID { scheduleProcessSuspension(for: tab.id) }
+    trimProcessPool()
+  }
+
   private func activityStateChanged(for id: UUID, isBusy: Bool) {
     if isBusy {
       idleProcessTasks.removeValue(forKey: id)?.cancel()
@@ -644,6 +722,8 @@ final class WorkspaceModel: ObservableObject {
       tab.id == selectedTabID
         && tab.model.isProcessRunning
         && tab.model.canReuseProcessForNewSession
+        && !telegram.retainsSession(tab.model)
+        && !hasRemoteSubmission(tab.model)
         && !tab.model.hasUnsubmittedInput
         && !extensionUI.hasPendingRequests(from: tab.model)
     }
@@ -656,6 +736,8 @@ final class WorkspaceModel: ObservableObject {
       tabs
       .filter {
         $0.id != selectedTabID && $0.model.isProcessRunning && !$0.model.isBusy
+          && !telegram.keepsProcessWarm($0.model)
+          && !hasRemoteSubmission($0.model)
           && $0.model.queuedPrompts.isEmpty && !extensionUI.hasPendingRequests(from: $0.model)
       }
       .sorted {
@@ -671,6 +753,8 @@ final class WorkspaceModel: ObservableObject {
     idleProcessTasks.removeValue(forKey: id)?.cancel()
     guard id != selectedTabID,
       let tab = tabs.first(where: { $0.id == id }),
+      !telegram.keepsProcessWarm(tab.model),
+      !hasRemoteSubmission(tab.model),
       tab.model.canRestartSafely,
       tab.model.queuedPrompts.isEmpty,
       !extensionUI.hasPendingRequests(from: tab.model)
@@ -682,7 +766,8 @@ final class WorkspaceModel: ObservableObject {
   private func discardSelectedDraftIfEmpty(except retainedID: UUID? = nil) {
     guard let id = selectedTabID, id != retainedID,
       let tab = tabs.first(where: { $0.id == id }), tab.isDraft,
-      !tab.model.hasUserMessage, !tab.model.hasUnsubmittedInput, !tab.model.isBusy
+      !tab.model.hasUserMessage, !tab.model.hasUnsubmittedInput, !tab.model.isBusy,
+      !telegram.retainsSession(tab.model)
     else { return }
     observations.removeValue(forKey: id)
     streamingObservations.removeValue(forKey: id)
@@ -697,6 +782,12 @@ final class WorkspaceModel: ObservableObject {
 
   private func synchronizeProject(for model: AppModel) {
     guard let url = model.projectURL?.standardizedFileURL else { return }
+    if !model.isLoadingConfiguration, !model.currentSessionPath.isEmpty,
+      let index = tabs.firstIndex(where: { $0.model === model })
+    {
+      tabs[index].requestedSessionPath = model.currentSessionPath
+      if model.hasUserMessage { tabs[index].isDraft = false }
+    }
     let project = WorkspaceProject(url: url)
     if !projects.contains(where: { $0.id == project.id }) {
       projects.append(project)

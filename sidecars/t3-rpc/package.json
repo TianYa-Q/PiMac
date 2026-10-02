@@ -1,0 +1,17 @@
+{
+  "name": "pimac-t3-rpc-runtime",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.115",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

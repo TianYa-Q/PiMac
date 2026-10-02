@@ -5,17 +5,20 @@ import Foundation
 struct TelegramUpdate: Decodable {
   let updateID: Int64
   let message: Message?
+  let editedMessage: Message?
   let callbackQuery: CallbackQuery?
 
   enum CodingKeys: String, CodingKey {
     case updateID = "update_id"
     case message
+    case editedMessage = "edited_message"
     case callbackQuery = "callback_query"
   }
 
   struct Message: Decodable {
     let messageID: Int64?
     let replyToMessage: RepliedMessage?
+    let quote: TextQuote?
     let date: TimeInterval
     let from: Sender?
     let chat: Chat
@@ -27,9 +30,19 @@ struct TelegramUpdate: Decodable {
     enum CodingKeys: String, CodingKey {
       case messageID = "message_id"
       case replyToMessage = "reply_to_message"
-      case date, from, chat, text, caption, photo, document
+      case date, from, chat, text, caption, photo, document, quote
     }
   }
+  struct TextQuote: Decodable {
+    let text: String
+  }
+
+  nonisolated static func promptText(_ text: String, quote: String?) -> String {
+    guard let quote, !quote.isEmpty else { return text }
+    let quoted = quote.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
+    return "用户引用的原消息片段（仅针对这段引用回复）：\n\(quoted)\n\n用户回复：\n\(text)"
+  }
+
   struct RepliedMessage: Decodable {
     let messageID: Int64
     enum CodingKeys: String, CodingKey { case messageID = "message_id" }
@@ -95,14 +108,21 @@ struct TelegramUpdate: Decodable {
   private static func isAllowedCommand(_ data: String) -> Bool {
     if [
       "/sessions", "/projects", "/status", "/usage", "/accounts", "/new", "/compact", "/stop",
-      "/help", "/model", "/thinking",
+      "/help", "/model", "/thinking", "/queue",
     ].contains(data) {
       return true
     }
+    if TelegramPresentation.choiceKind(data) != nil { return true }
+    if TelegramQueuePresentation.cancellation(data) != nil { return true }
+    if data.hasPrefix("/queue "), let page = Int(data.dropFirst(7)) { return page > 0 }
+    if data.hasPrefix("cancel:"), UUID(uuidString: String(data.dropFirst(7))) != nil { return true }
     if data.hasPrefix("session:") {
       let identifier = data.dropFirst(8)
       return identifier.count == 32 && identifier.allSatisfy { $0.isHexDigit && $0.isASCII }
     }
+    if data.hasPrefix("/usage "), let page = Int(data.dropFirst(7)) { return page > 0 }
+    if data.hasPrefix("/accounts "), let page = Int(data.dropFirst(10)) { return page > 0 }
+    if data.hasPrefix("/status "), let page = Int(data.dropFirst(8)) { return page > 0 }
     if data.hasPrefix("/sessions "), let page = Int(data.dropFirst(10)) { return page > 0 }
     if data.hasPrefix("/projects "), let page = Int(data.dropFirst(10)) { return page > 0 }
     if data.hasPrefix("/model "), let page = Int(data.dropFirst(7)) { return page > 0 }
@@ -123,6 +143,14 @@ struct TelegramUpdate: Decodable {
     return message
   }
 
+  func authorizedEdit(userID: Int64) -> Message? {
+    guard let editedMessage, editedMessage.chat.type == "private",
+      editedMessage.chat.id == userID, editedMessage.from?.id == userID,
+      editedMessage.from?.isBot == false
+    else { return nil }
+    return editedMessage
+  }
+
   func authorizedText(userID: Int64, since: Date) -> String? {
     authorizedMessage(userID: userID, since: since)?.text
   }
@@ -140,6 +168,19 @@ struct TelegramPromptQueue<Element> {
     guard items.count < maxCount else { return nil }
     items.append(item)
     return items.count
+  }
+
+  mutating func updateFirst(where predicate: (Element) -> Bool, transform: (inout Element) -> Void)
+    -> Int?
+  {
+    guard let index = items.firstIndex(where: predicate) else { return nil }
+    transform(&items[index])
+    return index + 1
+  }
+
+  mutating func removeFirst(where predicate: (Element) -> Bool) -> Element? {
+    guard let index = items.firstIndex(where: predicate) else { return nil }
+    return items.remove(at: index)
   }
 
   @discardableResult
@@ -218,15 +259,46 @@ final class TelegramControl: ObservableObject {
   private weak var workspace: WorkspaceModel?
   private var task: Task<Void, Never>?
   private var retryTask: Task<Void, Never>?
+  private var retryWorkerID = UUID()
+  private var outboxPaused = false
+  private var retryNotBefore = Date.distantPast
+  private var inFlightReplyIDs: Set<UUID> = []
+
+  /// Retry transport only; preserve running task subscriptions, queues and card revisions.
+  func reconnect() {
+    task?.cancel()
+    task = nil
+    retryTask?.cancel()
+    retryTask = nil
+    retryWorkerID = UUID()
+    outboxPaused = false
+    retryNotBefore = .distantPast
+    connectTransport()
+  }
+  private var statusRefreshTasks: [Int64: Task<Void, Never>] = [:]
   private var remoteModels: [String: AppModel] = [:]
+  private var warmProjectIDs: [String] = []
   private var desktopObservations: [ObjectIdentifier: AnyCancellable] = [:]
   private var replyModels: [String: AppModel] = [:]
   private var messageSessions = TelegramMessageSessionStore()
   private var acknowledgementIDs: [Int64: Int64] = [:]
+  private var queueReceiptIDs: [Int64: Int64] = [:]
+  private let cardUpdates = TelegramCardUpdates()
+  private struct CompletedProgress {
+    let text: String
+    let keyboard: [[[String: String]]]?
+    let location: TelegramMessageSessionStore.Location?
+    let delivered: Bool?
+  }
+  private var completedProgress: [UUID: CompletedProgress] = [:]
+  private var completionOrder: [UUID] = []
   private var sessionButtons: [[[String: String]]] = []
+  private var displayedSessions: [String: SessionItem] = [:]
   // Only command cards sent during this run may be edited; old/unknown messages
   // (including agent replies with legacy keyboards) must remain untouched.
   private var editableCards: Set<Int64> = []
+  // Mutation buttons are bound to the session displayed when their card was sent.
+  private var cardLocations: [Int64: TelegramMessageSessionStore.Location] = [:]
   private let projectKey = "telegram.projectPath"
   private let sessionsKey = "telegram.sessionPaths"
   private let activeReplyKey = "telegram.activeReplySession"
@@ -243,18 +315,25 @@ final class TelegramControl: ObservableObject {
   private var sessionPathObservations: [UUID: AnyCancellable] = [:]
   private var progressTasks: [UUID: Task<Void, Never>] = [:]
   private var progressCards: [UUID: Int64] = [:]
+  private var progressContexts: [UUID: (model: AppModel, startedAt: Date)] = [:]
+  // Only cards currently showing status receive timer updates.
+  private var progressViews: [Int64: UUID] = [:]
   private var pendingModels: Set<ObjectIdentifier> = []
   private struct RemotePrompt {
     let id = UUID()
-    let text: String
+    let receivedAt = Date()
+    var preview: String
+    var text: String
     let attachments: [PromptAttachment]
     let token: String
     let userID: Int64
     let generation: UUID
     let messageID: Int64?
+    let mediaID: String?
   }
   private var promptQueues: [ObjectIdentifier: TelegramPromptQueue<RemotePrompt>] = [:]
   private var queueObservations: [ObjectIdentifier: AnyCancellable] = [:]
+  private let queueScheduler = TelegramTaskScheduler()
   private var lastQueueDiagnostic: [ObjectIdentifier: (reason: String, date: Date)] = [:]
   private struct ConnectionRetry {
     let token: UUID
@@ -266,11 +345,42 @@ final class TelegramControl: ObservableObject {
   private var pendingNotices = TelegramPendingNoticeStore.load()
   private var pendingFiles = TelegramPendingFileStore.load()
   private var generation = UUID()
-  private let defaults = UserDefaults.standard
-  static let allowedUpdates = ["message", "callback_query"]
+  private let defaults: UserDefaults
+
+  init(defaults: UserDefaults = .standard) {
+    self.defaults = defaults
+    messageSessions = TelegramMessageSessionStore(defaults: defaults)
+    unsentReplies = TelegramUnsentReplyStore.load(defaults: defaults)
+    pendingNotices = TelegramPendingNoticeStore.load(defaults: defaults)
+    pendingFiles = TelegramPendingFileStore.load(defaults: defaults)
+  }
+
+  nonisolated static let allowedUpdates = ["message", "edited_message", "callback_query"]
 
   var enabled: Bool { defaults.bool(forKey: "telegram.enabled") }
   var userID: String { defaults.string(forKey: "telegram.userID") ?? "" }
+  var botToken: String { TelegramTokenStore.load(defaults: defaults) }
+
+  nonisolated static func validCredentials(token: String, userID: String) -> Bool {
+    let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
+    let userID = userID.trimmingCharacters(in: .whitespacesAndNewlines)
+    return Int64(userID).map { $0 > 0 } == true
+      && token.range(of: #"^[0-9]+:[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil
+  }
+
+  /// Explain destructive preference changes before applying them. Initial setup is harmless.
+  func configurationImpact(token: String, userID: String, enabled: Bool) -> String? {
+    let credentialsChanged =
+      token.trimmingCharacters(in: .whitespacesAndNewlines) != botToken
+      || userID.trimmingCharacters(in: .whitespacesAndNewlines) != self.userID
+    if credentialsChanged && (!botToken.isEmpty || !self.userID.isEmpty) {
+      return "更换或删除凭据会清空等待任务、未送达消息和原消息的会话关联。正在 Mac 上执行的任务不会停止，但结果可能无法回传。"
+    }
+    if self.enabled && !enabled {
+      return "停用会清空尚未执行的 Telegram 等待任务。正在 Mac 上执行的任务不会停止，但本次结果不再自动回传。未送达消息会保留，重新启用后重试。"
+    }
+    return nil
+  }
 
   var canRestartSafely: Bool {
     pendingModels.isEmpty && replies.isEmpty && sendingReplies == 0
@@ -288,12 +398,16 @@ final class TelegramControl: ObservableObject {
   func configure(token: String, userID: String, enabled: Bool) throws {
     let token = token.trimmingCharacters(in: .whitespacesAndNewlines)
     let userID = userID.trimmingCharacters(in: .whitespacesAndNewlines)
-    if enabled {
-      guard let id = Int64(userID), id > 0,
-        token.range(of: #"^[0-9]+:[A-Za-z0-9_-]+$"#, options: .regularExpression) != nil
-      else { throw ConfigurationError.invalid }
+    if enabled, !Self.validCredentials(token: token, userID: userID) {
+      throw ConfigurationError.invalid
     }
-    if token != TelegramTokenStore.load() || userID != self.userID {
+    // Saving unchanged preferences must not tear down subscriptions or queued prompts.
+    if token == botToken, userID == self.userID, enabled == self.enabled,
+      task != nil || !enabled
+    {
+      return
+    }
+    if token != botToken || userID != self.userID {
       unsentReplies.removeAll()
       TelegramUnsentReplyStore.save(unsentReplies, defaults: defaults)
       pendingNotices.removeAll()
@@ -304,8 +418,9 @@ final class TelegramControl: ObservableObject {
       messageSessions.clear(defaults: defaults)
       activeReplyLocation = nil
       acknowledgementIDs.removeAll()
+      queueReceiptIDs.removeAll()
     }
-    TelegramTokenStore.save(token)
+    TelegramTokenStore.save(token, defaults: defaults)
     defaults.set(userID, forKey: "telegram.userID")
     defaults.set(enabled, forKey: "telegram.enabled")
     restart()
@@ -322,15 +437,25 @@ final class TelegramControl: ObservableObject {
     task = nil
     retryTask?.cancel()
     retryTask = nil
+    for refresh in statusRefreshTasks.values { refresh.cancel() }
+    statusRefreshTasks.removeAll()
     replies.removeAll()
     sessionPathObservations.removeAll()
     for progress in progressTasks.values { progress.cancel() }
     progressTasks.removeAll()
     progressCards.removeAll()
+    progressContexts.removeAll()
+    progressViews.removeAll()
     editableCards.removeAll()
+    cardLocations.removeAll()
     acknowledgementIDs.removeAll()
+    queueReceiptIDs.removeAll()
+    cardUpdates.reset()
+    completedProgress.removeAll()
+    completionOrder.removeAll()
     pendingModels.removeAll()
     queueObservations.removeAll()
+    queueScheduler.reset()
     lastQueueDiagnostic.removeAll()
     for retry in connectionRetries.values { retry.task.cancel() }
     connectionRetries.removeAll()
@@ -342,13 +467,14 @@ final class TelegramControl: ObservableObject {
       }
     }
     promptQueues.removeAll()
-    for model in remoteModels.values {
-      rememberSession(model)
-      model.disconnect()
+    // Workspace owns the runtimes. Disabling the transport must not abort desktop work.
+    for model in remoteModels.values { rememberSession(model) }
+    for model in Array(remoteModels.values) + Array(replyModels.values) {
+      model.onTelegramLifecycleEvent = nil
     }
     remoteModels.removeAll()
+    warmProjectIDs.removeAll()
     desktopObservations.removeAll()
-    for model in replyModels.values { model.disconnect() }
     replyModels.removeAll()
     status = "已停止"
     connectionState = .disconnected
@@ -356,11 +482,17 @@ final class TelegramControl: ObservableObject {
 
   private func restart() {
     stop()
+    outboxPaused = false
+    retryNotBefore = .distantPast
+    connectTransport()
+  }
+
+  private func connectTransport() {
     guard enabled else {
       status = "未启用"
       return
     }
-    let token = TelegramTokenStore.load()
+    let token = botToken
     guard !token.isEmpty, let id = Int64(userID), id > 0 else {
       status = "配置无效或未设置 Bot Token"
       connectionState = .failed("配置无效")
@@ -372,8 +504,9 @@ final class TelegramControl: ObservableObject {
     let generation = generation
     scheduleReplyRetry(token: token, userID: id, generation: generation)
     task = Task { [weak self] in
-      var offset = TelegramUpdateCursorStore.load() ?? 0
+      var offset = TelegramUpdateCursorStore.load(defaults: self?.defaults ?? .standard) ?? 0
       var commandsRegistered = false
+      var retryPolicy = TelegramRetryPolicy()
       while !Task.isCancelled {
         do {
           if !commandsRegistered {
@@ -382,7 +515,7 @@ final class TelegramControl: ObservableObject {
               body: ["commands": Self.botCommands, "scope": ["type": "chat", "chat_id": id]])
             guard registered else { throw APIError.failed }
             commandsRegistered = true
-            guard self?.generation == generation else { break }
+            guard self?.generation == generation, !Task.isCancelled else { break }
             self?.status = "已连接 · 仅允许用户 \(id)"
             self?.connectionState = .connected
           }
@@ -391,12 +524,13 @@ final class TelegramControl: ObservableObject {
             body: ["offset": offset, "timeout": 25, "allowed_updates": Self.allowedUpdates])
           guard !Task.isCancelled else { break }
           guard self?.generation == generation else { break }
-          self?.status = "已连接 · 仅允许用户 \(id)"
+          if self?.outboxPaused != true { self?.status = "已连接 · 仅允许用户 \(id)" }
           self?.connectionState = .connected
+          retryPolicy.reset()
           // An empty first poll still establishes the initial cursor, so messages
           // arriving while the app is closed after this point are not age-filtered.
-          if TelegramUpdateCursorStore.load() == nil {
-            TelegramUpdateCursorStore.save(offset)
+          if let self, TelegramUpdateCursorStore.load(defaults: self.defaults) == nil {
+            TelegramUpdateCursorStore.save(offset, defaults: self.defaults)
           }
           for update in updates {
             guard !Task.isCancelled, self?.generation == generation else { break }
@@ -404,19 +538,61 @@ final class TelegramControl: ObservableObject {
             // Checkpoint before dispatch: network errors or restarts must not run
             // an already accepted prompt a second time.
             offset = update.updateID + 1
-            TelegramUpdateCursorStore.save(offset)
             guard let self else { continue }
+            TelegramUpdateCursorStore.save(offset, defaults: self.defaults)
             if let callback = update.authorizedCallback(userID: id) {
+              if let messageID = callback.messageID { self.cardUpdates.advance(messageID) }
               // A failed callback acknowledgement must not replay its command.
-              let _: Bool? = try? await Self.call(
-                token: token, method: "answerCallbackQuery",
-                body: ["callback_query_id": callback.id])
+              let acknowledgement = Task {
+                let _: Bool? = try? await Self.call(
+                  token: token, method: "answerCallbackQuery",
+                  body: ["callback_query_id": callback.id])
+              }
+              // A slow acknowledgement must not delay rendering or the next update.
+              defer { acknowledgement.cancel() }
               guard self.generation == generation, !Task.isCancelled else { break }
-              let reply = await self.handle(
+              if !TelegramPresentation.canPerform(
+                callback.command,
+                card: callback.messageID.flatMap { self.cardLocations[$0] },
+                selected: Self.cardLocation(for: self.selectedTaskModel))
+              {
+                // Keep the original task card and its timer intact; never mutate a different session.
+                await self.deliverNotice(
+                  "按钮已过期或属于其他会话，未操作。\n请重新打开「状态」或对应列表。",
+                  token: token, userID: id, generation: generation,
+                  keyboard: [
+                    [
+                      TelegramPresentation.button("📊 当前状态", "/status"),
+                      TelegramPresentation.button("📁 项目", "/projects"),
+                      TelegramPresentation.button("🗂 会话", "/sessions"),
+                    ]
+                  ])
+                continue
+              }
+              if let messageID = callback.messageID {
+                self.queueReceiptIDs = self.queueReceiptIDs.filter { $0.value != messageID }
+                self.statusRefreshTasks.removeValue(forKey: messageID)?.cancel()
+                self.progressViews.removeValue(forKey: messageID)
+              }
+              var reply = await self.handle(
                 callback.command, token: token, userID: id, generation: generation,
                 fromCallback: true)
               guard self.generation == generation, !Task.isCancelled else { break }
+              if let messageID = callback.messageID,
+                self.editableCards.contains(messageID),
+                let model = self.selectedTaskModel,
+                reply == self.sessionStatus(for: model),
+                let context = self.progressContexts.first(where: { $0.value.model === model })
+              {
+                self.progressViews[messageID] = context.key
+                reply = self.progressStatus(for: model, startedAt: context.value.startedAt)
+              }
               let keyboard = self.keyboard(for: callback.command)
+              let statusModel = self.selectedTaskModel.flatMap { model in
+                callback.command.hasPrefix("project:")
+                  && reply.hasSuffix(self.sessionStatus(for: model))
+                  ? model : nil
+              }
               if let messageID = callback.messageID,
                 Self.shouldEditCallback(
                   messageID: messageID, knownCards: self.editableCards,
@@ -424,38 +600,57 @@ final class TelegramControl: ObservableObject {
               {
                 await self.deliverNotice(
                   reply, token: token, userID: id, generation: generation,
-                  keyboard: keyboard, editMessageID: messageID)
+                  keyboard: keyboard, editMessageID: messageID, statusModel: statusModel)
               } else {
                 await self.deliverNotice(
-                  reply, token: token, userID: id, generation: generation, keyboard: keyboard)
+                  reply, token: token, userID: id, generation: generation,
+                  keyboard: keyboard, statusModel: statusModel)
+              }
+            } else if let message = update.authorizedEdit(userID: id) {
+              let reply = self.syncQueuedEdit(message)
+              if !reply.isEmpty {
+                await self.deliverNotice(
+                  reply, token: token, userID: id, generation: generation,
+                  keyboard: self.queuedKeyboard(messageID: message.messageID),
+                  editMessageID: message.messageID.flatMap { self.queueReceiptIDs[$0] },
+                  sourceMessageID: message.messageID)
               }
             } else if let message = update.authorizedMessage(userID: id, since: since) {
               if let photo = message.photo?.last {
                 let reply = await self.handleAttachment(
                   size: photo.fileSize, kind: "图片", caption: message.caption ?? "",
+                  mediaID: photo.fileID,
                   token: token, userID: id, generation: generation,
                   messageID: message.messageID, replyToID: message.replyToMessage?.messageID,
+                  quote: message.quote?.text,
                   download: { try await Self.downloadPhoto(photo, token: token) })
                 guard self.generation == generation, !Task.isCancelled else { break }
                 await self.deliverNotice(
                   reply, token: token, userID: id, generation: generation,
+                  keyboard: self.queuedKeyboard(messageID: message.messageID),
                   sourceMessageID: message.messageID)
               } else if let document = message.document {
                 let reply = await self.handleAttachment(
                   size: document.fileSize, kind: "文件", caption: message.caption ?? "",
+                  mediaID: document.fileID,
                   token: token, userID: id, generation: generation,
                   messageID: message.messageID, replyToID: message.replyToMessage?.messageID,
+                  quote: message.quote?.text,
                   download: { try await Self.downloadDocument(document, token: token) })
                 guard self.generation == generation, !Task.isCancelled else { break }
                 await self.deliverNotice(
                   reply, token: token, userID: id, generation: generation,
+                  keyboard: self.queuedKeyboard(messageID: message.messageID),
                   sourceMessageID: message.messageID)
               } else if let text = message.text {
                 let reply = await self.handle(
                   text, token: token, userID: id, generation: generation,
-                  messageID: message.messageID, replyToID: message.replyToMessage?.messageID)
+                  messageID: message.messageID, replyToID: message.replyToMessage?.messageID,
+                  quote: message.quote?.text)
                 guard self.generation == generation, !Task.isCancelled else { break }
-                let keyboard = self.keyboard(for: text)
+                let keyboard =
+                  self.queuedKeyboard(messageID: message.messageID)
+                  ?? self.keyboard(for: text)
                 await self.deliverNotice(
                   reply, token: token, userID: id, generation: generation, keyboard: keyboard,
                   sourceMessageID: message.messageID)
@@ -466,17 +661,23 @@ final class TelegramControl: ObservableObject {
           guard !Task.isCancelled else { break }
           // Never display URLSession errors: their URLs contain the bot secret.
           guard self?.generation == generation else { break }
-          self?.status = "Telegram 连接或发送失败，5 秒后重试（检查网络、Token、Webhook 或重复运行的 Bot）"
-          self?.connectionState = .failed("连接或发送失败")
-          try? await Task.sleep(for: .seconds(5))
+          guard let delay = retryPolicy.delay(for: error) else {
+            self?.status = TelegramRetryPolicy.pausedMessage
+            self?.connectionState = .failed("连接已暂停，需修正配置后重连")
+            self?.outboxPaused = true
+            break
+          }
+          self?.status = "Telegram 连接失败，\(Int(delay)) 秒后重试。"
+          self?.connectionState = .failed("连接暂时不可用")
+          try? await Task.sleep(for: .seconds(delay))
         }
       }
     }
   }
 
   private func handleAttachment(
-    size: Int?, kind: String, caption: String, token: String, userID: Int64,
-    generation: UUID, messageID: Int64?, replyToID: Int64?,
+    size: Int?, kind: String, caption: String, mediaID: String, token: String, userID: Int64,
+    generation: UUID, messageID: Int64?, replyToID: Int64?, quote: String?,
     download: () async throws -> PromptAttachment
   ) async -> String {
     if let size, size > Self.maxFileBytes {
@@ -490,7 +691,8 @@ final class TelegramControl: ObservableObject {
       }
       return await handle(
         caption, attachments: [attachment], token: token,
-        userID: userID, generation: generation, messageID: messageID, replyToID: replyToID)
+        userID: userID, generation: generation, messageID: messageID, replyToID: replyToID,
+        quote: quote, mediaID: mediaID)
     } catch {
       return "\(kind)下载失败或超过 20 MB，请稍后重试。"
     }
@@ -502,145 +704,180 @@ final class TelegramControl: ObservableObject {
     knownCards.contains(messageID)
   }
 
-  private func rememberCard(_ messageID: Int64) {
-    if editableCards.count >= 500 { editableCards.removeAll() }
+  private static func cardLocation(for model: AppModel?) -> TelegramMessageSessionStore.Location? {
+    guard let model, let project = model.projectURL?.standardizedFileURL.path else { return nil }
+    return .init(project: project, sessionPath: model.currentSessionPath)
+  }
+
+  private func rememberCard(_ messageID: Int64, location: TelegramMessageSessionStore.Location?) {
+    if editableCards.count >= 500 {
+      editableCards.removeAll()
+      cardLocations.removeAll()
+    }
     editableCards.insert(messageID)
+    cardUpdates.retain(editableCards)
+    cardLocations[messageID] = location
   }
 
   static let botCommands: [[String: String]] = [
     ["command": "projects", "description": "查看项目列表"],
     ["command": "sessions", "description": "切换会话"],
-    ["command": "status", "description": "查看 Telegram 会话状态"],
-    ["command": "model", "description": "选择 Telegram 模型"],
-    ["command": "thinking", "description": "选择 Telegram 推理强度"],
-    ["command": "usage", "description": "查看额度及切换 Codex 账户"],
-    ["command": "accounts", "description": "查看额度并切换 Codex 账户"],
-    ["command": "new", "description": "新建 Telegram 会话"],
-    ["command": "compact", "description": "压缩 Telegram 会话上下文"],
-    ["command": "stop", "description": "停止当前任务"],
+    ["command": "status", "description": "查看状态"],
+    ["command": "queue", "description": "查看、取消等待任务"],
+    ["command": "model", "description": "选择模型"],
+    ["command": "thinking", "description": "选择推理强度"],
+    ["command": "usage", "description": "额度与账户"],
+    ["command": "new", "description": "新会话"],
+    ["command": "compact", "description": "压缩上下文"],
+    ["command": "stop", "description": "停止当前任务并清空排队"],
     ["command": "help", "description": "查看帮助"],
   ]
 
   static let help = """
-    Pi Mac · Telegram 远程控制
-    项目选择和会话与桌面独立。先用 /projects 下方的按钮选项目，随后会自动显示会话状态；直接发送文本、照片或文件（可附说明）即可执行任务。正在执行的消息会依次排队，前一条完成后再处理下一条。
+    Pi Mac · 使用指南
+    先选项目，再发送文本、照片或文件。
+    文件 ≤20 MB；忙碌时自动排队。
 
-    📁 项目与会话
+    会话
     /projects  选择项目
-    /sessions  切换当前项目的会话
-    回复先前的任务消息或 Bot 回复，可继续该消息对应的项目和会话，不改变当前项目选择。
-    /status  查看连接、会话、模型及推理强度
-    /new  在当前项目新建会话
-    /compact  空闲时压缩当前会话上下文
+    /sessions  切换会话
+    /status  查看状态
+    /new  新会话
+    /compact  压缩上下文
 
-    ⚙️ 设置与额度
-    /model  选择 Telegram 模型
-    /thinking  选择 Telegram 推理强度
-    /usage  查看账户额度并通过按钮切换 Codex 账户
-    /accounts  查看额度并切换 Codex 账户
+    设置
+    /model  模型
+    /thinking  推理强度
+    /usage  额度与账户
 
-    ⏹ 任务与回复
-    /stop  停止当前任务
-    回传失败的回复会在后台自动重试，重启后也会继续。
-    /help  查看本帮助
+    任务
+    /queue  查看、取消等待任务
+    /stop  停止当前任务并清空排队
+    /help  使用指南
 
-    会话未就绪时任务会排队并自动重试连接；/stop 可取消排队。
-    生成的项目内文件可作为附件回传（每次最多 3 个，每个不超过 20 MB）。
-    也可点击下方按钮操作。扩展确认仍需在 Mac 上完成。
+    回复旧消息 → 原会话，不改默认选择。
+    等待任务可编辑；替换附件须取消重发。
+    删除消息不取消任务；回传失败自动重试。
+    过期按钮请重新打开列表。
+    Mac 须保持运行；扩展确认在 Mac 完成。
     """
 
-  private func keyboard(for text: String) -> [[[String: String]]]? {
+  private func keyboard(
+    for text: String, cardModel: AppModel? = nil, includePendingTask: Bool = true
+  ) -> [[[String: String]]]? {
+    if let cancellation = TelegramQueuePresentation.cancellation(text) {
+      return keyboard(for: "/queue \(cancellation.page)")
+    }
     let command =
       text.split(maxSplits: 1, whereSeparator: \.isWhitespace).first
       .map { String($0).components(separatedBy: "@")[0].lowercased() } ?? ""
     guard
       [
         "/sessions", "/start", "/help", "/projects", "/status", "/usage", "/accounts", "/new",
-        "/compact", "/stop", "/model", "/thinking",
+        "/compact", "/stop", "/model", "/thinking", "/queue",
       ]
       .contains(command) || command.hasPrefix("select:") || command.hasPrefix("model:")
         || command.hasPrefix("thinking:") || command.hasPrefix("account:")
-        || command.hasPrefix("session:")
+        || command.hasPrefix("session:") || TelegramPresentation.choiceKind(command) != nil
     else { return nil }
     func button(_ title: String, _ action: String) -> [String: String] {
       ["text": title, "callback_data": action]
     }
     var rows: [[[String: String]]] = []
     if command == "/sessions" { rows += sessionButtons }
+    if command == "/queue" {
+      let parts = text.split(whereSeparator: \.isWhitespace)
+      rows += TelegramQueuePresentation.keyboard(
+        items: queueItems(for: selectedTaskModel),
+        page: parts.count == 2 ? Int(parts[1]) ?? 1 : 1)
+    }
+    if command == "/status", let workspace {
+      let parts = text.split(whereSeparator: \.isWhitespace)
+      let requested = parts.count == 2 ? Int(parts[1]) ?? 1 : 1
+      let count = otherProjectStatusSummaries(in: workspace, model: selectedTaskModel).count
+      let page = ProjectStatusOverview.page(requested, count: count)
+      var navigation: [[String: String]] = []
+      if page > 1 { navigation.append(button("⬅️ 上一页", "/status \(page - 1)")) }
+      if page * ProjectStatusOverview.pageSize < count {
+        navigation.append(button("下一页 ➡️", "/status \(page + 1)"))
+      }
+      if !navigation.isEmpty { rows.append(navigation) }
+    }
     if command == "/projects", let workspace {
-      let parts = text.split(separator: " ")
-      let page =
-        parts.count == 2
-        ? min(max(1, Int(parts[1]) ?? 1), max(1, (workspace.projects.count + 29) / 30)) : 1
-      let start = min((page - 1) * 30, workspace.projects.count)
-      let buttons = workspace.projects.dropFirst(start).prefix(30).enumerated().map {
+      let parts = text.split(whereSeparator: \.isWhitespace)
+      let page = TelegramPresentation.page(
+        parts.count == 2 ? Int(parts[1]) ?? 1 : 1,
+        count: workspace.projects.count, size: TelegramPresentation.projectPageSize)
+      let start = page.start
+      let buttons = workspace.projects.dropFirst(start).prefix(page.end - start).enumerated().map {
         index, project in
         button(
-          "\(start + index + 1). \(String(project.name.prefix(24)))", "select:\(start + index + 1)")
+          "\(project.id == (activeReplyLocation?.project ?? defaults.string(forKey: projectKey)) ? "✓ " : "")\(start + index + 1). \(TelegramPresentation.compactLabel(project.name, limit: 40))",
+          TelegramPresentation.choiceCommand(.project, value: project.id))
       }
-      for offset in stride(from: 0, to: buttons.count, by: 2) {
-        rows.append(Array(buttons[offset..<min(offset + 2, buttons.count)]))
-      }
-      if workspace.projects.count > 30 {
-        var navigation: [[String: String]] = []
-        if page > 1 { navigation.append(button("⬅️ 上一页", "/projects \(page - 1)")) }
-        if start + 30 < workspace.projects.count {
-          navigation.append(button("下一页 ➡️", "/projects \(page + 1)"))
-        }
-        if !navigation.isEmpty { rows.append(navigation) }
-      }
+      // Project names are often similar or long; a full-width target avoids mis-taps.
+      rows += buttons.map { [$0] }
+      let navigation = TelegramPresentation.navigation(page, command: "/projects")
+      if !navigation.isEmpty { rows.append(navigation) }
     }
-    if command == "/model" || command.hasPrefix("model:"), let workspace,
+    if command == "/model", let workspace,
       let model = remoteModel(in: workspace)
     {
       model.refreshModelPreferences()
-      let parts = text.split(separator: " ")
-      let page =
-        command.hasPrefix("model:")
-        ? ((Int(command.dropFirst(6)) ?? 1) - 1) / 20 + 1
-        : (parts.count == 2 ? Int(parts[1]) ?? 1 : 1)
-      let start = max(0, min(page - 1, max(0, (model.models.count - 1) / 20))) * 20
-      let choices = model.models.dropFirst(start).prefix(20).enumerated().map { index, item in
+      let parts = text.split(whereSeparator: \.isWhitespace)
+      let page = TelegramPresentation.page(
+        parts.count == 2 ? Int(parts[1]) ?? 1 : 1,
+        count: model.models.count, size: TelegramPresentation.modelPageSize)
+      let start = page.start
+      let choices = model.models.dropFirst(start).prefix(page.end - start).map { item in
         button(
-          "\(item.id == model.selectedModelId ? "✓ " : "")\(String(item.id.prefix(45)))",
-          "model:\(start + index + 1)")
+          "\(item.id == model.selectedModelId ? "✓ " : "")\(TelegramPresentation.compactLabel(item.id, limit: 45, preserveSuffix: true))",
+          TelegramPresentation.choiceCommand(.model, value: item.id))
       }
-      for offset in stride(from: 0, to: choices.count, by: 2) {
-        rows.append(Array(choices[offset..<min(offset + 2, choices.count)]))
-      }
-      var nav: [[String: String]] = []
-      if start > 0 { nav.append(button("⬅️ 上一页", "/model \(start / 20)")) }
-      if start + 20 < model.models.count {
-        nav.append(button("下一页 ➡️", "/model \(start / 20 + 2)"))
-      }
-      if !nav.isEmpty { rows.append(nav) }
+      // Model identifiers are long; full-width buttons remain readable on phones.
+      rows += choices.map { [$0] }
+      let navigation = TelegramPresentation.navigation(page, command: "/model")
+      if !navigation.isEmpty { rows.append(navigation) }
     }
     if command == "/thinking" || command.hasPrefix("thinking:"), let workspace,
       let model = remoteModel(in: workspace)
     {
-      rows.append(
-        model.thinkingLevels.map { level in
-          button("\(level == model.selectedThinkingLevel ? "✓ " : "")\(level)", "thinking:\(level)")
-        })
+      let choices = model.thinkingLevels.map { level in
+        button("\(level == model.selectedThinkingLevel ? "✓ " : "")\(level)", "thinking:\(level)")
+      }
+      for offset in stride(from: 0, to: choices.count, by: 3) {
+        rows.append(Array(choices[offset..<min(offset + 3, choices.count)]))
+      }
     }
-    if command == "/usage" || command == "/accounts" || command.hasPrefix("account:") {
+    if command == "/usage" || command == "/accounts" {
       let model = workspace.flatMap { remoteModel(in: $0) }
       let accounts = workspace?.extensionUI.usage(for: model).accounts ?? []
-      let choices = accounts.enumerated().map { index, account in
+      let parts = text.split(whereSeparator: \.isWhitespace)
+      let page = TelegramPresentation.page(
+        parts.count == 2 ? Int(parts[1]) ?? 1 : 1,
+        count: accounts.count, size: TelegramPresentation.accountPageSize)
+      let choices = accounts.dropFirst(page.start).prefix(page.end - page.start).enumerated().map {
+        index, account in
         button(
-          "\(account.isActive ? "✓ " : "")\(String(account.name.prefix(35)))",
-          "account:\(index + 1)")
+          "\(account.isActive ? "✓ " : "")\(page.start + index + 1). \(TelegramPresentation.compactLabel(account.name, limit: 32))",
+          TelegramPresentation.choiceCommand(.account, value: account.name))
       }
-      for offset in stride(from: 0, to: choices.count, by: 2) {
-        rows.append(Array(choices[offset..<min(offset + 2, choices.count)]))
-      }
+      rows += choices.map { [$0] }
+      // Accept legacy /accounts cards, but emit only the canonical /usage route.
+      let navigation = TelegramPresentation.navigation(page, command: "/usage")
+      if !navigation.isEmpty { rows.append(navigation) }
+      rows.append([button("↻ 最新缓存", "/usage \(page.number)")])
     }
-    rows += [
-      [button("📁 项目", "/projects"), button("📊 状态", "/status"), button("📈 额度/账户", "/usage")],
-      [button("🗂 会话", "/sessions"), button("🤖 模型", "/model"), button("🧠 推理", "/thinking")],
-      [button("🆕 新会话", "/new"), button("🗜️ 压缩", "/compact"), button("⏹ 停止", "/stop")],
-      [button("❔ 帮助", "/help")],
-    ]
+    let model = cardModel ?? selectedTaskModel
+    let running =
+      model.map {
+        $0.isBusy || (includePendingTask && pendingModels.contains(ObjectIdentifier($0)))
+          || promptQueues[ObjectIdentifier($0)]?.isEmpty == false || !$0.queuedPrompts.isEmpty
+          || workspace?.extensionUI.hasPendingRequests(from: $0) == true
+      } ?? false
+    // A task from another session still gets navigation, but not misleading mutation buttons.
+    let hasSession = model != nil && (cardModel == nil || cardModel === selectedTaskModel)
+    rows += TelegramPresentation.footer(command: command, running: running, hasSession: hasSession)
     return rows
   }
 
@@ -649,10 +886,60 @@ final class TelegramControl: ObservableObject {
       separator: "\n")
   }
 
+  /// Routing references must remain stable when the desktop switches conversations.
+  func retainsSession(_ model: AppModel) -> Bool {
+    remoteModels.values.contains { $0 === model }
+      || replyModels.values.contains { $0 === model }
+  }
+
+  /// Read routing state without starting a process or doing disk/network work.
+  private var selectedTaskModel: AppModel? {
+    if let location = activeReplyLocation {
+      return replyModels[location.sessionPath]
+        ?? remoteModels[location.project].flatMap {
+          $0.currentSessionPath == location.sessionPath ? $0 : nil
+        }
+    }
+    guard let project = defaults.string(forKey: projectKey) else { return nil }
+    return remoteModels[project]
+  }
+
+  /// The active remote selection is equivalent to the selected desktop tab. Other
+  /// idle remote tabs may still be suspended, keeping the process pool bounded.
+  func keepsProcessWarm(_ model: AppModel) -> Bool {
+    selectedTaskModel === model
+      || warmProjectIDs.contains { remoteModels[$0] === model }
+      || pendingModels.contains(ObjectIdentifier(model))
+      || promptQueues[ObjectIdentifier(model)]?.isEmpty == false
+  }
+
+  /// Keep at most two recently selected projects warm for quick back-and-forth switches.
+  /// The workspace still handles suspension and protects tasks/desktop selection.
+  func selectProject(_ project: WorkspaceProject, in workspace: WorkspaceModel) -> AppModel? {
+    let previousPath = defaults.string(forKey: projectKey)
+    if let previousPath, let previous = remoteModels[previousPath] { rememberSession(previous) }
+    warmProjectIDs.removeAll { $0 == project.id }
+    if let previousPath, previousPath != project.id, !warmProjectIDs.contains(previousPath) {
+      warmProjectIDs.insert(previousPath, at: 0)
+    }
+    warmProjectIDs.insert(project.id, at: 0)
+    warmProjectIDs = Array(warmProjectIDs.prefix(2))
+    defaults.set(project.id, forKey: projectKey)
+    activeReplyLocation = nil
+    let model = remoteModel(for: project, in: workspace)
+    workspace.remoteSelectionChanged()
+    return model
+  }
+
   private func remoteModel(in workspace: WorkspaceModel) -> AppModel? {
     guard let path = defaults.string(forKey: projectKey),
       let project = workspace.projects.first(where: { $0.id == path }) ?? workspace.projects.first
     else { return nil }
+    return remoteModel(for: project, in: workspace)
+  }
+
+  private func remoteModel(for project: WorkspaceProject, in workspace: WorkspaceModel) -> AppModel
+  {
     if let model = remoteModels[project.id] {
       if !model.isProcessRunning, case .disconnected = model.connectionState {
         model.resumeProcess(
@@ -669,13 +956,7 @@ final class TelegramControl: ObservableObject {
       remoteModels[project.id] = existing
       return existing
     }
-    let model = AppModel(
-      startupProjectURL: project.url, continueLastSession: false,
-      startupSessionPath: sessionPath, restoreLastProjectOnLaunch: false,
-      remembersDesktopProject: false,
-      modelPreferenceKey: "telegram.selectedModelID",
-      thinkingPreferenceKey: "telegram.thinkingLevels")
-    model.extensionUI = workspace.extensionUI
+    let model = workspace.taskModel(in: project.url, sessionPath: sessionPath)
     remoteModels[project.id] = model
     observeDesktopUpdates(in: model)
     return model
@@ -715,13 +996,7 @@ final class TelegramControl: ObservableObject {
       }
       return existing
     }
-    let model = AppModel(
-      startupProjectURL: project.url, continueLastSession: false,
-      startupSessionPath: location.sessionPath, restoreLastProjectOnLaunch: false,
-      remembersDesktopProject: false,
-      modelPreferenceKey: "telegram.selectedModelID",
-      thinkingPreferenceKey: "telegram.thinkingLevels")
-    model.extensionUI = workspace.extensionUI
+    let model = workspace.taskModel(in: project.url, sessionPath: location.sessionPath)
     replyModels[location.sessionPath] = model
     observeDesktopUpdates(in: model)
     return model
@@ -739,8 +1014,19 @@ final class TelegramControl: ObservableObject {
     }
   }
 
-  private func rememberAcknowledgement(_ cardID: Int64?, for sourceMessageID: Int64?) {
+  private func rememberAcknowledgement(
+    _ cardID: Int64?, for sourceMessageID: Int64?, wasQueued: Bool
+  ) {
     guard let sourceMessageID, let cardID else { return }
+    if queuedKeyboard(messageID: sourceMessageID) != nil || wasQueued {
+      if queueReceiptIDs.count >= 500 { queueReceiptIDs.removeAll() }
+      queueReceiptIDs[sourceMessageID] = cardID
+      if wasQueued, queuedKeyboard(messageID: sourceMessageID) == nil {
+        refreshQueueReceipt(
+          sourceMessageID: sourceMessageID,
+          text: "任务已不在队列，未重新提交。\n请查看状态或结果。")
+      }
+    }
     if let location = messageSessions[sourceMessageID] {
       messageSessions.remember(cardID, location: location, defaults: defaults)
     } else {
@@ -756,35 +1042,39 @@ final class TelegramControl: ObservableObject {
     sessions: [SessionItem]
   ) -> String {
     sessionButtons.removeAll()
+    displayedSessions.removeAll()
     let entries = Self.sessionChoices(
       sessions, currentPath: model.currentSessionPath,
       currentTitle: Self.sessionListTitle(
         name: model.sessionName,
         firstPrompt: model.messages.first(where: { $0.kind == .user })?.text))
-    guard !entries.isEmpty else { return "当前项目暂无历史会话。发送消息或使用 /new 开始。" }
-    let pageCount = (entries.count + Self.sessionPageSize - 1) / Self.sessionPageSize
-    let page = min(max(1, page), pageCount)
-    let start = (page - 1) * Self.sessionPageSize
-    var lines = ["🗂 \(project.name) · 会话 \(page)/\(pageCount)"]
+    guard !entries.isEmpty else { return "暂无历史会话 · 发消息或 /new 开始" }
+    let pagination = TelegramPresentation.page(
+      page, count: entries.count, size: Self.sessionPageSize)
+    let start = pagination.start
+    let currentTitle = Self.sessionListTitle(
+      name: model.sessionName, firstPrompt: model.messages.first(where: { $0.kind == .user })?.text)
+    var lines = [
+      "会话 · \(entries.count) 个 · \(pagination.number)/\(pagination.count) 页",
+      "项目  \(TelegramPresentation.compactLabel(project.name, limit: 32))",
+      "当前  \(TelegramPresentation.compactLabel(currentTitle, limit: 32))", "",
+    ]
     for (index, entry) in entries.dropFirst(start).prefix(Self.sessionPageSize).enumerated() {
       let current = entry.path == model.currentSessionPath
       let title = Self.sessionListTitle(name: entry.title, firstPrompt: nil)
-      lines.append("\(start + index + 1). \(current ? "✓ 当前 · " : "")\(title)")
       let token = Self.sessionIdentifier(project: project.id, path: entry.path)
+      displayedSessions[token] = entry
       sessionButtons.append([
         [
-          "text": "\(current ? "✓ " : "")\(start + index + 1). \(String(title.prefix(20)))",
+          "text":
+            "\(current ? "✓ " : "")\(start + index + 1). \(TelegramPresentation.compactLabel(title, limit: 36))",
           "callback_data": "session:\(token)",
         ]
       ])
     }
-    var navigation: [[String: String]] = []
-    if page > 1 { navigation.append(["text": "⬅️ 上一页", "callback_data": "/sessions \(page - 1)"]) }
-    if start + Self.sessionPageSize < entries.count {
-      navigation.append(["text": "下一页 ➡️", "callback_data": "/sessions \(page + 1)"])
-    }
+    let navigation = TelegramPresentation.navigation(pagination, command: "/sessions")
     if !navigation.isEmpty { sessionButtons.append(navigation) }
-    lines.append("点击按钮切换当前项目的会话；也可以直接回复之前的任务消息或 Bot 回复，继续对应会话。切换前请等待当前任务及排队消息完成。")
+    lines.append("✓ 当前会话 · 空闲时可切换\n回复旧消息可单次继续原会话。")
     return lines.joined(separator: "\n")
   }
 
@@ -833,71 +1123,169 @@ final class TelegramControl: ObservableObject {
   private func deliverNotice(
     _ text: String, token: String, userID: Int64, generation: UUID,
     keyboard: [[[String: String]]]? = nil, editMessageID: Int64? = nil,
-    sourceMessageID: Int64? = nil
+    sourceMessageID: Int64? = nil, statusModel: AppModel? = nil
   ) async {
     guard self.generation == generation, !Task.isCancelled else { return }
     sendingReplies += 1
     defer { sendingReplies -= 1 }
+    var deliveredChunks = 0
+    let cardRevision = editMessageID.map { cardUpdates.current($0) }
+    let cardLocation = Self.cardLocation(for: statusModel ?? selectedTaskModel)
+    // Startup may finish while Telegram is sending the initial card.
+    let shouldRefresh =
+      statusModel.map {
+        Self.needsStatusRefresh($0) || !text.hasSuffix(sessionStatus(for: $0))
+      } ?? false
     do {
       let cardID: Int64?
       if let editMessageID {
-        cardID = try await Self.editOrSend(
-          text, token: token, userID: userID, messageID: editMessageID, keyboard: keyboard)
+        let revision = cardRevision ?? cardUpdates.current(editMessageID)
+        var result: Result<Int64?, Error>?
+        let performed = await cardUpdates.enqueue(editMessageID, revision: revision) {
+          guard self.generation == generation else { return }
+          do {
+            result = .success(
+              try await Self.editOrSend(
+                text, token: token, userID: userID, messageID: editMessageID, keyboard: keyboard))
+          } catch { result = .failure(error) }
+        }.value
+        guard performed, let result else { return }
+        cardID = try result.get()
       } else {
-        cardID = try await Self.send(text, token: token, userID: userID, keyboard: keyboard)
+        cardID = try await Self.send(
+          text, token: token, userID: userID, keyboard: keyboard,
+          onSent: { _ in deliveredChunks += 1 })
       }
       guard self.generation == generation else { return }
-      if keyboard != nil, let cardID { rememberCard(cardID) }
-      rememberAcknowledgement(cardID, for: sourceMessageID)
+      if keyboard != nil, let cardID { rememberCard(cardID, location: cardLocation) }
+      rememberAcknowledgement(
+        cardID, for: sourceMessageID,
+        wasQueued: text.hasPrefix("📥 任务已排队") || text.hasPrefix("✏️ 排队任务已更新"))
+      if let statusModel, let cardID,
+        shouldRefresh || Self.needsStatusRefresh(statusModel)
+      {
+        refreshStatusWhenReady(
+          for: statusModel, cardID: cardID, token: token, userID: userID,
+          generation: generation, keyboard: keyboard)
+      }
     } catch {
       guard self.generation == generation, !Task.isCancelled else { return }
       pendingNotices.append(
         TelegramPendingNotice(
-          id: UUID(), text: text, keyboard: keyboard, sourceMessageID: sourceMessageID))
+          id: UUID(), text: text, keyboard: keyboard, sourceMessageID: sourceMessageID,
+          editMessageID: editMessageID, deliveredChunks: deliveredChunks, cardRevision: cardRevision
+        ))
       TelegramPendingNoticeStore.save(pendingNotices, defaults: defaults)
       status = "Telegram 消息发送失败，正在后台重试。"
-      scheduleReplyRetry(token: token, userID: userID, generation: generation)
+      scheduleReplyRetry(token: token, userID: userID, generation: generation, after: error)
     }
   }
 
-  private func scheduleReplyRetry(token: String, userID: Int64, generation: UUID) {
-    guard retryTask == nil,
+  private func scheduleReplyRetry(
+    token: String, userID: Int64, generation: UUID, after error: Error? = nil
+  ) {
+    if let error {
+      var policy = TelegramRetryPolicy()
+      guard let delay = policy.delay(for: error) else {
+        if !(error is CancellationError) {
+          outboxPaused = true
+          status = TelegramRetryPolicy.pausedMessage
+        }
+        return
+      }
+      retryNotBefore = max(retryNotBefore, Date().addingTimeInterval(delay))
+    }
+    guard retryTask == nil, !outboxPaused,
       !pendingNotices.isEmpty || !unsentReplies.isEmpty || !pendingFiles.isEmpty
     else { return }
+    let workerID = UUID()
+    retryWorkerID = workerID
     retryTask = Task { [weak self] in
       guard let self else { return }
-      while self.generation == generation && !Task.isCancelled {
+      defer {
+        if self.generation == generation, self.retryWorkerID == workerID { self.retryTask = nil }
+      }
+      var retryPolicy = TelegramRetryPolicy()
+      await TelegramOutboxRetry.run(
+        allowed: { self.generation == generation && !self.outboxPaused },
+        cooldown: { self.retryNotBefore.timeIntervalSinceNow }
+      ) {
+        var retryDelay: Double = 0
         let notices = self.pendingNotices
         let replies = self.unsentReplies.keys.sorted().flatMap { project in
-          (self.unsentReplies[project] ?? []).map { (project, $0) }
+          (self.unsentReplies[project] ?? []).filter { !self.inFlightReplyIDs.contains($0.id) }.map
+          { (project, $0) }
         }
         let files = self.pendingFiles
-        guard !notices.isEmpty || !replies.isEmpty || !files.isEmpty else { break }
-        var failed = false
-        var replyFailed = false
+        guard !notices.isEmpty || !replies.isEmpty || !files.isEmpty else { return nil }
+
         for notice in notices {
           guard self.generation == generation, !Task.isCancelled else { break }
           self.sendingReplies += 1
           let delivered: Bool
           do {
-            let cardID = try await Self.send(
-              notice.text, token: token, userID: userID, keyboard: notice.keyboard,
-              allowed: { [weak self] in self?.generation == generation })
+            let cardID: Int64?
+            if let editID = notice.editMessageID {
+              let currentRevision = self.cardUpdates.current(editID)
+              guard let revision = notice.cardRevision, revision == currentRevision else {
+                // Navigation or restart invalidated this old page. Never overwrite a newer card.
+                self.pendingNotices.removeAll { $0.id == notice.id }
+                TelegramPendingNoticeStore.save(self.pendingNotices, defaults: self.defaults)
+                self.sendingReplies -= 1
+                continue
+              }
+              var result: Result<Int64?, Error>?
+              let performed = await self.cardUpdates.enqueue(editID, revision: revision) {
+                guard self.generation == generation else { return }
+                do {
+                  result = .success(
+                    try await Self.editOrSend(
+                      notice.text, token: token,
+                      userID: userID, messageID: editID, keyboard: notice.keyboard))
+                } catch { result = .failure(error) }
+              }.value
+              if performed, let result { cardID = try result.get() } else { cardID = nil }
+            } else {
+              cardID = try await Self.send(
+                notice.text, token: token, userID: userID, keyboard: notice.keyboard,
+                startingAt: notice.deliveredChunks ?? 0,
+                allowed: { [weak self] in self?.generation == generation },
+                onSent: { _ in
+                  guard self.generation == generation,
+                    let index = self.pendingNotices.firstIndex(where: { $0.id == notice.id })
+                  else { return }
+                  self.pendingNotices[index].deliveredChunks =
+                    (self.pendingNotices[index].deliveredChunks ?? 0) + 1
+                  TelegramPendingNoticeStore.save(self.pendingNotices, defaults: self.defaults)
+                })
+            }
             if self.generation == generation, let cardID {
-              if notice.keyboard != nil { self.rememberCard(cardID) }
-              self.rememberAcknowledgement(cardID, for: notice.sourceMessageID)
+              // Retried notices may describe an old selection; require a fresh page for mutations.
+              if notice.keyboard != nil { self.rememberCard(cardID, location: nil) }
+              self.rememberAcknowledgement(
+                cardID, for: notice.sourceMessageID,
+                wasQueued: notice.text.hasPrefix("📥 任务已排队") || notice.text.hasPrefix("✏️ 排队任务已更新"))
             }
             delivered = true
           } catch {
             delivered = false
+            guard let delay = retryPolicy.delay(for: error) else {
+              self.sendingReplies -= 1
+              if !Task.isCancelled, self.generation == generation {
+                self.outboxPaused = true
+                self.status = TelegramRetryPolicy.pausedMessage
+              }
+              return nil
+            }
+            retryDelay = max(retryDelay, delay)
           }
           self.sendingReplies -= 1
-          guard self.generation == generation, !Task.isCancelled else { break }
+          guard self.generation == generation, !Task.isCancelled else { return nil }
           if delivered {
             self.pendingNotices.removeAll { $0.id == notice.id }
             TelegramPendingNoticeStore.save(self.pendingNotices, defaults: self.defaults)
           } else {
-            failed = true
+            return max(5, retryDelay)
           }
         }
         for (project, reply) in replies {
@@ -910,11 +1298,17 @@ final class TelegramControl: ObservableObject {
           do {
             try await Self.send(
               reply.text, token: token, userID: userID,
+              startingAt: reply.deliveredChunks ?? 0,
               allowed: { [weak self] in self?.generation == generation },
               onSent: { [weak self] id in
-                guard let self, self.generation == generation, !reply.sessionPath.isEmpty else {
-                  return
+                guard let self, self.generation == generation else { return }
+                if let index = self.unsentReplies[project]?.firstIndex(where: { $0.id == reply.id })
+                {
+                  self.unsentReplies[project]![index].deliveredChunks =
+                    (self.unsentReplies[project]![index].deliveredChunks ?? 0) + 1
+                  TelegramUnsentReplyStore.save(self.unsentReplies, defaults: self.defaults)
                 }
+                guard !reply.sessionPath.isEmpty else { return }
                 self.messageSessions.remember(
                   id,
                   location: .init(
@@ -930,9 +1324,18 @@ final class TelegramControl: ObservableObject {
               "retry_failed", task: reply.id,
               sessionPath: reply.sessionPath,
               details: "errorType=\(String(describing: type(of: error)))")
+            guard let delay = retryPolicy.delay(for: error) else {
+              self.sendingReplies -= 1
+              if !Task.isCancelled, self.generation == generation {
+                self.outboxPaused = true
+                self.status = TelegramRetryPolicy.pausedMessage
+              }
+              return nil
+            }
+            retryDelay = max(retryDelay, delay)
           }
           self.sendingReplies -= 1
-          guard self.generation == generation, !Task.isCancelled else { break }
+          guard self.generation == generation, !Task.isCancelled else { return nil }
           if delivered {
             self.unsentReplies[project]?.removeAll { $0.id == reply.id }
             if self.unsentReplies[project]?.isEmpty == true {
@@ -940,16 +1343,11 @@ final class TelegramControl: ObservableObject {
             }
             TelegramUnsentReplyStore.save(self.unsentReplies, defaults: self.defaults)
           } else {
-            failed = true
-            replyFailed = true
+            return max(5, retryDelay)
           }
         }
-        // Do not deliver attachments before their accompanying text has reached
-        // Telegram. Retry all failed text replies before attempting files.
-        if replyFailed {
-          try? await Task.sleep(for: .seconds(5))
-          continue
-        }
+        // A first delivery may still be sending its checkpointed text.
+        if !self.inFlightReplyIDs.isEmpty { return nil }
         for file in files {
           guard self.generation == generation, !Task.isCancelled else { break }
           self.sendingReplies += 1
@@ -970,39 +1368,105 @@ final class TelegramControl: ObservableObject {
             delivered = true
           } catch {
             delivered = false
+            guard let delay = retryPolicy.delay(for: error) else {
+              self.sendingReplies -= 1
+              if !Task.isCancelled, self.generation == generation {
+                self.outboxPaused = true
+                self.status = TelegramRetryPolicy.pausedMessage
+              }
+              return nil
+            }
+            retryDelay = max(retryDelay, delay)
           }
           self.sendingReplies -= 1
-          guard self.generation == generation, !Task.isCancelled else { break }
+          guard self.generation == generation, !Task.isCancelled else { return nil }
           if delivered {
             self.pendingFiles.removeAll { $0.id == file.id }
             TelegramPendingFileStore.save(self.pendingFiles, defaults: self.defaults)
           } else {
-            failed = true
+            return max(5, retryDelay)
           }
         }
-        if failed { try? await Task.sleep(for: .seconds(5)) }
+        retryPolicy.reset()
+        return 0
       }
-      if self.generation == generation { self.retryTask = nil }
     }
   }
 
   // The remote AppModel starts its RPC process on the next main-actor turn. On the
   // first /status after launch, wait for that startup and configuration to finish
   // instead of immediately reporting the temporary "待连接" state.
-  static func waitForSessionStatus(in model: AppModel) async {
-    let deadline = Date().addingTimeInterval(17)
+  static func waitForSessionStatus(in model: AppModel, timeout: TimeInterval = 17) async {
+    let deadline = Date().addingTimeInterval(timeout)
     while !Task.isCancelled && Date() < deadline {
       switch model.connectionState {
       case .connected where !model.isLoadingConfiguration, .failed:
         return
       default:
-        try? await Task.sleep(for: .milliseconds(100))
+        try? await Task.sleep(for: .seconds(min(0.1, max(0, deadline.timeIntervalSinceNow))))
       }
     }
   }
 
-  private func sessionStatus(for model: AppModel) -> String {
-    Self.statusMessage(
+  static func needsStatusRefresh(_ model: AppModel) -> Bool {
+    switch model.connectionState {
+    case .connecting: return true
+    case .connected: return model.isLoadingConfiguration
+    default: return false
+    }
+  }
+
+  private func refreshStatusWhenReady(
+    for model: AppModel, cardID: Int64, token: String, userID: Int64,
+    generation: UUID, keyboard: [[[String: String]]]?
+  ) {
+    statusRefreshTasks.removeValue(forKey: cardID)?.cancel()
+    statusRefreshTasks[cardID] = Task { @MainActor [weak self, weak model] in
+      guard let model else { return }
+      await Self.waitForSessionStatus(in: model)
+      guard let self, !Task.isCancelled, self.generation == generation else { return }
+      defer { self.statusRefreshTasks.removeValue(forKey: cardID) }
+      // Do not overwrite another selection or publish a timeout as completed startup.
+      guard self.selectedTaskModel === model, !Self.needsStatusRefresh(model) else { return }
+      self.rememberSession(model)
+      await self.deliverNotice(
+        self.sessionStatus(for: model), token: token, userID: userID,
+        generation: generation, keyboard: keyboard, editMessageID: cardID)
+    }
+  }
+
+  /// Inspect every known runtime, including desktop tasks and historical Telegram replies,
+  /// without resolving an active model (which can resume a suspended Pi process).
+  func projectStatusSummaries(in workspace: WorkspaceModel) -> [ProjectActivitySummary] {
+    let models =
+      workspace.tabs.map(\.model) + Array(remoteModels.values) + Array(replyModels.values)
+    let confirmations = Set(
+      models.filter {
+        workspace.extensionUI.hasPendingRequests(from: $0)
+      }.map(ObjectIdentifier.init))
+    return ProjectStatusOverview.summaries(
+      projects: workspace.projects, models: models,
+      selectedProjectPath: activeReplyLocation?.project ?? defaults.string(forKey: projectKey),
+      remoteQueueCounts: promptQueues.mapValues { $0.items.count },
+      pendingReplyModels: pendingModels, confirmationModels: confirmations,
+      undeliveredCounts: unsentReplies.mapValues { replies in
+        replies.filter { !inFlightReplyIDs.contains($0.id) }.count
+      }.merging(
+        Dictionary(grouping: pendingFiles, by: \.projectPath).mapValues(\.count),
+        uniquingKeysWith: +))
+  }
+
+  private func otherProjectStatusSummaries(
+    in workspace: WorkspaceModel, model: AppModel?
+  ) -> [ProjectActivitySummary] {
+    ProjectStatusOverview.visibleSummaries(projectStatusSummaries(in: workspace))
+      .filter { $0.project.id != model?.projectURL?.standardizedFileURL.path }
+  }
+
+  private func sessionStatus(
+    for model: AppModel, page: Int = 1, elapsed: String? = nil
+  ) -> String {
+    let detail = Self.statusMessage(
       project: model.projectURL?.lastPathComponent ?? "未选择", session: model.sessionName,
       sessionPath: model.currentSessionPath,
       firstPrompt: model.messages.first(where: { $0.kind == .user })?.text,
@@ -1010,19 +1474,38 @@ final class TelegramControl: ObservableObject {
       loading: model.isLoadingConfiguration, detail: model.statusText,
       model: model.selectedModelId, thinking: model.selectedThinkingLevel,
       contextPercent: model.stats?.contextPercent,
-      account: workspace?.extensionUI.usage(for: model).accounts.first(where: \.isActive)?.name)
+      account: workspace?.extensionUI.usage(for: model).accounts.first(where: \.isActive)?.name,
+      queuedCount: (promptQueues[ObjectIdentifier(model)]?.items.count ?? 0)
+        + model.queuedPrompts.count,
+      elapsed: elapsed,
+      waitingForConfirmation: workspace?.extensionUI.hasPendingRequests(from: model) == true)
+    guard let workspace else { return detail }
+    let others = otherProjectStatusSummaries(in: workspace, model: model)
+    guard !others.isEmpty else { return detail }
+    return detail + "\n\n──────────\n\n"
+      + ProjectStatusOverview.message(others, page: page, otherProjectsOnly: true)
   }
 
   private func handle(
     _ text: String, attachments: [PromptAttachment] = [], token: String, userID: Int64,
     generation: UUID, fromCallback: Bool = false,
-    messageID: Int64? = nil, replyToID: Int64? = nil
+    messageID: Int64? = nil, replyToID: Int64? = nil, quote: String? = nil,
+    mediaID: String? = nil
   ) async -> String {
     var submittedAttachments = false
     defer {
       if !submittedAttachments {
         for attachment in attachments { try? FileManager.default.removeItem(at: attachment.url) }
       }
+    }
+    if fromCallback, let cancellation = TelegramQueuePresentation.cancellation(text) {
+      return cancelQueuedPrompt(id: cancellation.id) + "\n\n──────────\n\n"
+        + queueMessage(page: cancellation.page)
+    }
+    if fromCallback, text.hasPrefix("cancel:"),
+      let id = UUID(uuidString: String(text.dropFirst(7)))
+    {
+      return cancelQueuedPrompt(id: id)
     }
     guard let workspace else { return "工作区不可用" }
     let parts = text.split(maxSplits: 1, whereSeparator: \.isWhitespace)
@@ -1031,8 +1514,22 @@ final class TelegramControl: ObservableObject {
       ? (parts.first.map { String($0).components(separatedBy: "@")[0].lowercased() } ?? "") : ""
     switch command {
     case "/start", "/help": return Self.help
+    case "/queue":
+      return queueMessage(page: parts.count == 2 ? Int(parts[1]) ?? 1 : 1)
+    case "/status":
+      let page = parts.count == 2 ? Int(parts[1]) ?? 1 : 1
+      if let model = selectedTaskModel { return sessionStatus(for: model, page: page) }
+      let summaries = otherProjectStatusSummaries(in: workspace, model: nil)
+      if summaries.isEmpty {
+        return workspace.projects.isEmpty
+          ? "尚无项目，请先在 Mac 上添加项目。"
+          : "当前没有项目执行任务。请用 /projects 选择项目查看会话状态。"
+      }
+      return ProjectStatusOverview.message(summaries, page: page)
     case "/sessions":
-      guard let model = await activeModel(in: workspace), let projectURL = model.projectURL,
+      let currentModel = selectedTaskModel
+      let resolvedModel = currentModel == nil ? await activeModel(in: workspace) : currentModel
+      guard let model = resolvedModel, let projectURL = model.projectURL,
         let project = workspace.projects.first(where: {
           $0.id == projectURL.standardizedFileURL.path
         })
@@ -1045,7 +1542,9 @@ final class TelegramControl: ObservableObject {
         page: parts.count == 2 ? Int(parts[1]) ?? 1 : 1,
         project: project, model: model, sessions: sessions)
     case let action where action.hasPrefix("session:") && fromCallback:
-      guard let model = await activeModel(in: workspace),
+      let currentModel = selectedTaskModel
+      let resolvedModel = currentModel == nil ? await activeModel(in: workspace) : currentModel
+      guard let model = resolvedModel,
         let project = model.projectURL?.standardizedFileURL.path,
         workspace.projects.contains(where: { $0.id == project })
       else { return "请先用 /projects 选择项目。" }
@@ -1055,77 +1554,66 @@ final class TelegramControl: ObservableObject {
       {
         return "当前已在此会话。"
       }
-      let sessions = await Task.detached(priority: .utility) {
-        AppModel.discoverSessions(for: project)
-      }.value
+      // Resolve visible buttons without rescanning all history. Old cards still
+      // fall back to disk discovery, and replyModel validates the target file.
+      var target = displayedSessions[identifier].flatMap {
+        Self.sessionIdentifier(project: project, path: $0.path) == identifier ? $0 : nil
+      }
+      if target == nil {
+        let sessions = await Task.detached(priority: .utility) {
+          AppModel.discoverSessions(for: project)
+        }.value
+        target = Self.sessionForIdentifier(identifier, project: project, sessions: sessions)
+      }
       guard generation == self.generation, !Task.isCancelled else { return "连接已重置，请重新发送命令。" }
-      guard let target = Self.sessionForIdentifier(identifier, project: project, sessions: sessions)
-      else { return "会话已不存在或不在当前项目，请用 /sessions 刷新。" }
+      guard let target else { return "会话已不存在或不在当前项目，请用 /sessions 刷新。" }
       guard model.canReuseProcessForNewSession, model.canRestartSafely,
         promptQueues[ObjectIdentifier(model)]?.isEmpty != false,
         !pendingModels.contains(ObjectIdentifier(model)),
         !workspace.extensionUI.hasPendingRequests(from: model)
       else { return "当前有任务或会话未就绪，稍后再切换。" }
-      if let other = replyModels[target.path] {
-        guard other.canRestartSafely,
-          promptQueues[ObjectIdentifier(other)]?.isEmpty != false,
-          !pendingModels.contains(ObjectIdentifier(other)),
-          !workspace.extensionUI.hasPendingRequests(from: other)
-        else { return "此会话正在执行其他任务，请等待完成后再切换。" }
-        other.disconnect()
-        replyModels.removeValue(forKey: target.path)
-      }
-      var switched: Bool?
-      model.switchSession(path: target.path) { switched = $0 }
-      let deadline = Date().addingTimeInterval(20)
-      while generation == self.generation && !Task.isCancelled && switched == nil
-        && Date() < deadline
-      {
-        try? await Task.sleep(for: .milliseconds(100))
-      }
-      guard generation == self.generation, !Task.isCancelled else { return "连接已重置，请重新发送命令。" }
-      guard switched == true else { return "切换会话失败或超时，请使用 /status 查看状态后重试。" }
-      rememberSession(model)
-      activeReplyLocation = .init(project: project, sessionPath: target.path)
-      workspace.remoteSessionChanged(in: model.projectURL, sessionPath: model.currentSessionPath)
-      return "已切换到「\(Self.sessionListTitle(name: target.title, firstPrompt: nil))」。"
+      let location = TelegramMessageSessionStore.Location(
+        project: project, sessionPath: target.path)
+      guard await replyModel(for: location, in: workspace) != nil,
+        generation == self.generation, !Task.isCancelled
+      else { return "会话已不可用，请用 /sessions 刷新。" }
+      activeReplyLocation = location
+      workspace.remoteSelectionChanged()
+      // Routing is ready now; Pi startup/configuration continues in the background.
+      return
+        "已切换会话\n\(TelegramPresentation.compactLabel(Self.sessionListTitle(name: target.title, firstPrompt: nil), limit: 32))"
     case "/projects":
-      let page =
-        parts.count == 2
-        ? min(max(1, Int(parts[1]) ?? 1), max(1, (workspace.projects.count + 29) / 30)) : 1
-      let start = min((page - 1) * 30, workspace.projects.count)
+      let page = TelegramPresentation.page(
+        parts.count == 2 ? Int(parts[1]) ?? 1 : 1,
+        count: workspace.projects.count, size: TelegramPresentation.projectPageSize)
+      let selected = activeReplyLocation?.project ?? defaults.string(forKey: projectKey)
+      let current = workspace.projects.first(where: { $0.id == selected })?.name ?? "未选择"
       return workspace.projects.isEmpty
-        ? "请先在 Mac 上添加项目。"
-        : Self.projectList(workspace.projects.dropFirst(start).prefix(30), start: start)
-          + "\n点击下方按钮切换项目。"
-    case let action where action.hasPrefix("select:") && fromCallback:
-      guard let number = Int(action.dropFirst(7)),
-        workspace.projects.indices.contains(number - 1)
-      else { return "请使用 /projects 下方的项目按钮切换。" }
-      let project = workspace.projects[number - 1]
-      let previousPath = defaults.string(forKey: projectKey) ?? workspace.projects.first?.id ?? ""
-      if let previous = remoteModels[previousPath],
-        previous.projectURL?.standardizedFileURL.path != project.id,
-        promptQueues[ObjectIdentifier(previous)]?.isEmpty != false
-      {
-        rememberSession(previous)
-        previous.suspendProcess()
-      }
-      defaults.set(project.id, forKey: projectKey)
-      activeReplyLocation = nil
-      guard let model = remoteModel(in: workspace) else { return "请先在 Mac 上添加项目。" }
-      await Self.waitForSessionStatus(in: model)
+        ? "暂无项目 · 请在 Mac 添加"
+        : "项目 · \(workspace.projects.count) 个 · \(page.number)/\(page.count) 页\n当前  \(TelegramPresentation.compactLabel(current, limit: 32))\n\n✓ 当前项目 · 不改桌面选择"
+    case let action
+    where (action.hasPrefix("project:") || action.hasPrefix("select:")) && fromCallback:
+      guard
+        let index = TelegramPresentation.choiceIndex(
+          action, kind: .project, values: workspace.projects.map(\.id))
+      else { return "项目已失效，未切换。\n请重新打开「项目」。" }
+      let project = workspace.projects[index]
+      guard let model = selectProject(project, in: workspace) else { return "请先在 Mac 上添加项目。" }
+      // Switching routes must not block the update loop on a cold Pi startup.
+      // The card will be refreshed asynchronously when configuration finishes.
+      await Self.waitForSessionStatus(in: model, timeout: 0.35)
       guard generation == self.generation, !Task.isCancelled else {
         return "连接已重置，请重新发送命令。"
       }
-      return "Telegram 已选择 \(project.name)。\n\n" + sessionStatus(for: model)
+      return sessionStatus(for: model)
     default: break
     }
     if command == "/usage" || command == "/accounts" {
       let model = remoteModel(in: workspace)
       let usage = workspace.extensionUI.usage(for: model)
       return Self.usageMessage(
-        accounts: usage.accounts, gemini: usage.gemini, updatedAt: usage.updatedAt)
+        accounts: usage.accounts, gemini: usage.gemini, updatedAt: usage.updatedAt,
+        page: parts.count == 2 ? Int(parts[1]) ?? 1 : 1)
     }
     guard
       let model = await
@@ -1138,47 +1626,51 @@ final class TelegramControl: ObservableObject {
         : "上次引用的会话已不可用，请用 /projects 重新选择项目。"
     }
     switch command {
-    case let action where action.hasPrefix("account:") && fromCallback:
+    case let action
+    where (action.hasPrefix("accountid:") || action.hasPrefix("account:")) && fromCallback:
       guard model.supportsAccountSwitch else {
         return "当前账户扩展未报告此提供商的切换能力，请升级 account-usage。"
       }
       let accounts = workspace.extensionUI.usage(for: model).accounts
-      guard let number = Int(action.dropFirst(8)), accounts.indices.contains(number - 1)
-      else { return "账户列表已变化，请重新使用 /usage。" }
-      guard model.clientConnectedForCommands, model.canRestartSafely,
-        promptQueues[ObjectIdentifier(model)]?.isEmpty != false,
-        !pendingModels.contains(ObjectIdentifier(model)),
-        !workspace.extensionUI.hasPendingRequests(from: model)
-      else { return "会话正在执行或尚未就绪，请稍后再切换账户。" }
-      let account = accounts[number - 1]
-      if account.isActive { return "当前已使用 OpenAI / Codex 账户 \(account.name)。" }
+      guard
+        let index = TelegramPresentation.choiceIndex(
+          action, kind: .account, values: accounts.map(\.name))
+      else { return "账户已失效，未切换。\n请重新打开「额度」。" }
+      guard canChangeConfiguration(in: model)
+      else { return "暂不能切换账户 · 请等待任务及排队完成\n如有扩展确认，请在 Mac 处理。" }
+      let account = accounts[index]
+      if account.isActive {
+        return "当前账户  \(TelegramPresentation.compactLabel(account.name, limit: 32))"
+      }
       model.switchCodexAccount(to: account.name)
-      return "已请求切换到 OpenAI / Codex 账户 \(account.name)，请用 /status 确认。"
+      return "账户切换待确认\n\(TelegramPresentation.compactLabel(account.name, limit: 32))\n点「状态」核实。"
     case "/model":
       model.refreshModelPreferences()
-      let page = min(
-        max(1, (model.models.count + 19) / 20), parts.count == 2 ? max(1, Int(parts[1]) ?? 1) : 1)
-      let start = min((page - 1) * 20, model.models.count)
-      let list = model.models.dropFirst(start).prefix(20).enumerated().map {
-        "\(start + $0.offset + 1). \($0.element.id)\($0.element.id == model.selectedModelId ? " ✓" : "")"
-      }
-      return list.isEmpty
-        ? "模型列表尚未就绪，请稍后重试。"
-        : "🤖 Telegram 模型（\(page)）\n" + list.joined(separator: "\n") + "\n点击下方按钮选择。"
+      let page = TelegramPresentation.page(
+        parts.count == 2 ? Int(parts[1]) ?? 1 : 1,
+        count: model.models.count, size: TelegramPresentation.modelPageSize)
+      return model.models.isEmpty
+        ? "模型列表加载中 · 请稍后重试"
+        : "模型 · \(page.number)/\(page.count) 页\n当前  \(TelegramPresentation.compactLabel(model.selectedModelId, limit: 44, preserveSuffix: true))\n\n✓ 当前模型 · 空闲时可切换\n与桌面共用偏好。"
     case "/thinking":
       return
-        "🧠 Telegram 推理强度：\(model.selectedThinkingLevel)\n可选：\(model.thinkingLevels.joined(separator: "、"))\n点击下方按钮选择。"
-    case let action where action.hasPrefix("model:") && fromCallback:
+        "推理强度\n当前  \(model.selectedThinkingLevel)\n\n✓ 当前强度 · 空闲时可切换"
+    case let action
+    where (action.hasPrefix("modelid:") || action.hasPrefix("model:")) && fromCallback:
       model.refreshModelPreferences()
-      guard let number = Int(action.dropFirst(6)), model.models.indices.contains(number - 1)
-      else { return "模型列表已变化，请重新使用 /model。" }
-      guard model.clientConnectedForCommands, model.canRestartSafely,
-        !pendingModels.contains(ObjectIdentifier(model)),
-        !workspace.extensionUI.hasPendingRequests(from: model)
-      else { return "会话正在执行或尚未就绪，请稍后再试。" }
-      let choice = model.models[number - 1]
+      guard
+        let index = TelegramPresentation.choiceIndex(
+          action, kind: .model, values: model.models.map(\.id))
+      else { return "模型已失效，未切换。\n请重新打开「模型」。" }
+      guard canChangeConfiguration(in: model)
+      else { return "暂不能切换模型 · 请等待任务及排队完成\n如有扩展确认，请在 Mac 处理。" }
+      let choice = model.models[index]
+      if model.selectedModelId == choice.id {
+        model.changeModel(to: choice.id)  // Explicit selection still pins the shared preference.
+        return sessionStatus(for: model)
+      }
       model.changeModel(to: choice.id)
-      let deadline = Date().addingTimeInterval(10)
+      let deadline = Date().addingTimeInterval(2)
       while generation == self.generation && !Task.isCancelled && Date() < deadline {
         if model.selectedModelId == choice.id { break }
         try? await Task.sleep(for: .milliseconds(100))
@@ -1186,19 +1678,30 @@ final class TelegramControl: ObservableObject {
       guard generation == self.generation, !Task.isCancelled else {
         return "连接已重置，请重新发送命令。"
       }
-      return sessionStatus(for: model)
+      return TelegramPresentation.selectionFeedback(
+        label: "模型", value: choice.id, confirmed: model.selectedModelId == choice.id)
+        + "\n\n" + sessionStatus(for: model)
     case let action where action.hasPrefix("thinking:") && fromCallback:
       let level = String(action.dropFirst(9))
       guard model.thinkingLevels.contains(level) else { return "当前模型不支持此强度，请重新使用 /thinking。" }
-      guard model.clientConnectedForCommands, model.canRestartSafely,
-        !pendingModels.contains(ObjectIdentifier(model)),
-        !workspace.extensionUI.hasPendingRequests(from: model)
-      else { return "会话正在执行或尚未就绪，请稍后再试。" }
+      guard canChangeConfiguration(in: model)
+      else { return "暂不能切换推理 · 请等待任务及排队完成\n如有扩展确认，请在 Mac 处理。" }
+      if model.selectedThinkingLevel == level {
+        model.changeThinkingLevel(to: level)
+        return sessionStatus(for: model)
+      }
       model.changeThinkingLevel(to: level)
-      return "已请求将 Telegram 推理强度设为 \(level)，请用 /status 确认。"
-    case "/status":
-      await Self.waitForSessionStatus(in: model)
-      return sessionStatus(for: model)
+      let deadline = Date().addingTimeInterval(2)
+      while generation == self.generation && !Task.isCancelled && Date() < deadline {
+        if model.selectedThinkingLevel == level { break }
+        try? await Task.sleep(for: .milliseconds(100))
+      }
+      guard generation == self.generation, !Task.isCancelled else {
+        return "连接已重置，请重新发送命令。"
+      }
+      return TelegramPresentation.selectionFeedback(
+        label: "推理强度", value: level, confirmed: model.selectedThinkingLevel == level)
+        + "\n\n" + sessionStatus(for: model)
     case "/compact":
       await Self.waitForSessionStatus(in: model)
       guard generation == self.generation, !Task.isCancelled else {
@@ -1211,21 +1714,24 @@ final class TelegramControl: ObservableObject {
       else { return "会话未就绪、正在执行或有任务排队，请等待完成后再压缩。" }
       guard !model.currentSessionPath.isEmpty else { return "当前尚无会话内容，发送消息后再压缩。" }
       model.compact()
-      return "已开始压缩当前 Telegram 会话的上下文。完成后可用 /status 查看新的占比。"
+      return "上下文压缩中 · 点「状态」查看进度"
     case "/stop":
       let modelID = ObjectIdentifier(model)
       let cancelled = promptQueues.removeValue(forKey: modelID)?.items ?? []
       queueObservations.removeValue(forKey: modelID)
       connectionRetries.removeValue(forKey: modelID)?.task.cancel()
       for prompt in cancelled {
+        refreshQueueReceipt(
+          sourceMessageID: prompt.messageID,
+          text: "已取消此条 · 当前会话已请求停止")
         for attachment in prompt.attachments {
           try? FileManager.default.removeItem(at: attachment.url)
         }
       }
       model.abort()
-      return cancelled.isEmpty
-        ? "已请求停止当前会话任务。"
-        : "已请求停止当前会话任务，并取消 \(cancelled.count) 条等待中的消息。"
+      return "⏹ 已请求停止当前任务\n"
+        + (cancelled.isEmpty ? "无 TG 等待任务" : "已取消 \(cancelled.count) 条 TG 等待任务")
+        + "\n其他会话不变 · 状态卡将更新"
     case "/new":
       guard !model.isBusy, !model.isLoadingConfiguration, model.queuedPrompts.isEmpty,
         promptQueues[ObjectIdentifier(model)]?.isEmpty != false,
@@ -1279,18 +1785,18 @@ final class TelegramControl: ObservableObject {
         else {
           return "原会话已不可用，请用 /sessions 重新选择。"
         }
+        // A reply is a one-message route, not a change to the user's selection.
+        // Only explicit project/session selection changes subsequent plain messages.
         targetModel = resolved
-        activeReplyLocation = location
       } else {
         targetModel = model
       }
       // Accept requests during startup and reconnect in the background. Never
       // force the user to resend a prompt solely because Pi is not yet ready.
       let prompt = RemotePrompt(
-        text: text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-          ? (attachments.first?.isImage == true ? "请分析这张图片。" : "请阅读并分析这个文件。") : text,
+        preview: text, text: TelegramUpdate.promptText(text, quote: quote),
         attachments: attachments, token: token, userID: userID, generation: generation,
-        messageID: messageID)
+        messageID: messageID, mediaID: mediaID)
       let modelID = ObjectIdentifier(targetModel)
       if !canSubmitRemotePrompt(in: targetModel) || promptQueues[modelID]?.isEmpty == false {
         guard let position = promptQueues[modelID, default: .init()].append(prompt)
@@ -1305,20 +1811,172 @@ final class TelegramControl: ObservableObject {
         startConnectionRetry(for: targetModel)
         // If the previous turn settled while this update was being handled, drain now.
         scheduleQueueDrain(for: targetModel)
-        if !targetModel.clientConnectedForCommands || targetModel.isLoadingConfiguration {
-          return "会话尚未就绪，任务已排队（第 \(position) 位），正在自动重试连接。就绪后会执行并回传回复。"
-        }
-        return "已排队（等待队列第 \(position) 位）。完成后会自动回传回复。"
+        return Self.queueNotice(
+          project: targetModel.projectURL?.lastPathComponent ?? "当前项目",
+          position: position, originalSession: replyToID != nil,
+          waitingForConnection: !targetModel.clientConnectedForCommands
+            || targetModel.isLoadingConfiguration,
+          preview: text, attachmentCount: attachments.count,
+          waitingForConfirmation: workspace.extensionUI.hasPendingRequests(from: targetModel))
       }
       submitRemotePrompt(prompt, in: targetModel)
       submittedAttachments = true
       let label = targetModel.projectURL?.lastPathComponent ?? "当前项目"
-      return replyToID == nil ? "已发送到「\(label)」。" : "已发送到「\(label)」的原会话。"
+      return TelegramPresentation.taskNotice(
+        project: label, originalSession: replyToID != nil,
+        preview: text, attachmentCount: attachments.count)
     }
   }
 
-  private func canSubmitRemotePrompt(in model: AppModel) -> Bool {
+  private func queueItems(for model: AppModel?) -> [TelegramQueuePresentation.Item] {
+    guard let model else { return [] }
+    return (promptQueues[ObjectIdentifier(model)]?.items ?? []).map {
+      .init(
+        id: $0.id, preview: $0.preview, attachmentCount: $0.attachments.count,
+        receivedAt: $0.receivedAt)
+    }
+  }
+
+  private func queueMessage(page: Int) -> String {
+    guard let model = selectedTaskModel else {
+      return "等待队列\n请先选择项目或会话。"
+    }
+    let blocker: String
+    if workspace?.extensionUI.hasPendingRequests(from: model) == true {
+      blocker = "待 Mac 确认，随后自动执行。"
+    } else if !model.clientConnectedForCommands || model.isLoadingConfiguration {
+      blocker = "连接重试中，无需重发。"
+    } else {
+      blocker = "就绪后自动执行。"
+    }
+    return TelegramQueuePresentation.card(
+      project: model.projectURL?.lastPathComponent ?? "未选择",
+      session: Self.sessionListTitle(
+        name: model.sessionName,
+        firstPrompt: model.messages.first(where: { $0.kind == .user })?.text),
+      items: queueItems(for: model), localQueueCount: model.queuedPrompts.count,
+      blocker: blocker, page: page)
+  }
+
+  private func refreshQueueReceipt(sourceMessageID: Int64?, text: String) {
+    guard let sourceMessageID, let cardID = queueReceiptIDs.removeValue(forKey: sourceMessageID),
+      editableCards.contains(cardID), let user = Int64(userID), user > 0
+    else { return }
+    let revision = cardUpdates.advance(cardID)
+    let generation = generation
+    let token = botToken
+    _ = cardUpdates.enqueue(cardID, revision: revision) { [weak self] in
+      guard let self, self.generation == generation else { return }
+      try? await Self.editProgress(
+        text, token: token, userID: user, messageID: cardID,
+        keyboard: [
+          [
+            TelegramPresentation.button("📊 当前状态", "/status"),
+            TelegramPresentation.button("📥 当前队列", "/queue"),
+          ]
+        ])
+    }
+  }
+
+  private func queuedKeyboard(messageID: Int64?) -> [[[String: String]]]? {
+    guard let messageID,
+      let prompt = promptQueues.values.lazy.flatMap({ $0.items }).first(where: {
+        $0.messageID == messageID && $0.generation == generation
+      })
+    else { return nil }
+    return [[TelegramPresentation.button("✕ 取消此排队任务", "cancel:\(prompt.id.uuidString)")]]
+  }
+
+  private func syncQueuedEdit(_ message: TelegramUpdate.Message) -> String {
+    guard let messageID = message.messageID else { return "" }
+    for modelID in Array(promptQueues.keys) {
+      guard
+        let prompt = promptQueues[modelID]?.items.first(where: {
+          $0.messageID == messageID && $0.generation == generation
+        })
+      else { continue }
+      let editedMediaID = message.photo?.last?.fileID ?? message.document?.fileID
+      guard editedMediaID == prompt.mediaID else {
+        return "附件未替换 · 请取消此条后重发"
+      }
+      let text = message.text ?? message.caption ?? ""
+      guard
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          || !prompt.attachments.isEmpty
+      else {
+        return "编辑未同步 · 内容不能为空\n取消请用下方按钮。"
+      }
+      let position =
+        promptQueues[modelID]?.updateFirst(
+          where: { $0.id == prompt.id },
+          transform: {
+            $0.text = TelegramUpdate.promptText(text, quote: message.quote?.text)
+            $0.preview = text
+          }) ?? 1
+      let project =
+        messageSessions[messageID].map {
+          URL(fileURLWithPath: $0.project).lastPathComponent
+        } ?? "原项目"
+      TelegramDeliveryLog.record(
+        "prompt_edited", task: prompt.id,
+        sessionPath: messageSessions[messageID]?.sessionPath ?? "",
+        details: "position=\(position)")
+      return
+        "✏️ 排队任务已更新\n项目  \(TelegramPresentation.compactLabel(project, limit: 32))\n排队  第 \(position) 位 · 目标不变\n摘要  \(TelegramPresentation.compactLabel(text, limit: 48))"
+    }
+    // Never resubmit edits to commands, historical messages or already-running tasks.
+    return messageSessions[messageID] == nil
+      ? ""
+      : "编辑未同步：此消息已不在等待队列（可能已开始执行或已取消），不会重新提交任务。"
+  }
+
+  private func cancelQueuedPrompt(id: UUID) -> String {
+    for modelID in Array(promptQueues.keys) {
+      guard
+        let prompt = promptQueues[modelID]?.removeFirst(where: {
+          $0.id == id && $0.generation == generation
+        })
+      else { continue }
+      for attachment in prompt.attachments {
+        try? FileManager.default.removeItem(at: attachment.url)
+      }
+      if promptQueues[modelID]?.isEmpty == true {
+        promptQueues.removeValue(forKey: modelID)
+        queueObservations.removeValue(forKey: modelID)
+        connectionRetries.removeValue(forKey: modelID)?.task.cancel()
+        lastQueueDiagnostic.removeValue(forKey: modelID)
+      }
+      refreshQueueReceipt(
+        sourceMessageID: prompt.messageID,
+        text: "已取消此条 · 其他任务不变")
+      TelegramDeliveryLog.record(
+        "prompt_cancelled", task: prompt.id,
+        sessionPath: prompt.messageID.flatMap { messageSessions[$0]?.sessionPath } ?? "")
+      return "已取消此条 · 其他任务不变"
+    }
+    return "此条已不在队列 · 未停止执行中的任务"
+  }
+
+  static func queueNotice(
+    project: String, position: Int, originalSession: Bool, waitingForConnection: Bool,
+    preview: String = "", attachmentCount: Int = 0, waitingForConfirmation: Bool = false
+  ) -> String {
+    TelegramPresentation.taskNotice(
+      project: project, originalSession: originalSession, position: position,
+      preview: preview, attachmentCount: attachmentCount,
+      waitingForConnection: waitingForConnection, waitingForConfirmation: waitingForConfirmation)
+  }
+
+  private func canChangeConfiguration(in model: AppModel) -> Bool {
     model.clientConnectedForCommands && model.canRestartSafely
+      && model.queuedPrompts.isEmpty
+      && promptQueues[ObjectIdentifier(model)]?.isEmpty != false
+      && !pendingModels.contains(ObjectIdentifier(model))
+      && workspace?.extensionUI.hasPendingRequests(from: model) == false
+  }
+
+  private func canSubmitRemotePrompt(in model: AppModel) -> Bool {
+    model.canSubmitPrompt && model.canRestartSafely
       && !pendingModels.contains(ObjectIdentifier(model))
       && workspace?.extensionUI.hasPendingRequests(from: model) == false
   }
@@ -1449,7 +2107,7 @@ final class TelegramControl: ObservableObject {
   }
 
   private func scheduleQueueDrain(for model: AppModel) {
-    Task { @MainActor [weak self, weak model] in
+    queueScheduler.schedule(for: ObjectIdentifier(model)) { [weak self, weak model] in
       guard let self, let model else { return }
       let id = ObjectIdentifier(model)
       guard self.canSubmitRemotePrompt(in: model),
@@ -1470,12 +2128,14 @@ final class TelegramControl: ObservableObject {
   }
 
   private static func editProgress(
-    _ text: String, token: String, userID: Int64, messageID: Int64
+    _ text: String, token: String, userID: Int64, messageID: Int64,
+    keyboard: [[[String: String]]]? = nil
   ) async throws {
-    let body: [String: Any] = [
+    var body: [String: Any] = [
       "chat_id": userID, "message_id": messageID,
       "text": TelegramMarkdown.html(text), "parse_mode": "HTML",
     ]
+    body["reply_markup"] = ["inline_keyboard": keyboard ?? []]
     do {
       let _: SentMessage = try await call(token: token, method: "editMessageText", body: body)
     } catch APIError.notModified {
@@ -1494,7 +2154,52 @@ final class TelegramControl: ObservableObject {
   }
 
   private func progressStatus(for model: AppModel, startedAt: Date) -> String {
-    sessionStatus(for: model) + "\n⏱ 已执行  \(Self.progressElapsed(startedAt: startedAt))"
+    sessionStatus(for: model, elapsed: Self.progressElapsed(startedAt: startedAt))
+  }
+
+  private func recordCompletion(
+    key: UUID, model: AppModel, outcome: TelegramPresentation.TaskOutcome,
+    elapsed: String, delivered: Bool?
+  ) {
+    if completedProgress[key] == nil {
+      completionOrder.append(key)
+      if completionOrder.count > 100 {
+        completedProgress.removeValue(forKey: completionOrder.removeFirst())
+      }
+    }
+    let summary = TelegramPresentation.completionSummary(
+      outcome: outcome, delivered: delivered, elapsed: elapsed,
+      queuedCount: (promptQueues[ObjectIdentifier(model)]?.items.count ?? 0)
+        + model.queuedPrompts.count)
+    completedProgress[key] = CompletedProgress(
+      text: summary + "\n\n──────────\n\n" + sessionStatus(for: model),
+      keyboard: keyboard(for: "/status", cardModel: model, includePendingTask: false),
+      location: Self.cardLocation(for: model), delivered: delivered)
+  }
+
+  private func updateCompletedCard(
+    key: UUID, cardID: Int64, token: String, userID: Int64, generation: UUID
+  ) async {
+    let revision = cardUpdates.current(cardID)
+    _ = await cardUpdates.enqueue(cardID, revision: revision) { [weak self] in
+      guard let self, self.generation == generation, self.progressViews[cardID] == key else {
+        return
+      }
+      // Read the latest delivery state only when this serialized edit is ready to send.
+      let completion = self.completedProgress[key]
+      do {
+        try await Self.editProgress(
+          completion?.text ?? "ℹ️ 任务已结束，请查看单独发送的结果。",
+          token: token, userID: userID, messageID: cardID, keyboard: completion?.keyboard)
+        guard self.generation == generation, self.progressViews[cardID] == key else { return }
+        self.cardLocations[cardID] = completion?.location
+        if completion == nil || completion?.delivered != nil {
+          self.progressViews.removeValue(forKey: cardID)
+        }
+      } catch {
+        // Result delivery is independent; transient cards are not persisted.
+      }
+    }.value
   }
 
   private func startProgress(
@@ -1502,38 +2207,57 @@ final class TelegramControl: ObservableObject {
     startedAt: Date
   ) {
     guard progressTasks[key] == nil, replies[key] != nil else { return }
+    progressContexts[key] = (model, startedAt)
     progressTasks[key] = Task { @MainActor [weak self, weak model] in
-      do { try await Task.sleep(for: .seconds(8)) } catch { return }
       guard let self, let model, self.generation == generation, self.replies[key] != nil,
         !Task.isCancelled
       else { return }
+      defer { self.progressTasks.removeValue(forKey: key) }
       let messageID: Int64?
       do {
         messageID = try await Self.send(
           self.progressStatus(for: model, startedAt: startedAt),
-          token: token, userID: userID,
+          token: token, userID: userID, keyboard: self.keyboard(for: "/status", cardModel: model),
           allowed: { [weak self] in self?.generation == generation && self?.replies[key] != nil })
       } catch { return }  // Progress is transient; do not persist or retry it.
       guard let messageID, self.generation == generation else { return }
       self.associate(messageID, with: model)
+      self.rememberCard(messageID, location: Self.cardLocation(for: model))
       if self.replies[key] == nil {
-        // The task finished while the initial progress message was in flight.
-        Task {
-          try? await Self.editProgress(
-            self.progressStatus(for: model, startedAt: startedAt) + "\n\n任务已结束，回复将单独发送。",
-            token: token, userID: userID, messageID: messageID)
-        }
+        self.progressViews[messageID] = key
+        await self.updateCompletedCard(
+          key: key, cardID: messageID,
+          token: token, userID: userID, generation: generation)
         return
       }
       self.progressCards[key] = messageID
+      self.progressViews[messageID] = key
       while self.generation == generation && self.replies[key] != nil && !Task.isCancelled {
         do { try await Task.sleep(for: .seconds(30)) } catch { break }
         guard self.generation == generation, self.replies[key] != nil, !Task.isCancelled else {
           break
         }
-        try? await Self.editProgress(
-          self.progressStatus(for: model, startedAt: startedAt),
-          token: token, userID: userID, messageID: messageID)
+        for cardID in self.progressViews.filter({ $0.value == key }).map(\.key) {
+          guard self.progressViews[cardID] == key, self.replies[key] != nil else { continue }
+          let revision = self.cardUpdates.current(cardID)
+          _ = await self.cardUpdates.enqueue(cardID, revision: revision) {
+            guard self.generation == generation, self.progressViews[cardID] == key,
+              self.replies[key] != nil
+            else { return }
+            let location = Self.cardLocation(for: model)
+            do {
+              try await Self.editProgress(
+                self.progressStatus(for: model, startedAt: startedAt),
+                token: token, userID: userID, messageID: cardID,
+                keyboard: self.keyboard(for: "/status", cardModel: model))
+              if self.generation == generation, self.progressViews[cardID] == key {
+                self.cardLocations[cardID] = location
+              }
+            } catch {
+              // Keep the previous card context if the edit was not delivered.
+            }
+          }.value
+        }
       }
     }
   }
@@ -1554,8 +2278,12 @@ final class TelegramControl: ObservableObject {
         details: details)
     }
     log("submitted", "model=\(model.selectedModelId)")
+    var lastStopReason: String?
     model.onTelegramLifecycleEvent = { [weak model] event in
       guard let model else { return }
+      if event.hasPrefix("message_end "), let range = event.range(of: " stop=") {
+        lastStopReason = String(event[range.upperBound...])
+      }
       TelegramDeliveryLog.record(event, task: key, sessionPath: model.currentSessionPath)
     }
     sessionPathObservations[key] = model.$currentSessionPath
@@ -1578,7 +2306,8 @@ final class TelegramControl: ObservableObject {
         guard let self, self.generation == generation, let model else { return }
         guard self.replies.removeValue(forKey: key) != nil else { return }
         model.onTelegramLifecycleEvent = nil
-        self.progressTasks.removeValue(forKey: key)?.cancel()
+        // Let an initial card send finish; it will render the recorded terminal state.
+        if self.progressCards[key] != nil { self.progressTasks.removeValue(forKey: key)?.cancel() }
         self.sessionPathObservations.removeValue(forKey: key)
         self.associate(prompt.messageID, with: model)
         if let project = model.projectURL?.standardizedFileURL.path,
@@ -1588,13 +2317,20 @@ final class TelegramControl: ObservableObject {
         }
         self.workspace?.remoteSessionChanged(
           in: model.projectURL, sessionPath: model.currentSessionPath)
+        let elapsed = Self.progressElapsed(startedAt: startedAt)
         let output = Self.latestReply(in: model.messages, excluding: existing)
+        let outcome = TelegramPresentation.taskOutcome(
+          stopReason: lastStopReason, hasReply: output != nil)
+        let error = model.messages.last {
+          !existing.contains($0.id) && $0.kind == .system && $0.isError
+        }?.text
         let project = model.projectURL?.standardizedFileURL.path
-        let textReply = output ?? "任务已结束，没有文本回复。"
+        let textReply = TelegramPresentation.resultText(
+          outcome: outcome, reply: output, error: error)
         var text = textReply
         if let project {
           var files: [URL] = []
-          for path in Self.outputFiles(in: textReply).prefix(30) {
+          for path in Self.outputFiles(in: output ?? "").prefix(30) {
             guard
               let url = try? Self.validOutputFile(
                 path, projectPath: project,
@@ -1615,39 +2351,66 @@ final class TelegramControl: ObservableObject {
             text += "\n\n📎 \(files.count) 个附件将单独发送。"
           }
         }
+        self.recordCompletion(
+          key: key, model: model, outcome: outcome, elapsed: elapsed, delivered: nil)
         // A newer successful response must not discard an older undelivered reply.
         self.sendingReplies += 1
         defer { self.sendingReplies -= 1 }
         var delivered = false
+        self.inFlightReplyIDs.insert(key)
+        defer { self.inFlightReplyIDs.remove(key) }
+        if let project {
+          self.unsentReplies[project, default: []].append(
+            TelegramUnsentReply(id: key, sessionPath: model.currentSessionPath, text: text))
+          TelegramUnsentReplyStore.save(self.unsentReplies, defaults: self.defaults)
+        }
         log("send_started", "characters=\(text.count)")
         do {
           try await Self.send(
             text, token: token, userID: userID,
             allowed: { [weak self] in self?.generation == generation },
-            onSent: { [weak self, weak model] id in self?.associate(id, with: model) })
+            onSent: { [weak self, weak model] id in
+              guard let self, self.generation == generation else { return }
+              self.associate(id, with: model)
+              if let project,
+                let index = self.unsentReplies[project]?.firstIndex(where: { $0.id == key })
+              {
+                self.unsentReplies[project]![index].deliveredChunks =
+                  (self.unsentReplies[project]![index].deliveredChunks ?? 0) + 1
+                TelegramUnsentReplyStore.save(self.unsentReplies, defaults: self.defaults)
+              }
+            })
           delivered = true
+          if self.generation == generation, let project {
+            self.unsentReplies[project]?.removeAll { $0.id == key }
+            if self.unsentReplies[project]?.isEmpty == true {
+              self.unsentReplies.removeValue(forKey: project)
+            }
+            TelegramUnsentReplyStore.save(self.unsentReplies, defaults: self.defaults)
+          }
           log("send_succeeded")
         } catch {
           log("send_failed", "errorType=\(String(describing: type(of: error)))")
           if self.generation == generation {
-            if let project {
-              self.unsentReplies[project, default: []].append(
-                TelegramUnsentReply(
-                  id: key, sessionPath: model.currentSessionPath,
-                  text: text))
-              TelegramUnsentReplyStore.save(self.unsentReplies, defaults: self.defaults)
+            if project != nil {
               log("reply_queued_for_retry")
-              self.scheduleReplyRetry(token: token, userID: userID, generation: generation)
+              self.status = "回复发送失败，正在后台重试。"
+              self.scheduleReplyRetry(
+                token: token, userID: userID, generation: generation, after: error)
             }
-            self.status = "回复发送失败，正在后台重试。"
           }
         }
-        if let cardID = self.progressCards.removeValue(forKey: key), self.generation == generation {
-          let state = delivered ? "✅ 回复已单独发送。" : "⚠️ 回复正在后台重试发送。"
-          try? await Self.editProgress(
-            self.progressStatus(for: model, startedAt: startedAt) + "\n\n" + state,
-            token: token, userID: userID, messageID: cardID)
+        self.progressCards.removeValue(forKey: key)
+        if self.generation == generation {
+          self.recordCompletion(
+            key: key, model: model, outcome: outcome, elapsed: elapsed, delivered: delivered)
+          for cardID in self.progressViews.filter({ $0.value == key }).map(\.key) {
+            await self.updateCompletedCard(
+              key: key, cardID: cardID,
+              token: token, userID: userID, generation: generation)
+          }
         }
+        self.progressContexts.removeValue(forKey: key)
         self.scheduleReplyRetry(token: token, userID: userID, generation: generation)
         self.pendingModels.remove(modelID)
         self.scheduleQueueDrain(for: model)
@@ -1657,7 +2420,9 @@ final class TelegramControl: ObservableObject {
           !self.pendingModels.contains(modelID),
           self.workspace?.extensionUI.hasPendingRequests(from: model) == false
         {
-          model.suspendProcess()
+          if self.workspace?.selectedModel !== model, !self.keepsProcessWarm(model) {
+            model.suspendProcess()
+          }
         }
       }
     }
@@ -1668,6 +2433,11 @@ final class TelegramControl: ObservableObject {
       }
       log(accepted ? "prompt_accepted" : "prompt_rejected")
       if accepted, let self, self.generation == generation, let model {
+        self.refreshQueueReceipt(
+          sourceMessageID: prompt.messageID,
+          text:
+            "⚡ 排队任务已提交\n项目  \(TelegramPresentation.compactLabel(model.projectURL?.lastPathComponent ?? "原项目", limit: 32))\n摘要  \(TelegramPresentation.compactLabel(prompt.preview, limit: 48))\n\n进度见状态卡 · 排队取消已失效"
+        )
         self.associate(prompt.messageID, with: model)
         self.workspace?.remoteSessionChanged(
           in: model.projectURL, sessionPath: model.currentSessionPath)
@@ -1678,16 +2448,21 @@ final class TelegramControl: ObservableObject {
       guard !accepted, let self, self.generation == generation,
         self.replies.removeValue(forKey: key) != nil
       else { return }
+      self.refreshQueueReceipt(
+        sourceMessageID: prompt.messageID,
+        text: "❌ 提交失败 · 不会自动重交\n请在 Mac 查看错误。")
       model?.onTelegramLifecycleEvent = nil
       self.progressTasks.removeValue(forKey: key)?.cancel()
       self.progressCards.removeValue(forKey: key)
+      self.progressContexts.removeValue(forKey: key)
+      self.progressViews = self.progressViews.filter { $0.value != key }
       self.sessionPathObservations.removeValue(forKey: key)
       self.pendingModels.remove(modelID)
       if let model { self.scheduleQueueDrain(for: model) }
       Task { @MainActor [weak self] in
         guard let self, self.generation == generation else { return }
         await self.deliverNotice(
-          "任务提交失败，请在 Mac 上查看错误并使用 /status 检查状态。",
+          "❌ 提交失败 · 不会自动重交\n请在 Mac 查看错误，点「状态」核实。",
           token: token, userID: userID, generation: generation,
           keyboard: self.keyboard(for: "/status"))
       }
@@ -1695,21 +2470,14 @@ final class TelegramControl: ObservableObject {
   }
 
   static func usageMessage(
-    accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?, now: Date = .now
+    accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?, now: Date = .now,
+    page requestedPage: Int = 1
   ) -> String {
     guard !accounts.isEmpty || gemini?.isConfigured == true else {
-      return "暂无账户额度数据。请在 Mac 上安装并启用 account-usage 扩展，等待额度同步后再试。"
+      return "暂无账户额度数据\n请在 Mac 启用 account-usage 并等待同步。"
     }
-    func percent(_ value: Double) -> String { "\(Int(value.rounded()))%" }
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    let currentYear = Calendar.current.component(.year, from: now)
-    func shortDate(_ date: Date) -> String {
-      formatter.dateFormat =
-        Calendar.current.component(.year, from: date) == currentYear
-        ? "MM/dd HH:mm" : "yy/MM/dd HH:mm"
-      return formatter.string(from: date)
-    }
+    let page = TelegramPresentation.page(
+      requestedPage, count: accounts.count, size: TelegramPresentation.accountPageSize)
     func resetCountdown(_ date: Date) -> String {
       let interval = date.timeIntervalSince(now)
       guard interval > 0 else { return "已到刷新时间" }
@@ -1724,7 +2492,9 @@ final class TelegramControl: ObservableObject {
       return parts.joined() + "后刷新"
     }
     func quotaLine(_ label: String, _ remaining: Double, _ resetAt: Date?) -> String {
-      "  \(label)  \(percent(remaining))\(resetAt.map { " → \(resetCountdown($0))" } ?? "")"
+      let warning = remaining.isFinite && remaining <= 15 ? " · ⚠️ 额度偏低" : ""
+      return
+        "  \(label)  \(TelegramPresentation.percent(remaining))\(resetAt.map { " → \(resetCountdown($0))" } ?? "")\(warning)"
     }
     func geminiLabel(_ window: String?) -> String {
       guard let window else { return "额度" }
@@ -1740,13 +2510,26 @@ final class TelegramControl: ObservableObject {
       }
       return "额度"
     }
-    var lines = ["📊 账户额度 · 剩余"]
-    for account in accounts {
+    var lines = [
+      "剩余额度 · \(page.number)/\(page.count) 页",
+      TelegramPresentation.cacheAge(updatedAt: updatedAt, now: now),
+    ]
+    if let updatedAt, now.timeIntervalSince(updatedAt) >= 900 {
+      lines.append("⚠️ 缓存较旧 · 以实际额度为准")
+    }
+    if !accounts.isEmpty {
       lines.append(
-        "\n\(account.isActive ? "●" : "○") Codex \(account.name)\(account.isDefault ? " · 默认" : "")"
+        "当前 Codex：\(TelegramPresentation.compactLabel(accounts.first(where: \.isActive)?.name ?? "待同步", limit: 32))"
+      )
+    }
+    for (offset, account) in accounts.dropFirst(page.start).prefix(page.end - page.start)
+      .enumerated()
+    {
+      lines.append(
+        "\n\(page.start + offset + 1). \(account.isActive ? "●" : "○") Codex \(TelegramPresentation.compactLabel(account.name, limit: 32))\(account.isDefault ? " · 默认" : "")"
       )
       if let error = account.error {
-        lines.append("  ⚠️ \(error)")
+        lines.append("  ⚠️ \(TelegramPresentation.compactLabel(error, limit: 80))")
       } else if account.isHidden {
         lines.append("  额度已隐藏")
       } else {
@@ -1765,10 +2548,10 @@ final class TelegramControl: ObservableObject {
         lines.append("  重置机会 ×\(credits.availableCount)")
       }
     }
-    if let gemini, gemini.isConfigured {
+    if page.number == 1, let gemini, gemini.isConfigured {
       lines.append("\n\(gemini.isActive ? "●" : "○") Gemini")
       if let error = gemini.error {
-        lines.append("  ⚠️ \(error)")
+        lines.append("  ⚠️ \(TelegramPresentation.compactLabel(error, limit: 80))")
       } else if gemini.quotas.isEmpty {
         lines.append("  暂无额度数据")
       } else {
@@ -1777,7 +2560,8 @@ final class TelegramControl: ObservableObject {
         }
       }
     }
-    if let updatedAt { lines.append("\n更新 \(shortDate(updatedAt))") }
+    if page.number > 1, gemini?.isConfigured == true { lines.append("\nGemini 额度在第 1 页") }
+    lines.append("\n● 当前账户 · 空闲时可切换\n仅本地缓存，不主动刷新额度。")
     return lines.joined(separator: "\n")
   }
 
@@ -1839,14 +2623,20 @@ final class TelegramControl: ObservableObject {
     project: String, session: String, sessionPath: String = "", firstPrompt: String? = nil,
     connection: ConnectionState, busy: Bool, loading: Bool, detail: String,
     model: String = "", thinking: String = "", contextPercent: Double? = nil,
-    account: String? = nil
+    account: String? = nil, queuedCount: Int = 0, elapsed: String? = nil,
+    waitingForConfirmation: Bool = false
   ) -> String {
     let state: String
     switch connection {
-    case .connected: state = loading ? "⏳ 正在加载配置" : (busy ? "⚡ 正在执行" : "✅ 就绪，可以发送任务")
-    case .connecting: state = "⏳ 正在连接"
-    case .disconnected: state = "⚪ 未连接"
-    case .failed(let reason): state = "🔴 连接失败：\(reason)"
+    case .connected:
+      state =
+        waitingForConfirmation
+        ? "⏸ 等待 Mac 确认"
+        : loading ? "⏳ 加载中" : (busy ? "⚡ 执行中" : "✅ 就绪")
+    case .connecting: state = "⏳ 连接中"
+    case .disconnected: state = "未连接"
+    case .failed(let reason):
+      state = "连接失败 · \(TelegramPresentation.compactLabel(reason, limit: 64))"
     }
     let prompt = firstPrompt?.split(whereSeparator: \.isWhitespace).joined(separator: " ") ?? ""
     let title =
@@ -1857,29 +2647,41 @@ final class TelegramControl: ObservableObject {
         : sessionPath.isEmpty || (connection == .connected && !loading)
           ? "新会话"
           : "会话"
+    let compactTitle = title.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    let displayTitle =
+      compactTitle.count > 32 ? String(compactTitle.prefix(32)) + "…" : compactTitle
     // A session's file name is stable across restarts. Show its suffix so two untitled
     // conversations with similar first prompts are still distinguishable.
     let fileID = String(
       URL(fileURLWithPath: sessionPath).deletingPathExtension().lastPathComponent.suffix(12))
     let sessionLabel =
       sessionPath.isEmpty
-      ? (connection == .connected ? title : "待连接")
-      : "\(title) · #\(fileID)"
-    let contextLabel =
-      contextPercent.flatMap { percent in
-        percent.isFinite ? String(format: "%.0f%%", percent) : nil
-      } ?? "待统计"
+      ? (connection == .connected ? displayTitle : "待连接")
+      : "\(displayTitle) · #\(fileID)"
+    let contextLabel = contextPercent.map { TelegramPresentation.percent($0) } ?? "待统计"
     var lines = [
-      "📍 Telegram 会话", "", "📁 项目  \(project)",
-      "💬 会话  \(sessionLabel)",
-      "🤖 模型  \(model.isEmpty ? "待加载" : model)",
-      "🧠 推理强度  \(model.isEmpty ? "待加载" : thinking)",
-      "👤 Codex 账户  \(account ?? "待同步")",
-      "📊 上下文  \(contextLabel)",
       state,
+      "项目  \(TelegramPresentation.compactLabel(project, limit: 32))",
+      "会话  \(sessionLabel)",
     ]
-    let detail = detail.trimmingCharacters(in: .whitespacesAndNewlines)
-    if !detail.isEmpty { lines.append("\nℹ️ \(detail)") }
+    if let elapsed { lines.append("耗时  \(elapsed)") }
+    if queuedCount > 0 { lines.append("排队  \(queuedCount) 条") }
+    lines += [
+      "",
+      "模型  \(model.isEmpty ? "待加载" : TelegramPresentation.compactLabel(model, limit: 44, preserveSuffix: true))",
+      "推理  \(model.isEmpty || thinking.isEmpty ? "待加载" : thinking)",
+      "账户  \(TelegramPresentation.compactLabel(account ?? "待同步", limit: 32))",
+      "上下文  \(contextLabel)\(contextPercent.map { $0.isFinite && $0 >= 85 ? " · ⚠️ 占用较高" : "" } ?? "")",
+    ]
+    if waitingForConfirmation {
+      lines.append("\n请在 Mac 处理扩展确认。")
+    }
+    let detail = TelegramPresentation.compactLabel(detail, limit: 80)
+    // Skip redundant runtime labels; keep actionable detail and provider errors.
+    if !detail.isEmpty && detail != "就绪" && detail != "正在执行" && detail != "已连接" {
+      lines.append("\n\(detail)")
+    }
+    lines.append("\n↩ 回复此卡 → 此会话，不改默认选择")
     return lines.joined(separator: "\n")
   }
 
@@ -1953,22 +2755,7 @@ final class TelegramControl: ObservableObject {
   }
 
   static func chunks(_ text: String, limit: Int = 3500) -> [String] {
-    // Telegram limits message length; count UTF-16 units conservatively, preserving scalars.
-    var result: [String] = []
-    var chunk = ""
-    var count = 0
-    for scalar in text.unicodeScalars {
-      let size = scalar.value > 0xFFFF ? 2 : 1
-      if count + size > limit {
-        result.append(chunk)
-        chunk = ""
-        count = 0
-      }
-      chunk.unicodeScalars.append(scalar)
-      count += size
-    }
-    if !chunk.isEmpty { result.append(chunk) }
-    return result
+    TelegramDelivery.chunks(text, limit: limit)
   }
 
   private static func sendDocument(
@@ -2000,105 +2787,36 @@ final class TelegramControl: ObservableObject {
       "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
     request.httpBody = body
     let (responseData, response) = try await URLSession.shared.data(for: request)
-    guard (response as? HTTPURLResponse)?.statusCode == 200,
-      let envelope = try? JSONDecoder().decode(Envelope<SentMessage>.self, from: responseData),
-      envelope.ok, envelope.result != nil
-    else { throw APIError.failed }
+    let _: SentMessage = try TelegramAPI.decode(
+      SentMessage.self, data: responseData, response: response, method: "sendDocument")
   }
 
   @discardableResult
   private static func send(
     _ text: String, token: String, userID: Int64,
-    keyboard: [[[String: String]]]? = nil, allowed: () -> Bool = { true },
-    onSent: ((Int64) -> Void)? = nil
+    keyboard: [[[String: String]]]? = nil, startingAt: Int = 0,
+    allowed: () -> Bool = { true }, onSent: ((Int64) -> Void)? = nil
   ) async throws -> Int64? {
-    let pieces = chunks(text.isEmpty ? "（空回复）" : text)
-    var lastID: Int64?
-    for (index, chunk) in pieces.enumerated() {
-      try Task.checkCancellation()
-      guard allowed() else { throw CancellationError() }
-      var body: [String: Any] = [
-        "chat_id": userID, "text": TelegramMarkdown.html(chunk), "parse_mode": "HTML",
-      ]
-      if index == pieces.count - 1, let keyboard {
-        body["reply_markup"] = ["inline_keyboard": keyboard]
-      }
-      let sent: SentMessage = try await call(token: token, method: "sendMessage", body: body)
-      lastID = sent.messageID
-      onSent?(sent.messageID)
-    }
-    return lastID
+    try await TelegramDelivery.send(
+      text, token: token, userID: userID, keyboard: keyboard,
+      startingAt: startingAt, allowed: allowed, onSent: onSent)
   }
   /// Update only a known command card; fall back to a new card if editing fails.
   private static func editOrSend(
     _ text: String, token: String, userID: Int64, messageID: Int64?,
     keyboard: [[[String: String]]]? = nil
   ) async throws -> Int64? {
-    guard let messageID else {
-      return try await send(text, token: token, userID: userID, keyboard: keyboard)
-    }
-    let pieces = chunks(text.isEmpty ? "（空回复）" : text)
-    var body: [String: Any] = [
-      "chat_id": userID, "message_id": messageID,
-      "text": TelegramMarkdown.html(pieces[0]), "parse_mode": "HTML",
-      "reply_markup": ["inline_keyboard": pieces.count == 1 ? (keyboard ?? []) : []],
-    ]
-    do {
-      let _: SentMessage = try await call(token: token, method: "editMessageText", body: body)
-    } catch APIError.notModified {
-      // The card already shows the same content.
-    } catch {
-      return try await send(text, token: token, userID: userID, keyboard: keyboard)
-    }
-    // Only oversized cards require extra messages.
-    var cardID = messageID
-    for (index, piece) in pieces.enumerated() where index > 0 {
-      try Task.checkCancellation()
-      body = ["chat_id": userID, "text": TelegramMarkdown.html(piece), "parse_mode": "HTML"]
-      if index == pieces.count - 1, let keyboard {
-        body["reply_markup"] = ["inline_keyboard": keyboard]
-      }
-      let sent: SentMessage = try await call(token: token, method: "sendMessage", body: body)
-      cardID = sent.messageID
-    }
-    return cardID
+    try await TelegramDelivery.editOrSend(
+      text, token: token, userID: userID,
+      messageID: messageID, keyboard: keyboard)
   }
 
-  private struct SentMessage: Decodable {
-    let messageID: Int64
-    enum CodingKeys: String, CodingKey { case messageID = "message_id" }
-  }
-  private struct Envelope<T: Decodable>: Decodable {
-    let ok: Bool
-    let result: T?
-  }
-  private enum APIError: Error { case failed, notModified }
-  private struct TelegramAPIError: Decodable { let description: String }
+  private typealias SentMessage = TelegramAPI.SentMessage
+  private typealias APIError = TelegramAPIError
 
   private static func call<T: Decodable>(token: String, method: String, body: [String: Any])
     async throws -> T
   {
-    guard let url = URL(string: "https://api.telegram.org/bot\(token)/\(method)") else {
-      throw APIError.failed
-    }
-    var request = URLRequest(url: url)
-    request.httpMethod = "POST"
-    request.timeoutInterval = 35
-    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    request.httpBody = try JSONSerialization.data(withJSONObject: body)
-    let (data, response) = try await URLSession.shared.data(for: request)
-    guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-      // Telegram returns 400 for an unchanged edit; do not create a duplicate card.
-      if method == "editMessageText", (response as? HTTPURLResponse)?.statusCode == 400,
-        let error = try? JSONDecoder().decode(TelegramAPIError.self, from: data),
-        error.description.contains("message is not modified")
-      {
-        throw APIError.notModified
-      }
-      throw APIError.failed
-    }
-    let envelope = try JSONDecoder().decode(Envelope<T>.self, from: data)
-    guard envelope.ok, let result = envelope.result else { throw APIError.failed }
-    return result
+    try await TelegramAPI.call(token: token, method: method, body: body)
   }
 }

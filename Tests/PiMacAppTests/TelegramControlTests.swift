@@ -32,7 +32,7 @@ final class TelegramControlTests: XCTestCase {
   }
 
   @MainActor
-  func testQuotedSessionSticksForFollowingUnquotedTextAndImages() {
+  func testQuotedSessionDoesNotChangeFollowingUnquotedTextAndImageRoute() {
     let suite = "PiMac.TelegramRoutingTests.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
@@ -43,15 +43,35 @@ final class TelegramControlTests: XCTestCase {
       project: "/projects/two", sessionPath: "/sessions/two.jsonl")
     sessions.remember(10, location: project3, defaults: defaults)
     sessions.remember(20, location: project2, defaults: defaults)
-    let pinned = TelegramControl.routeLocation(replyToID: 10, sessions: sessions, active: nil)
-    XCTAssertEqual(pinned, project3)
-    // Attachment and text messages share the same route when neither quotes a message.
+    // Explicitly selected session stays project2, even when one reply targets project3.
+    let selected = project2
     XCTAssertEqual(
-      TelegramControl.routeLocation(replyToID: nil, sessions: sessions, active: pinned), project3)
+      TelegramControl.routeLocation(replyToID: 10, sessions: sessions, active: selected), project3)
+    // Attachment and text messages without a reply still use the explicit selection.
     XCTAssertEqual(
-      TelegramControl.routeLocation(replyToID: 20, sessions: sessions, active: pinned), project2)
-    XCTAssertNil(TelegramControl.routeLocation(replyToID: 999, sessions: sessions, active: pinned))
+      TelegramControl.routeLocation(replyToID: nil, sessions: sessions, active: selected), project2)
+    XCTAssertEqual(
+      TelegramControl.routeLocation(replyToID: 20, sessions: sessions, active: selected), project2)
+    XCTAssertNil(
+      TelegramControl.routeLocation(replyToID: 999, sessions: sessions, active: selected))
     XCTAssertNil(TelegramControl.routeLocation(replyToID: nil, sessions: sessions, active: nil))
+  }
+
+  @MainActor
+  func testQueueNoticeIdentifiesProjectSessionAndPosition() {
+    let quoted = TelegramControl.queueNotice(
+      project: "PiMac", position: 2, originalSession: true, waitingForConnection: false)
+    XCTAssertTrue(quoted.hasPrefix("📥 任务已排队"))
+    XCTAssertTrue(quoted.contains("项目  PiMac"))
+    XCTAssertTrue(quoted.contains("原会话 · 不改默认选择"))
+    XCTAssertTrue(quoted.contains("排队  第 2 位"))
+    XCTAssertTrue(quoted.contains("完成后回传"))
+    let connecting = TelegramControl.queueNotice(
+      project: "Other", position: 1, originalSession: false, waitingForConnection: true)
+    XCTAssertTrue(connecting.contains("项目  Other"))
+    XCTAssertTrue(connecting.contains("目标  当前会话"))
+    XCTAssertTrue(connecting.contains("排队  第 1 位"))
+    XCTAssertTrue(connecting.contains("连接重试中，无需重发"))
   }
 
   func testRemotePromptsWaitInFIFOOrderAndRespectQueueLimit() {
@@ -361,62 +381,78 @@ final class TelegramControlTests: XCTestCase {
     let ready = TelegramControl.statusMessage(
       project: "demo", session: "", connection: .connected, busy: false,
       loading: false, detail: "  ")
-    XCTAssertTrue(ready.contains("📁 项目  demo"))
-    XCTAssertTrue(ready.contains("💬 会话  新会话"))
-    XCTAssertTrue(ready.contains("🤖 模型  待加载"))
-    XCTAssertTrue(ready.contains("🧠 推理强度  待加载"))
-    XCTAssertTrue(ready.contains("📊 上下文  待统计"))
+    XCTAssertTrue(ready.contains("项目  demo"))
+    XCTAssertTrue(ready.contains("会话  新会话"))
+    XCTAssertTrue(ready.contains("模型  待加载"))
+    XCTAssertTrue(ready.contains("推理  待加载"))
+    XCTAssertTrue(ready.contains("上下文  待统计"))
     let configured = TelegramControl.statusMessage(
       project: "demo", session: "", connection: .connected, busy: false,
       loading: false, detail: "", model: "anthropic/claude", thinking: "high",
       contextPercent: 82.6)
-    XCTAssertTrue(configured.contains("📊 上下文  83%"))
+    XCTAssertTrue(configured.contains("上下文  83%"))
     XCTAssertTrue(
       TelegramControl.statusMessage(
         project: "demo", session: "", connection: .connected, busy: false,
         loading: false, detail: "", contextPercent: .nan
-      ).contains("📊 上下文  待统计"))
-    XCTAssertTrue(configured.contains("🤖 模型  anthropic/claude"))
-    XCTAssertTrue(configured.contains("🧠 推理强度  high"))
-    XCTAssertTrue(configured.contains("👤 Codex 账户  待同步"))
+      ).contains("上下文  待统计"))
+    XCTAssertTrue(configured.contains("模型  anthropic/claude"))
+    XCTAssertTrue(configured.contains("推理  high"))
+    XCTAssertTrue(configured.contains("账户  待同步"))
     XCTAssertTrue(
       TelegramControl.statusMessage(
         project: "demo", session: "", connection: .connected, busy: false,
         loading: false, detail: "", account: "work"
-      ).contains("👤 Codex 账户  work"))
-    XCTAssertTrue(ready.contains("✅ 就绪，可以发送任务"))
+      ).contains("账户  work"))
+    XCTAssertTrue(ready.hasPrefix("✅ 就绪"))
     XCTAssertFalse(ready.contains("ℹ️"))
     let busy = TelegramControl.statusMessage(
       project: "demo", session: "任务", connection: .connected, busy: true,
       loading: false, detail: "等待工具执行")
-    XCTAssertTrue(busy.contains("⚡ 正在执行"))
-    XCTAssertTrue(busy.contains("ℹ️ 等待工具执行"))
+    XCTAssertTrue(busy.contains("⚡ 执行中"))
+    XCTAssertTrue(busy.contains("等待工具执行"))
     let disconnected = TelegramControl.statusMessage(
       project: "demo", session: "", connection: .disconnected, busy: false,
       loading: false, detail: "")
-    XCTAssertTrue(disconnected.contains("💬 会话  待连接"))
+    XCTAssertTrue(disconnected.contains("会话  待连接"))
     XCTAssertFalse(disconnected.contains("新会话"))
     let newSession = TelegramControl.statusMessage(
       project: "demo", session: "", sessionPath: "/tmp/session-123456789abc.jsonl",
       connection: .connected, busy: false, loading: false, detail: "")
-    XCTAssertTrue(newSession.contains("💬 会话  新会话 · #123456789abc"))
+    XCTAssertTrue(newSession.contains("会话  新会话 · #123456789abc"))
     let existing = TelegramControl.statusMessage(
       project: "demo", session: "", sessionPath: "/tmp/session-abcdef123456.jsonl",
       firstPrompt: "查找问题", connection: .connected, busy: false, loading: false, detail: "")
-    XCTAssertTrue(existing.contains("💬 会话  查找问题 · #abcdef123456"))
+    XCTAssertTrue(existing.contains("会话  查找问题 · #abcdef123456"))
     let named = TelegramControl.statusMessage(
       project: "demo", session: "任务", sessionPath: "/tmp/session-abcdef123456.jsonl",
       firstPrompt: "查找问题", connection: .connected, busy: false, loading: false, detail: "")
-    XCTAssertTrue(named.contains("💬 会话  任务 · #abcdef123456"))
+    XCTAssertTrue(named.contains("会话  任务 · #abcdef123456"))
     let disconnectedSession = TelegramControl.statusMessage(
       project: "demo", session: "", sessionPath: "/tmp/session-abcdef123456.jsonl",
       connection: .disconnected, busy: false, loading: false, detail: "")
-    XCTAssertTrue(disconnectedSession.contains("💬 会话  会话 · #abcdef123456"))
+    XCTAssertTrue(disconnectedSession.contains("会话  会话 · #abcdef123456"))
     XCTAssertTrue(
       TelegramControl.statusMessage(
         project: "demo", session: "", connection: .failed("断开"), busy: false,
         loading: false, detail: ""
-      ).contains("🔴 连接失败：断开"))
+      ).contains("连接失败 · 断开"))
+  }
+
+  @MainActor
+  func testStatusCardClarifiesReplyTargetAndCompactsLongTitles() {
+    let title = String(repeating: "很长的会话标题", count: 12)
+    let status = TelegramControl.statusMessage(
+      project: "demo", session: title, sessionPath: "/tmp/session-abcdef123456.jsonl",
+      connection: .connected, busy: true, loading: false, detail: "",
+      model: "openai/codex", thinking: "medium")
+    XCTAssertTrue(status.hasPrefix("⚡ 执行中"))
+    XCTAssertTrue(status.contains("↩ 回复此卡 → 此会话，不改默认选择"))
+    XCTAssertTrue(status.contains(String(title.prefix(32)) + "… · #abcdef123456"))
+    XCTAssertFalse(status.contains(title))
+    let stateIndex = status.range(of: "⚡ 执行中")!.lowerBound
+    let modelIndex = status.range(of: "模型")!.lowerBound
+    XCTAssertLessThan(stateIndex, modelIndex)
   }
 
   @MainActor
@@ -456,6 +492,56 @@ final class TelegramControlTests: XCTestCase {
   }
 
   @MainActor
+  func testProjectSwitchStatusHasABoundedWait() async {
+    let model = AppModel(restoreLastProjectOnLaunch: false)
+    model.connectionState = .connecting
+    model.isLoadingConfiguration = true
+    let start = ContinuousClock.now
+    await TelegramControl.waitForSessionStatus(in: model, timeout: 0.05)
+    XCTAssertLessThan(start.duration(to: .now), .seconds(0.5))
+    XCTAssertTrue(TelegramControl.needsStatusRefresh(model))
+    model.connectionState = .connected
+    XCTAssertTrue(TelegramControl.needsStatusRefresh(model))
+    model.isLoadingConfiguration = false
+    XCTAssertFalse(TelegramControl.needsStatusRefresh(model))
+    model.connectionState = .failed("启动失败")
+    XCTAssertFalse(TelegramControl.needsStatusRefresh(model))
+  }
+
+  @MainActor
+  func testRecentRemoteProjectsStayWarmWithoutChangingDesktopSelection() throws {
+    let suite = "PiMac.TelegramWarmProjects.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let telegram = TelegramControl(defaults: defaults)
+    let workspace = WorkspaceModel(telegram: telegram)
+    defer {
+      telegram.stop()
+      for tab in workspace.tabs { tab.model.disconnect() }
+    }
+    let desktopSelection = workspace.selectedTabID
+    let first = WorkspaceProject(url: URL(fileURLWithPath: "/tmp/warm-first"))
+    let second = WorkspaceProject(url: URL(fileURLWithPath: "/tmp/warm-second"))
+    let third = WorkspaceProject(url: URL(fileURLWithPath: "/tmp/warm-third"))
+    let firstModel = try XCTUnwrap(telegram.selectProject(first, in: workspace))
+    let secondModel = try XCTUnwrap(telegram.selectProject(second, in: workspace))
+    XCTAssertTrue(telegram.keepsProcessWarm(firstModel))
+    XCTAssertTrue(telegram.keepsProcessWarm(secondModel))
+    let thirdModel = try XCTUnwrap(telegram.selectProject(third, in: workspace))
+    XCTAssertFalse(telegram.keepsProcessWarm(firstModel))
+    XCTAssertTrue(telegram.keepsProcessWarm(secondModel))
+    XCTAssertTrue(telegram.keepsProcessWarm(thirdModel))
+    secondModel.connectionState = .connected
+    secondModel.selectedModelId = "cached/model"
+    XCTAssertTrue(telegram.selectProject(second, in: workspace) === secondModel)
+    XCTAssertEqual(secondModel.selectedModelId, "cached/model")
+    XCTAssertEqual(secondModel.connectionState, .connected)
+    XCTAssertEqual(workspace.selectedTabID, desktopSelection)
+    telegram.stop()
+    XCTAssertFalse(telegram.keepsProcessWarm(secondModel))
+  }
+
+  @MainActor
   func testLatestReplyIgnoresHistoryAndSystemMessages() {
     let old = ChatEntry(id: "old", kind: .assistant, title: "助手", text: "旧回复")
     let first = ChatEntry(id: "first", kind: .assistant, title: "助手", text: "第一段")
@@ -472,7 +558,7 @@ final class TelegramControlTests: XCTestCase {
     XCTAssertEqual(
       TelegramControl.botCommands.compactMap { $0["command"] },
       [
-        "projects", "sessions", "status", "model", "thinking", "usage", "accounts", "new",
+        "projects", "sessions", "status", "queue", "model", "thinking", "usage", "new",
         "compact", "stop", "help",
       ])
     XCTAssertTrue(
@@ -482,18 +568,20 @@ final class TelegramControlTests: XCTestCase {
   @MainActor
   func testHelpGroupsCommandsAndExplainsHowToStart() {
     let help = TelegramControl.help
-    XCTAssertTrue(help.contains("先用 /projects 下方的按钮选项目，随后会自动显示会话状态"))
-    XCTAssertTrue(help.contains("发送文本、照片或文件（可附说明）"))
-    XCTAssertTrue(help.contains("/compact  空闲时压缩当前会话上下文"))
-    XCTAssertTrue(help.contains("📁 项目与会话"))
-    XCTAssertTrue(help.contains("⚙️ 设置与额度"))
-    XCTAssertTrue(help.contains("⏹ 任务与回复"))
+    XCTAssertTrue(help.contains("先选项目，再发送文本、照片或文件"))
+    XCTAssertTrue(help.contains("文件 ≤20 MB"))
+    XCTAssertTrue(help.contains("/compact  压缩上下文"))
+    XCTAssertTrue(help.contains("\n会话\n"))
+    XCTAssertTrue(help.contains("\n设置\n"))
+    XCTAssertTrue(help.contains("\n任务\n"))
+    XCTAssertLessThan(help.count, 500)
     for command in TelegramControl.botCommands.compactMap({ $0["command"] }) {
       XCTAssertTrue(help.contains("/\(command) "), "帮助缺少 /\(command)")
     }
-    XCTAssertTrue(help.contains("回传失败的回复会在后台自动重试"))
+    XCTAssertFalse(help.contains("/accounts"), "Legacy alias must not duplicate the usage entry")
+    XCTAssertTrue(help.contains("回传失败自动重试"))
     XCTAssertFalse(help.contains("/last"))
-    XCTAssertTrue(help.contains("扩展确认仍需在 Mac 上完成"))
+    XCTAssertTrue(help.contains("扩展确认在 Mac 完成"))
   }
 
   @MainActor
@@ -502,13 +590,13 @@ final class TelegramControlTests: XCTestCase {
       project: "demo", session: "任务", sessionPath: "/tmp/session-abcdef123456.jsonl",
       connection: .connected, busy: true, loading: false, detail: "正在执行工具",
       model: "openai/codex", thinking: "high", contextPercent: 42, account: "work")
-    XCTAssertTrue(status.contains("💬 会话  任务 · #abcdef123456"))
-    XCTAssertTrue(status.contains("🤖 模型  openai/codex"))
-    XCTAssertTrue(status.contains("🧠 推理强度  high"))
-    XCTAssertTrue(status.contains("👤 Codex 账户  work"))
-    XCTAssertTrue(status.contains("📊 上下文  42%"))
-    XCTAssertTrue(status.contains("⚡ 正在执行"))
-    XCTAssertTrue(status.contains("ℹ️ 正在执行工具"))
+    XCTAssertTrue(status.contains("会话  任务 · #abcdef123456"))
+    XCTAssertTrue(status.contains("模型  openai/codex"))
+    XCTAssertTrue(status.contains("推理  high"))
+    XCTAssertTrue(status.contains("账户  work"))
+    XCTAssertTrue(status.contains("上下文  42%"))
+    XCTAssertTrue(status.contains("⚡ 执行中"))
+    XCTAssertTrue(status.contains("正在执行工具"))
   }
 
   @MainActor
@@ -637,6 +725,10 @@ final class TelegramControlTests: XCTestCase {
     XCTAssertEqual(
       try callback(command: "thinking:xhigh").authorizedCallback(userID: 42)?.command,
       "thinking:xhigh")
+    XCTAssertEqual(
+      try callback(command: "/status 2").authorizedCallback(userID: 42)?.command, "/status 2")
+    XCTAssertNil(try callback(command: "/status 0").authorizedCallback(userID: 42))
+    XCTAssertNil(try callback(command: "/status -1").authorizedCallback(userID: 42))
     XCTAssertNil(try callback(command: "model:0").authorizedCallback(userID: 42))
     XCTAssertNil(try callback(command: "thinking:invalid").authorizedCallback(userID: 42))
     XCTAssertNil(try callback(user: 43).authorizedCallback(userID: 42))
@@ -767,7 +859,7 @@ final class TelegramControlTests: XCTestCase {
       XCTAssertTrue(message.contains("5h  87% → \(expected)"), message)
       XCTAssertTrue(message.contains("7d  87% → \(expected)"), message)
       XCTAssertTrue(message.contains("7d  100% → \(expected)"), message)
-      XCTAssertTrue(message.contains("\n更新 "))
+      XCTAssertTrue(message.contains("仅本地缓存，不主动刷新额度"))
     }
   }
 

@@ -28,6 +28,8 @@ struct TelegramUnsentReply: Codable, Equatable {
   let id: UUID
   let sessionPath: String
   let text: String
+  // Optional for backwards-compatible decoding of older persisted replies.
+  var deliveredChunks: Int? = nil
 }
 
 enum TelegramUnsentReplyStore {
@@ -53,12 +55,21 @@ struct TelegramPendingNotice: Codable, Equatable {
   let text: String
   let keyboard: [[[String: String]]]?
   let sourceMessageID: Int64?
+  var editMessageID: Int64? = nil
+  var cardRevision: UUID? = nil
+  var deliveredChunks: Int? = nil
 
-  init(id: UUID, text: String, keyboard: [[[String: String]]]?, sourceMessageID: Int64? = nil) {
+  init(
+    id: UUID, text: String, keyboard: [[[String: String]]]?, sourceMessageID: Int64? = nil,
+    editMessageID: Int64? = nil, deliveredChunks: Int? = nil, cardRevision: UUID? = nil
+  ) {
     self.id = id
     self.text = text
     self.keyboard = keyboard
     self.sourceMessageID = sourceMessageID
+    self.editMessageID = editMessageID
+    self.cardRevision = cardRevision
+    self.deliveredChunks = deliveredChunks
   }
 }
 

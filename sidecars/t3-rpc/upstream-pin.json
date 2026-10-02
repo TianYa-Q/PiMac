@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/pingdotgg/t3code",
+  "commit": "a97a4a9d189f145afe79c3a6f8533bbf9a6b40b1",
+  "effect": "4.0.0-rc.115",
+  "files": {
+    "baseSchemas.ts": "25eb73528c2833f97483430b08fbb9ba85fc80147c97f8aa4e8064125f1f156b",
+    "composerContext.ts": "ad0b4963b6dd09d64f745fb2127bfe75a43d59f87a1b0e77c56524a76a839cb0",
+    "environment.ts": "c234e321797907abdf6049404c6f582859400db63bc15129079464ea20261e1b",
+    "model.ts": "a1df6e2451860491f69fd6ff1f33d37383843916e2f7eba9edf6b8f890eb0894",
+    "orchestration.ts": "265130e3f14449ae6e34e06494db1814bf65a16cfe15ea193f47e19ad88b0958",
+    "providerInstance.ts": "0a1fea758707473021ff0e340015a464ff1af785a4bb842b8976a574acb0afaf",
+    "pullRequest.ts": "f733f630ec542e9ca6472f8b77a5b671d227efae09da9a5a1a5a7bf1178d22cd",
+    "sourceControl.ts": "4258d6a8cd0fcc8013bf035f69649ff17e99fef44a813372a6b508aae31dc013",
+    "vcs.ts": "8bf0651da82b7541fbdae3d2eaaa7be812d7379f4d4139c88000c1c3fcd3bb77",
+    "auth.ts": "a569801f30dd01dc02889d28553fdd99e38aa9eeccf8e06075b4196daf357cdb",
+    "browserProfile.ts": "8a7641b2103183e8d1ae09b1213562e9706c9a2c482ead92465e5fe70fd67126",
+    "device.ts": "0daa07277708557784b1787d1b2d02c0ebb251414bacfc6aef697927ea228185",
+    "editor.ts": "cd9102866660fcaffc2c6cf6a5dcbc0e10f4e93551848078c4213ecbee86e280",
+    "keybindings.ts": "8ecfab483e6f2304e322e381fcadbf1e92c46a1fb45dfc5f60cc126623ca8805",
+    "preview.ts": "e5b47d3df2f8ffb683e3696bb6db8028856cbd0af20c55164ce281b4b1bdf57b",
+    "providerUsageLimits.ts": "013153dbd3252c99c7a30270d4aabb4d3263e13ea8abf04f9866a86476829f5b",
+    "server.ts": "94052632893134a7c8ff503073bf8894cdde2e2f3d1b5c1cf189e8cef8f13614",
+    "settings.ts": "0a0a9ae09c6adec677f718ac6b10b19b8c510db815c536299bd2da2216e74688",
+    "usageLimitSourceId.ts": "bde1b1042a49cd4e409defcb0358aabec5442522f07f14f41c0acc895c16d80c"
+  }
+}
