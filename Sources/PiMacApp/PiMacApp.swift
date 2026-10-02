@@ -7,6 +7,9 @@ final class DevelopmentReloader: ObservableObject {
   private let executable: URL?
   private var originalModification: Date?
   private let revisionFile: URL?
+  private let stateFile: URL?
+  private let requestFile: URL?
+  private var idleSince: Date?
   private var pendingSince: Date?
   private var reloading = false
 
@@ -19,13 +22,40 @@ final class DevelopmentReloader: ObservableObject {
     revisionFile = ProcessInfo.processInfo.environment["PIMAC_DEV_RELOAD_REVISION"].map {
       URL(fileURLWithPath: $0)
     }
+    stateFile = ProcessInfo.processInfo.environment["PIMAC_DEV_STATE_PATH"].map {
+      URL(fileURLWithPath: $0)
+    }
+    requestFile = ProcessInfo.processInfo.environment["PIMAC_DEV_REQUEST_PATH"].map {
+      URL(fileURLWithPath: $0)
+    }
     originalModification = (revisionFile ?? executable).flatMap {
       (try? FileManager.default.attributesOfItem(atPath: $0.path)[.modificationDate]) as? Date
     }
   }
 
   func check(workspace: WorkspaceModel) {
-    guard !reloading, let executable, let originalModification,
+    guard !reloading, executable != nil else { return }
+    let blockers = workspace.restartBlockers
+    if blockers.isEmpty {
+      if idleSince == nil { idleSince = .now }
+    } else {
+      idleSince = nil
+    }
+    // Publish a fresh, atomic heartbeat. The watcher never builds based on a
+    // missing/stale heartbeat, and waits for two seconds of continuous idle.
+    if let stateFile {
+      let idle = idleSince.map { Date.now.timeIntervalSince($0) >= 2 } ?? false
+      let state: [String: Any] = ["timestamp": Date.now.timeIntervalSince1970, "idle": idle]
+      if let data = try? JSONSerialization.data(withJSONObject: state) {
+        try? data.write(to: stateFile, options: .atomic)
+      }
+    }
+    let requested = requestFile.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+    workspace.developmentReloadStatus = requested
+      ? (blockers.isEmpty ? "源码已更新，等待空闲构建…" : "源码待构建：\(blockers.joined(separator: "、"))")
+      : ""
+    // Do not restart a previously built revision while newer edits are pending.
+    guard !requested, let executable, let originalModification,
       let modified = (try? FileManager.default.attributesOfItem(
         atPath: (revisionFile ?? executable).path)[.modificationDate]) as? Date,
       modified > originalModification
@@ -34,27 +64,38 @@ final class DevelopmentReloader: ObservableObject {
       pendingSince = .now
       return
     }
-    let blockers = workspace.restartBlockers
     workspace.developmentReloadStatus = blockers.isEmpty
       ? "新版构建就绪，准备空闲重启…" : "新版等待重启：\(blockers.joined(separator: "、"))"
     guard let pendingSince, Date.now.timeIntervalSince(pendingSince) >= 2,
       blockers.isEmpty
     else { return }
 
-    // Wait for the old process to exit before exec-ing the new binary (Telegram long polling
-    // must not have two owners). Retain the development environment across the relaunch.
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/sh")
-    process.arguments = [
-      "-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "--",
-      "\(ProcessInfo.processInfo.processIdentifier)", executable.path,
-    ]
-    do {
-      try process.run()
-      reloading = true
-      NSApp.terminate(nil)
-    } catch {
-      NSLog("Pi Mac development reload failed: %@", String(describing: error))
+    reloading = true
+    Task {
+      // Parent exit is not a shutdown barrier: Node is detached and can still
+      // own child-owner.json after PiMac exits. Drain services while the main
+      // actor is alive so its termination handler also releases owner.lock.
+      workspace.developmentReloadStatus = "正在停止旧版服务，等待安全重启…"
+      workspace.disconnectAll()
+      guard await workspace.t3Bridge.stopAndWait() else {
+        workspace.developmentReloadStatus = "自动重启已取消：旧 T3 服务或服务锁未释放，请停止监听器后检查。"
+        NSLog("Pi Mac development reload cancelled: T3 shutdown barrier failed")
+        return
+      }
+      // Retain the development environment, but never run two app owners.
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/bin/sh")
+      process.arguments = [
+        "-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "--",
+        "\(ProcessInfo.processInfo.processIdentifier)", executable.path,
+      ]
+      do {
+        try process.run()
+        NSApp.terminate(nil)
+      } catch {
+        workspace.developmentReloadStatus = "自动重启失败，请停止监听器后重新启动。"
+        NSLog("Pi Mac development reload failed: %@", String(describing: error))
+      }
     }
   }
 }
@@ -64,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // SwiftPM 直接运行的可执行文件没有完整 .app 启动流程，AppKit 有时不会
     // 自动把它激活；窗口虽然可见，键盘事件却仍发往之前的应用。
     NSApp.setActivationPolicy(.regular)
+    Task { await TaskStatusNotifications.shared.requestPermission() }
 
     // `setActivationPolicy` 会创建 Dock 图块并重置之前设置的图标，因此必须
     // 在它之后从 SwiftPM 资源包中应用图标。

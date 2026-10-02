@@ -39,6 +39,62 @@ struct T3DesktopTests {
     #expect(deliveries == 3)
   }
 
+  @Test func connectionFailuresShowStageWithoutLeakingErrorDetails() {
+    let error = NSError(domain: NSURLErrorDomain, code: URLError.timedOut.rawValue,
+      userInfo: [NSLocalizedDescriptionKey: "secret-token private-prompt"])
+    let status = T3DesktopClient.connectionFailureStatus(error, phase: "同步模型配置")
+    #expect(status.contains("同步模型配置：请求超时"))
+    #expect(!status.contains("secret-token"))
+    #expect(!status.contains("private-prompt"))
+    #expect(T3DesktopClient.connectionFailureStatus(
+      T3DesktopClient.ClientError.unauthorized, phase: "读取会话状态").contains("授权已失效"))
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func desktopReconnectsAfterServerRestartWithoutRestartingClient() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .deletingLastPathComponent().deletingLastPathComponent()
+    let fixture = repository.appendingPathComponent("sidecars/t3-server/tests/fixtures/pi.mjs")
+    let binary = root.appendingPathComponent("fixture-pi")
+    try "#!/bin/sh\nexec node \"\(fixture.path)\" \"$@\"\n".write(
+      to: binary, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
+    let suite = "pimac-reconnect-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(binary.path, forKey: "piPath")
+    let workspace = WorkspaceModel(restoreUserState: false)
+    let service = T3BridgeService(defaults: defaults)
+    let client = T3DesktopClient(defaults: defaults)
+    defer { client.stop(); service.stop(); workspace.disconnectAll() }
+    let state = root.appendingPathComponent("state")
+    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
+    client.start(service: service)
+    try await client.waitUntilReady()
+    #expect(!client.providers.isEmpty)
+    // This is the same shutdown barrier used by development hot reload.
+    #expect(await service.stopAndWait())
+    let marker = state.appendingPathComponent("child-owner.json")
+    #expect(!FileManager.default.fileExists(atPath: marker.path))
+    #expect(!service.isStopping)
+    for _ in 0..<100 where client.isConnected {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(!client.isConnected)
+    // A forced/crashed child can leave a marker: do not delete it or relaunch.
+    try Data("stale marker".utf8).write(to: marker)
+    #expect(await service.stopAndWait() == false)
+    #expect(FileManager.default.fileExists(atPath: marker.path))
+    try FileManager.default.removeItem(at: marker)
+    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
+    try await client.waitUntilReady()
+    #expect(!client.providers.isEmpty)
+    #expect(client.status == "T3 Server 已连接")
+  }
+
   @Test func reusableDateParsersSupportBothTimestampFormats() {
     let seconds = T3DesktopClient.date("2026-10-03T00:00:00Z")
     let fractional = T3DesktopClient.date("2026-10-03T00:00:00.125Z")
@@ -151,6 +207,10 @@ struct T3DesktopTests {
     #expect(code.toolInput == "const value = 1;\ntext(value);")
     #expect(code.text == "Script completed\nOutput:\n1")
     #expect(code.nestedCalls.first?.input == "nested.txt")
+    #expect(code.childToolEntries.count == 1)
+    #expect(code.childToolEntries.first?.toolInput == "nested.txt")
+    #expect(code.childToolEntries.first?.text == "nested output")
+    #expect(!model.messages.contains { $0.toolInput == "nested.txt" })
     #expect(model.messages.contains { $0.kind == .assistant })
     #expect(model.lastSettledTurnID != nil)  // Also covers turns completed between polls.
     #expect(model.terminalStopReason == nil)

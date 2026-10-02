@@ -9,42 +9,49 @@ struct T3SettingsView: View {
   private let timer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
   var body: some View {
-    GroupBox("T3 iOS 连接 · Tunnel") {
-      VStack(alignment: .leading, spacing: 16) {
-        Text("使用 App Store 版 T3 iOS，登录与 Mac 相同的账号，通过官方 Tunnel 查看会话、发送消息与管理任务。")
+    VStack(alignment: .leading, spacing: 16) {
+      HStack(spacing: 12) {
+        Image(systemName: "iphone.and.arrow.forward")
+          .font(.title2).foregroundStyle(.tint)
+        VStack(alignment: .leading, spacing: 4) {
+          Text("连接 T3 iOS").font(.headline)
+          Text("在 iPhone 登录同一账号，通过官方 Tunnel 访问会话与任务。")
+            .font(.caption).foregroundStyle(.secondary)
+        }
+      }
+      .padding(.bottom, 2)
+
+      if service.port != nil {
+        connectView
+        devicesView
+      } else {
+        card {
+          Label(service.status, systemImage: "server.rack")
+            .font(.callout).foregroundStyle(.secondary)
+        }
+      }
+
+      card {
+        DisclosureGroup {
+          VStack(alignment: .leading, spacing: 10) {
+            Text("使用 App Store 版 T3 iOS，登录与 Mac 相同的账号，并开启系统通知、任务完成通知及锁屏实时活动。")
+            Text("仅支持官方托管 Tunnel，不再提供 LAN 配对。请在手机 Environments 中删除旧的 Pi Mac · LAN 条目，再开启 Pi Mac · Tunnel。")
+            Text("官方 Server 管理账号、隧道与通知；原生 Workspace 仍独占 Pi 进程和会话写入。暂停上报只暂停通知，不会关闭隧道；退出绑定才会停止隧道。")
+            Text("尚未完成 App Store 客户端与真实通知验收。")
+          }
           .font(.caption).foregroundStyle(.secondary)
-        Text(service.status).font(.caption).foregroundStyle(.secondary)
-        if service.port != nil {
-          connectView
-          HStack {
-            Text("已授权设备（\(service.clients.count)）").font(.headline)
-            Spacer()
-            Button("刷新") { Task { await service.refreshClients() } }
-              .disabled(service.managementBusy)
-          }
-          ForEach(service.clients) { client in
-            HStack {
-              VStack(alignment: .leading) {
-                Text(client.name)
-                Text(client.connected ? "WebSocket 已连接" : "已授权 · 当前未连接")
-                  .font(.caption).foregroundStyle(.secondary)
-              }
-              Spacer()
-              Button("撤销授权", role: .destructive) { Task { await service.revokeClient(client.id) } }
-                .disabled(service.managementBusy)
-            }
-          }
+          .padding(.top, 8)
+        } label: {
+          Label("手机设置与连接说明", systemImage: "info.circle").font(.callout)
         }
-        if let diagnostic = service.connectStatus?.networkDiagnostic, !diagnostic.isEmpty {
-          DisclosureGroup("Tunnel 连接诊断（脱敏）") {
-            Text(diagnostic).font(.caption.monospaced()).textSelection(.enabled)
-          }
-        }
-        if !service.managementMessage.isEmpty {
-          Text(service.managementMessage).font(.caption).foregroundStyle(.secondary)
-        }
-      }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+      }
+
+      if !service.managementMessage.isEmpty {
+        Text(service.managementMessage).font(.caption).foregroundStyle(.secondary)
+          .textSelection(.enabled)
+      }
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
     .task(id: service.port) { await service.refreshClients() }
     .onReceive(timer) { _ in Task { await service.refreshClients() } }
     .confirmationDialog(
@@ -68,70 +75,159 @@ struct T3SettingsView: View {
   }
 
   private var connectView: some View {
-    GroupBox("T3 Connect 与 Cloudflare Tunnel（官方 Server）") {
-      VStack(alignment: .leading, spacing: 8) {
-        Text("官方 Server 管理账号、隧道与通知；原生 Workspace 仍独占 Pi 进程和会话写入。暂停上报只暂停通知，不会关闭隧道；退出绑定才会停止隧道。")
-          .font(.caption).foregroundStyle(.secondary)
-        if let status = service.connectStatus {
-          Text(
-            status.linked
-              ? (status.enabled ? "官方环境已绑定 · 状态上报已开启" : "官方环境已绑定 · 状态上报已暂停") : (status.authorized == true ? "账号已授权 · 环境尚未绑定" : "尚未绑定官方账号"))
-          if !status.account.isEmpty {
-            Text("官方账号 ID：\(status.account)").font(.caption).textSelection(.enabled)
+    card {
+      HStack {
+        Label("官方连接", systemImage: "network").font(.headline)
+        Spacer()
+        if service.connectBusy {
+          ProgressView().controlSize(.small)
+        }
+      }
+      if let status = service.connectStatus {
+        HStack(alignment: .top, spacing: 10) {
+          Image(systemName: status.linked ? "checkmark.circle.fill" : "link.circle")
+            .foregroundStyle(status.linked ? Color.green : Color.secondary)
+            .font(.title3)
+          VStack(alignment: .leading, spacing: 4) {
+            Text(status.linked ? "官方环境已绑定" : (status.authorized == true ? "账号已授权 · 等待绑定" : "尚未绑定官方账号"))
+              .font(.body.weight(.medium))
+            Text(status.linked
+              ? (status.enabled ? "状态上报已开启" : "状态上报已暂停 · 隧道仍保持开启")
+              : "授权后即可通过官方 Tunnel 连接此 Mac。")
+              .font(.caption).foregroundStyle(.secondary)
           }
-          if let count = status.deviceCount { Text("同账号开启通知的 iOS 设备：\(count)").font(.caption) }
-          if let tunnel = status.tunnelStatus {
-            Text("最近隧道配置反馈：\(tunnel)（不代表公网已可达）").font(.caption)
-          }
-          if let endpoint = status.tunnelURL, !endpoint.isEmpty {
-            Text("官方公网地址：\(endpoint)").font(.caption).textSelection(.enabled)
-          }
-          HStack {
-            if status.loginPending {
-              Button("取消等待登录") { Task { await service.connectAction("cancel-login") } }
-            } else if status.linked {
-              Button(status.enabled ? "暂停上报" : "恢复上报") {
-                Task { await service.connectAction(status.enabled ? "disable" : "enable") }
-              }
+        }
+
+        HStack(spacing: 8) {
+          if status.loginPending {
+            Button("取消等待登录") { Task { await service.connectAction("cancel-login") } }
+          } else if status.linked {
+            Button(status.enabled ? "暂停上报" : "恢复上报") {
+              Task { await service.connectAction(status.enabled ? "disable" : "enable") }
+            }
+            Button("重新授权") { Task { await service.connectAction("reauthorize") } }
+            Spacer()
+            Button("退出并撤销绑定", role: .destructive) { showConnectLogout = true }
+          } else {
+            Button("登录并绑定账号") { showConnectConsent = true }
+              .buttonStyle(.borderedProminent)
+            if status.authorized == true {
+              Button("重试绑定") { Task { await service.connectAction("retry-link") } }
               Button("重新授权") { Task { await service.connectAction("reauthorize") } }
-              Button("退出并撤销绑定", role: .destructive) { showConnectLogout = true }
-            } else {
-              Button("通过官方网页登录（支持 Apple）") { showConnectConsent = true }
-              if status.authorized == true {
-                Button("重试已授权的绑定") { Task { await service.connectAction("retry-link") } }
-                Button("重新授权") { Task { await service.connectAction("reauthorize") } }
-              }
             }
             Spacer()
-            Button(status.linked ? "查询官方设备" : "刷新") {
-              Task {
-                if status.linked {
-                  await service.connectAction("refresh-devices")
-                } else {
-                  await service.refreshClients()
-                }
-              }
-            }
-          }.disabled(service.connectBusy || status.busy || !status.available)
-          if !status.message.isEmpty {
-            Text(status.message).font(.caption).foregroundStyle(.secondary)
           }
-          Text(
-            "本次上报：\(status.accepted)/\(status.requests) 已接受；投递排队 \(status.queuedDeliveries)，服务端成功 \(status.successfulDeliveries)，失败 \(status.failedDeliveries)。不代表手机已显示通知。"
-          )
-          .font(.caption).foregroundStyle(.secondary)
-        } else {
-          Text("读取连接状态中…").font(.caption).foregroundStyle(.secondary)
+        }
+        .controlSize(.small)
+        .disabled(service.connectBusy || status.busy || !status.available)
+
+        if !status.message.isEmpty {
+          Text(status.message).font(.caption).foregroundStyle(.secondary)
         }
         if !service.connectMessage.isEmpty {
           Text(service.connectMessage).font(.caption).foregroundStyle(.secondary)
         }
-        Text(
-          "手机须在 T3 iOS 登录同一账号，并开启系统通知、任务完成通知及锁屏实时活动。只通过官方托管 Tunnel 连接，不再提供 LAN 配对。请在手机 Environments 中删除旧的 Pi Mac · LAN 条目，再开启 Pi Mac · Tunnel。尚未完成 App Store 客户端与真实通知验收。"
-        )
-        .font(.caption).foregroundStyle(.secondary)
-      }.frame(maxWidth: .infinity, alignment: .leading)
+
+        Divider()
+        DisclosureGroup {
+          VStack(alignment: .leading, spacing: 12) {
+            detailRow("本机服务", value: service.status)
+            if !status.account.isEmpty { detailRow("官方账号 ID", value: status.account) }
+            if let count = status.deviceCount {
+              detailRow("开启通知的 iOS 设备", value: "\(count)")
+            }
+            if let tunnel = status.tunnelStatus {
+              detailRow("隧道配置反馈", value: "\(tunnel)（不代表公网已可达）")
+            }
+            if let endpoint = status.tunnelURL, !endpoint.isEmpty {
+              detailRow("官方公网地址", value: endpoint)
+            }
+            HStack {
+              Button("查询官方设备") { Task { await service.connectAction("refresh-devices") } }
+                .disabled(!status.linked || service.connectBusy || status.busy || !status.available)
+              Spacer()
+            }
+            Divider()
+            Text("本次上报").font(.caption.weight(.medium))
+            Text("\(status.accepted)/\(status.requests) 已接受 · 排队 \(status.queuedDeliveries) · 服务端成功 \(status.successfulDeliveries) · 失败 \(status.failedDeliveries)")
+              .font(.caption.monospacedDigit())
+            Text("服务端统计不代表手机已显示通知。")
+              .font(.caption).foregroundStyle(.secondary)
+          }
+          .padding(.top, 10)
+        } label: {
+          Text("账号与上报详情").font(.callout)
+        }
+      } else {
+        HStack(spacing: 8) {
+          ProgressView().controlSize(.small)
+          Text("读取连接状态中…").font(.caption).foregroundStyle(.secondary)
+          Spacer()
+          Button("刷新") { Task { await service.refreshClients() } }
+            .disabled(service.managementBusy)
+        }
+      }
+      if let diagnostic = service.connectStatus?.networkDiagnostic, !diagnostic.isEmpty {
+        DisclosureGroup("Tunnel 连接诊断（脱敏）") {
+          Text(diagnostic).font(.caption.monospaced()).textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+        }
+        .font(.callout)
+      }
     }
   }
 
+  private var devicesView: some View {
+    card {
+      HStack {
+        Label("已授权设备", systemImage: "iphone").font(.headline)
+        Text("\(service.clients.count)").font(.caption).foregroundStyle(.secondary)
+        Spacer()
+        Button {
+          Task { await service.refreshClients() }
+        } label: {
+          Label("刷新", systemImage: "arrow.clockwise")
+        }
+        .controlSize(.small).disabled(service.managementBusy)
+      }
+      if service.clients.isEmpty {
+        Text("暂无已授权设备，请在 T3 iOS 登录同一账号。")
+          .font(.caption).foregroundStyle(.secondary).padding(.vertical, 4)
+      } else {
+        ForEach(Array(service.clients.enumerated()), id: \.element.id) { index, client in
+          if index > 0 { Divider() }
+          HStack(spacing: 12) {
+            Image(systemName: "iphone")
+              .font(.title3).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+              Text(client.name).font(.body.weight(.medium))
+              Label(client.connected ? "已连接" : "已授权 · 当前未连接",
+                systemImage: client.connected ? "circle.fill" : "circle")
+                .font(.caption)
+                .foregroundStyle(client.connected ? Color.green : Color.secondary)
+            }
+            Spacer()
+            Button("撤销授权", role: .destructive) { Task { await service.revokeClient(client.id) } }
+              .controlSize(.small).disabled(service.managementBusy)
+          }
+          .padding(.vertical, 4)
+        }
+      }
+    }
+  }
+
+  private func detailRow(_ title: String, value: String) -> some View {
+    VStack(alignment: .leading, spacing: 3) {
+      Text(title).font(.caption).foregroundStyle(.secondary)
+      Text(value).font(.caption).textSelection(.enabled)
+    }
+  }
+
+  private func card<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    VStack(alignment: .leading, spacing: 14, content: content)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding(16)
+      .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+      .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
+  }
 }

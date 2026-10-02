@@ -1,4 +1,11 @@
 {
+  "apps/server/src/provider/Layers/ProviderRegistry.ts": [
+    {
+      "oldText": "const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {",
+      "newText": "const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {\n  // Pi snapshots are authoritative, including deliberately hidden models.\n  if (provider.driver === ProviderDriverKind.make('pi')) return false;",
+      "count": 1
+    }
+  ],
   "apps/server/src/workspace/WorkspaceSearchIndex.ts": [
     {
       "oldText": "const { FileFinder } = requireForFff(\"@ff-labs/fff-node\") as typeof import(\"@ff-labs/fff-node\");",

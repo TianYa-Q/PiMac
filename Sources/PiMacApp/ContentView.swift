@@ -182,7 +182,6 @@ struct ContentView: View {
   @State private var choosingSession = false
   @State private var choosingAttachments = false
   @State private var showingSettings = false
-  @State private var showingLegacyHistory = false
   @State private var showingModelSettings = false
   @State private var selectedPage: MainPage = .conversation
   @State private var previewedAttachment: PromptAttachment?
@@ -243,9 +242,6 @@ struct ContentView: View {
       allowsMultipleSelection: true
     ) { result in
       if case .success(let urls) = result { addAttachmentsAtSelection(urls) }
-    }
-    .sheet(isPresented: $showingLegacyHistory) {
-      if let projectURL = app.projectURL { LegacyHistoryView(projectURL: projectURL) }
     }
     .sheet(isPresented: $showingSettings) {
       SettingsView(
@@ -332,14 +328,8 @@ struct ContentView: View {
             .foregroundStyle(.white)
             .frame(width: 28, height: 28)
             .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 8))
-          VStack(alignment: .leading, spacing: 2) {
-            Text("Pi Mac")
-              .font(.system(size: 16, weight: .bold, design: .rounded))
-            HStack(spacing: 9) {
-              sidebarStatus("Pi", state: app.connectionState)
-              TelegramConnectionBadge(control: workspace.telegram)
-            }
-          }
+          Text("Pi Mac")
+            .font(.system(size: 16, weight: .bold, design: .rounded))
           Spacer(minLength: 0)
           Button {
             showingSettings = true
@@ -446,11 +436,6 @@ struct ContentView: View {
           .help("在当前项目新建聊天")
           .padding(.top, 8)
           .padding(.bottom, 10)
-
-          Button("查看旧版历史", systemImage: "clock.arrow.circlepath") {
-            showingLegacyHistory = true
-          }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
-            .padding(.bottom, 6)
 
           HStack {
             Text("会话")
@@ -568,19 +553,6 @@ struct ContentView: View {
     sessionSearchFocused = false
     sessionSearchText = ""
     sessionSearchExpanded = false
-  }
-
-  private func sidebarStatus(_ name: String, state: ConnectionState) -> some View {
-    HStack(spacing: 5) {
-      Circle().fill(state.color).frame(width: 6, height: 6)
-      Text(name).foregroundStyle(.primary)
-      Text(state == .connected ? "在线" : state == .connecting ? "连接中" : "离线")
-        .foregroundStyle(.secondary)
-    }
-    .font(.caption2.weight(.medium))
-    .lineLimit(1)
-    .help("\(name) \(state.label)")
-    .accessibilityLabel("\(name) \(state.label)")
   }
 
   private func mainPageButton(_ page: MainPage, title: String, icon: String) -> some View {
@@ -1167,7 +1139,7 @@ struct ContentView: View {
           .buttonStyle(.plain)
           .modifier(ComposerControlChrome())
           .disabled(!app.canRestartSafely || !app.fastModeAvailable)
-          .help("OpenAI / Codex 优先处理（可能消耗更多额度）；不改变思考等级")
+          .help("下一次请求使用 OpenAI / Codex 优先处理（可能消耗更多额度）；不改变思考等级")
           .accessibilityValue(app.fastModeEnabled ? "开启" : "关闭")
         }
         Button(action: app.compact) {
@@ -2036,8 +2008,8 @@ private struct ActivityEntryView: View {
                   } else if entry.toolName == "codemode" {
                     HStack(spacing: 6) {
                       Text("JavaScript · \(toolInput.components(separatedBy: "\n").count) 行")
-                      if !entry.nestedCalls.isEmpty {
-                        Text("· \(entry.nestedCalls.count) 次嵌套调用")
+                      if nestedCallCount > 0 {
+                        Text("· \(nestedCallCount) 次嵌套调用")
                       }
                     }
                     .font(.caption2)
@@ -2077,7 +2049,11 @@ private struct ActivityEntryView: View {
               MessageAttachmentsView(attachments: entry.attachments)
                 .padding(.leading, 31)
             }
-            ForEach(entry.nestedCalls) { call in
+            ForEach(entry.childToolEntries) { child in
+              AnyView(ActivityEntryView(entry: child, keepToolExpanded: keepToolExpanded))
+                .padding(.leading, 31)
+            }
+            ForEach(metadataOnlyCalls) { call in
               VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                   Image(systemName: "arrow.turn.down.right")
@@ -2136,6 +2112,14 @@ private struct ActivityEntryView: View {
     }
   }
 
+  private var metadataOnlyCalls: [NestedToolCall] {
+    entry.nestedCalls.filter { call in
+      !entry.childToolEntries.contains { $0.id.hasSuffix(":\(call.id)") }
+    }
+  }
+
+  private var nestedCallCount: Int { entry.childToolEntries.count + metadataOnlyCalls.count }
+
   private var activityHeader: some View {
     HStack(spacing: 7) {
       Image(systemName: activityIcon)
@@ -2193,7 +2177,7 @@ private struct ActivityEntryView: View {
     if entry.kind == .thinking { return !entry.text.isEmpty }
     if !entry.attachments.isEmpty { return true }
     if entry.toolName == "codemode", entry.toolInput?.isEmpty == false { return true }
-    if !entry.nestedCalls.isEmpty || !entry.nestedCallsComplete { return true }
+    if !entry.childToolEntries.isEmpty || !entry.nestedCalls.isEmpty || !entry.nestedCallsComplete { return true }
     return entry.diff?.isEmpty == false || !entry.text.isEmpty
   }
 
@@ -2368,6 +2352,7 @@ private struct ChatEntryView: View, Equatable {
         .font(.system(.body, design: entry.kind == .tool ? .monospaced : .default))
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     } else {
       MarkdownView(entry.text)
         .equatable()
@@ -2535,7 +2520,7 @@ private struct CodexAccountsView: View {
         if AccountUsageProvider(modelID: app.selectedModelId) == .chatGPT,
           !app.supportsAccountSwitch
         {
-          Text("额度由 Server 内的 account-usage 扩展自动刷新；账户切换尚未接入。")
+          Text("账户额度由 Server 自动刷新；连接 Pi 线程后可在空闲时切换账户。")
             .font(.caption2).foregroundStyle(.secondary)
         }
         if isExpanded {
@@ -2993,6 +2978,9 @@ private struct SettingsView: View {
   @State private var editingPath = false
   @State private var selectedTab: SettingsTab = .runtime
   @StateObject private var versions: VersionManagerModel
+  @State private var extensionSource = ""
+  @State private var installLocally = false
+  @State private var extensionToRemove: ManagedExtension?
 
   private enum SettingsTab: String, CaseIterable {
     case runtime = "运行环境"
@@ -3023,7 +3011,7 @@ private struct SettingsView: View {
       HStack {
         VStack(alignment: .leading, spacing: 4) {
           Text("设置").font(.title2.bold())
-          Text("管理运行环境、手机连接与扩展更新")
+          Text("管理运行环境、手机连接与扩展包")
             .font(.caption).foregroundStyle(.secondary)
         }
         Spacer()
@@ -3043,6 +3031,7 @@ private struct SettingsView: View {
         }
       }
       .pickerStyle(.segmented)
+      .labelsHidden()
       .padding(.horizontal, 20)
       .padding(.top, 16)
 
@@ -3102,12 +3091,49 @@ private struct SettingsView: View {
                     versions.updatePi()
                   }
                   .buttonStyle(.borderedProminent)
+                  .disabled(versions.isBusy)
                 }
               }
               .padding(.vertical, 5)
             }
 
-            GroupBox("扩展包版本") {
+            GroupBox("安装扩展包") {
+              VStack(alignment: .leading, spacing: 8) {
+                TextField("npm:包名、git:仓库地址或本地路径", text: $extensionSource)
+                  .textFieldStyle(.roundedBorder)
+                  .disabled(versions.isBusy)
+                HStack {
+                  Picker("安装范围", selection: $installLocally) {
+                    Text("用户（所有项目）").tag(false)
+                    Text("当前项目").tag(true)
+                      .disabled(projectURL == nil)
+                  }
+                  .frame(maxWidth: 280)
+                  .disabled(versions.isBusy)
+                  Spacer()
+                  Button {
+                    versions.install(source: extensionSource, local: installLocally)
+                  } label: {
+                    if versions.updatingID == "install" {
+                      ProgressView().controlSize(.small)
+                    } else {
+                      Label("安装", systemImage: "plus")
+                    }
+                  }
+                  .buttonStyle(.borderedProminent)
+                  .disabled(
+                    versions.isBusy
+                      || VersionManagerModel.installArguments(
+                        source: extensionSource, local: installLocally) == nil
+                      || (installLocally && projectURL == nil))
+                }
+                Text("扩展包可以执行代码，请仅安装可信来源。支持 npm、Git 与本地路径。")
+                  .font(.caption).foregroundStyle(.secondary)
+              }
+              .padding(.vertical, 5)
+            }
+
+            GroupBox("已安装扩展包") {
               VStack(alignment: .leading, spacing: 0) {
                 if versions.extensions.isEmpty, versions.isChecking {
                   HStack(spacing: 8) {
@@ -3147,7 +3173,7 @@ private struct SettingsView: View {
       if selectedTab == .updates {
         Divider()
         HStack {
-          Text("更新扩展后，需要重新打开会话才能载入新代码。")
+          Text("安装、删除或更新扩展后，需要重新打开会话才能生效。")
             .font(.caption)
             .foregroundStyle(.secondary)
           Spacer()
@@ -3173,6 +3199,20 @@ private struct SettingsView: View {
     }
     .frame(width: 650, height: 620)
     .onAppear { versions.refresh() }
+    .alert("删除扩展包？", isPresented: Binding(
+      get: { extensionToRemove != nil },
+      set: { if !$0 { extensionToRemove = nil } }
+    )) {
+      Button("取消", role: .cancel) { extensionToRemove = nil }
+      Button("删除", role: .destructive) {
+        if let item = extensionToRemove { versions.remove(item) }
+        extensionToRemove = nil
+      }
+    } message: {
+      if let item = extensionToRemove {
+        Text("将从\(item.scope)配置中移除 \(item.source)。本地源文件不会被删除，已打开的会话不受影响。")
+      }
+    }
   }
 
   private var versionDescription: String {
@@ -3210,8 +3250,18 @@ private struct SettingsView: View {
       Spacer()
       if versions.updatingID == item.id {
         ProgressView().controlSize(.small)
-      } else if item.hasUpdate {
-        Button("更新") { versions.update(item) }.buttonStyle(.borderedProminent)
+      } else {
+        if item.hasUpdate {
+          Button("更新") { versions.update(item) }
+            .buttonStyle(.borderedProminent)
+            .disabled(versions.isBusy)
+        }
+        Button(role: .destructive) { extensionToRemove = item } label: {
+          Image(systemName: "trash")
+        }
+        .help("删除扩展包")
+        .accessibilityLabel("删除 \(item.source)")
+        .disabled(versions.isBusy)
       }
     }
     .padding(.vertical, 9)

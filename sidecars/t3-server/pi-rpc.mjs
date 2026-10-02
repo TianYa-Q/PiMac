@@ -49,7 +49,7 @@ export class PiRPC {
     }));
     this.writeChain = operation.catch(() => {}); return operation;
   }
-  request(command) {
+  request(command, timeoutMs = this.timeoutMs) {
     if (this.closed || this.stopping) return Promise.reject(new Error('Pi transport closed'));
     if (this.pending.size >= 64) return Promise.reject(new Error('Pi request capacity exceeded'));
     const id = randomUUID();
@@ -58,7 +58,7 @@ export class PiRPC {
         this.pending.delete(id);
         // A mutation timeout has an unknown outcome. Never replay it.
         reject(new Error('Pi response timeout; outcome unknown'));
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, type: command.type });
       this.write({ ...command, id }).catch(error => {
         const pending = this.pending.get(id); if (!pending) return;

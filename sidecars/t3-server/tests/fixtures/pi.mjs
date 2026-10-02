@@ -24,14 +24,24 @@ process.stdin.on('data', chunk => {
       case 'get_state': response({ sessionId, isStreaming: running, model, thinkingLevel }); break;
       case 'get_session_stats': response({ tokens: { input: 100, output: 20, cacheRead: 80, cacheWrite: 0, total: 200 },
         cost: 0.012, contextUsage: { tokens: 200, contextWindow: 10000, percent: 2 } }); break;
+      case 'compact': response({ summary: 'Fixture summary', tokensBefore: 200, estimatedTokensAfter: 100 }); break;
+      case 'get_commands': response({ commands: [{ name: 'pimac-fast', source: 'extension' }, { name: 'accounts', source: 'extension' }] }); break;
       case 'get_available_models': response({ models: [model] }); break;
-      case 'set_model': model = { provider: command.provider, id: command.modelId, name: command.modelId }; response(model); break;
+      case 'set_model': model = { provider: command.provider, id: command.modelId, name: command.modelId, api: command.provider === 'openai' ? 'openai-responses' : command.provider === 'openai-codex' ? 'openai-codex-responses' : 'test' }; response(model); break;
       case 'set_thinking_level': thinkingLevel = command.level; response(); break;
       case 'set_session_name': case 'clear_queue': response(); break;
       case 'extension_ui_response': break;
       case 'abort':
         clearTimeout(completion); running = false; send({ type: 'agent_settled' }); response(); break;
       case 'prompt': {
+        if (command.message.startsWith('/pimac-fast ')) {
+          send({ type: 'extension_ui_request', method: 'setStatus', statusKey: 'pimac-fast', statusText: command.message.split(' ')[1] });
+          response({ disposition: 'handled' }); break;
+        }
+        if (command.message.startsWith('/accounts switch ')) {
+          send({ type: 'extension_ui_request', method: 'setStatus', statusKey: 'account-usage-gui', statusText: JSON.stringify({ version: 2, provider: model.provider, activeAccount: command.message.split(' ')[2], updatedAt: Date.now(), accounts: [] }) });
+          response({ disposition: 'handled' }); break;
+        }
         if (running && command.streamingBehavior === 'steer') {
           response({ disposition: 'queued' });
           break;
@@ -47,6 +57,8 @@ process.stdin.on('data', chunk => {
           send({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'read', partialResult: { content: [{ type: 'text', text: 'partial' }] } });
           send({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'read', result: { content: [{ type: 'text', text: 'done\nsecond line\nthird line' }] }, isError: false });
           send({ type: 'tool_execution_start', toolCallId: 'code-1', toolName: 'codemode', args: { code: 'const value = 1;\ntext(value);' } });
+          send({ type: 'tool_execution_start', toolCallId: 'nested-1', parentToolCallId: 'code-1', toolName: 'read', args: { path: 'nested.txt' } });
+          send({ type: 'tool_execution_end', toolCallId: 'nested-1', parentToolCallId: 'code-1', toolName: 'read', result: { content: [{ type: 'text', text: 'nested output' }] }, isError: false });
           send({ type: 'tool_execution_end', toolCallId: 'code-1', toolName: 'codemode', result: {
             content: [{ type: 'text', text: 'Script completed\nOutput:\n1' }],
             nestedCalls: { complete: true, calls: [{ id: 'nested-1', name: 'read', arguments: { path: 'nested.txt' }, status: 'success' }] }

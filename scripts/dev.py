@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build on source changes; Pi Mac relaunches the built binary once all sessions are idle."""
+"""Coalesce source changes; build when Pi Mac is idle, then safely relaunch."""
 import argparse
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -51,6 +52,55 @@ def snapshot():
         except FileNotFoundError:
             pass  # An editor can replace a file during a scan.
     return tuple(sorted(result))
+
+
+def app_is_idle(state):
+    """Fail closed if the app heartbeat is missing, stale, or malformed."""
+    try:
+        data = json.loads(state.read_text())
+        age = time.time() - data["timestamp"]
+        return data["idle"] is True and 0 <= age <= 3
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+class PendingBuild:
+    def __init__(self, previous, request, revision):
+        self.previous = previous
+        self.request = request
+        self.revision = revision
+        self.dirty = False
+        self.changed_at = 0
+
+    def observe(self, current):
+        if current == self.previous:
+            return
+        changes = changed_files(self.previous, current)
+        self.previous = current
+        self.dirty = True
+        self.changed_at = time.monotonic()
+        self.request.write_text(str(time.time_ns()))
+        preview = ", ".join(changes[:3])
+        if len(changes) > 3:
+            preview += f" (+{len(changes) - 3} more)"
+        status(f"Changed · {preview} · waiting for idle before building")
+
+    def tick(self, state):
+        self.observe(snapshot())
+        if not self.dirty or time.monotonic() - self.changed_at < 0.7 or not app_is_idle(state):
+            return
+        built = build()
+        current = snapshot()
+        if current != self.previous:
+            self.observe(current)
+            status("Sources changed during build · defer reload and build again when idle")
+            return
+        # A failed build is retried only after another edit, not every idle tick.
+        self.dirty = False
+        self.request.unlink(missing_ok=True)
+        if built is not None:
+            self.revision.write_text(str(time.time_ns()))
+            status("Reload requested · Pi Mac rechecks that all sessions are idle")
 
 
 def running_apps(binary):
@@ -240,6 +290,12 @@ def watch(app_groups):
     revision = root / ".build" / "pimac-dev-revision"
     revision.write_text(str(time.time_ns()))
     env["PIMAC_DEV_RELOAD_REVISION"] = str(revision)
+    state = root / ".build" / "pimac-dev-state.json"
+    request = root / ".build" / "pimac-dev-request"
+    state.unlink(missing_ok=True)
+    request.unlink(missing_ok=True)
+    env["PIMAC_DEV_STATE_PATH"] = str(state)
+    env["PIMAC_DEV_REQUEST_PATH"] = str(request)
     # Isolate the app tree so shutdown can also collect orphaned services.
     app_log.parent.mkdir(parents=True, exist_ok=True)
     with app_log.open("w") as log:
@@ -255,28 +311,11 @@ def watch(app_groups):
         status(f"Build log: {build_log.relative_to(root)} · App logs: terminal")
     else:
         status(f"Logs: {build_log.relative_to(root)} (latest build), {app_log.relative_to(root)} (app)")
-    previous = snapshot()
-    try:
-        while True:
-            time.sleep(1)
-            app.poll()  # Reap the initial app if it has relaunched itself.
-            current = snapshot()
-            if current == previous:
-                continue
-            # Debounce editor saves and builds; avoid starting another build mid-write.
-            time.sleep(0.7)
-            current = snapshot()
-            changes = changed_files(previous, current)
-            previous = current
-            preview = ", ".join(changes[:3])
-            if len(changes) > 3:
-                preview += f" (+{len(changes) - 3} more)"
-            status(f"Changed · {preview}")
-            if build() is not None:
-                revision.write_text(str(time.time_ns()))
-                status("Reload requested · Pi Mac restarts when all sessions are idle")
-    except KeyboardInterrupt:
-        raise
+    pending = PendingBuild(snapshot(), request, revision)
+    while True:
+        time.sleep(1)
+        app.poll()  # Reap the initial app if it has relaunched itself.
+        pending.tick(state)
 
 
 if __name__ == "__main__":

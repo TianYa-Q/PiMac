@@ -51,6 +51,28 @@ async function sessionFiles(directory) {
   return files;
 }
 
+test('desktop model preferences reach mobile config and server default selection', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-model-sync-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const update = async body => {
+    const response = await fetch(`http://127.0.0.1:${f.gateway.server.address().port}/internal/auth/model-preferences`, {
+      method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200);
+  };
+  await update({ hiddenModels: [], defaultModel: 'test/model' });
+  let config = await call(await f.ws(), 'server.getConfig');
+  assert.equal(config.providers[0].models[0].isDefault, true);
+  assert.deepEqual(config.settings.defaultModelSelection, { instanceId: 'pi', model: 'test/model' });
+  await update({ hiddenModels: ['test/model'], defaultModel: 'test/model' });
+  config = await call(await f.ws(), 'server.getConfig');
+  assert.deepEqual(config.providers[0].models, []);
+  assert.equal(config.settings.defaultModelSelection, null);
+  const native = await f.gateway.official.management.modelCatalog();
+  assert.equal(JSON.parse(native.catalogs).pi[0].slug, 'test/model');
+});
+
 test('T3 owns projects, turns, native receipts and projections without any desktop IPC', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-server-owned-'));
   let f;

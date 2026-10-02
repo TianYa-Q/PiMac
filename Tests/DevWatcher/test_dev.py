@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import signal
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'dev.py'
 IMPORT = f"import importlib.util; s=importlib.util.spec_from_file_location('dev', {str(SCRIPT)!r}); d=importlib.util.module_from_spec(s); s.loader.exec_module(d)\n"
@@ -73,6 +75,83 @@ class DevWatcherTests(unittest.TestCase):
                  (str(dev.root / 'changed.swift'), 2, 1)]
         self.assertEqual(dev.changed_files(before, after),
                          ['added.swift', 'changed.swift', 'removed.swift'])
+
+    def test_idle_heartbeat_fails_closed(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'state.json'
+            self.assertFalse(dev.app_is_idle(state))
+            for content in ('bad json', '{}', json.dumps({'timestamp': time.time() - 10, 'idle': True}),
+                            json.dumps({'timestamp': time.time(), 'idle': False})):
+                state.write_text(content)
+                self.assertFalse(dev.app_is_idle(state))
+            state.write_text(json.dumps({'timestamp': time.time(), 'idle': True}))
+            self.assertTrue(dev.app_is_idle(state))
+
+    def test_pending_changes_coalesce_until_idle(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / 'request'
+            revision = Path(directory) / 'revision'
+            pending = dev.PendingBuild((), request, revision)
+            first = ((str(dev.root / 'a.swift'), 1, 1),)
+            latest = ((str(dev.root / 'a.swift'), 2, 1),)
+            with patch.object(dev, 'snapshot', return_value=first) as snapshot, \
+                    patch.object(dev, 'app_is_idle', return_value=False) as idle, \
+                    patch.object(dev, 'build', return_value=Path('PiMac')) as build, \
+                    patch.object(dev.time, 'monotonic', return_value=10) as clock:
+                pending.tick(None)
+                snapshot.return_value = latest
+                clock.return_value = 11
+                pending.tick(None)
+                clock.return_value = 20
+                pending.tick(None)
+                build.assert_not_called()
+                self.assertTrue(request.exists())
+                idle.return_value = True
+                pending.tick(None)
+                build.assert_called_once()
+                self.assertTrue(revision.exists())
+                self.assertFalse(request.exists())
+                pending.tick(None)
+                build.assert_called_once()
+
+    def test_build_failure_does_not_reload_or_retry_without_edits(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / 'request'
+            revision = Path(directory) / 'revision'
+            pending = dev.PendingBuild((), request, revision)
+            current = ((str(dev.root / 'a.swift'), 1, 1),)
+            pending.observe(current)
+            pending.changed_at = time.monotonic() - 1
+            with patch.object(dev, 'snapshot', return_value=current), \
+                    patch.object(dev, 'app_is_idle', return_value=True), \
+                    patch.object(dev, 'build', return_value=None) as build:
+                pending.tick(None)
+                pending.tick(None)
+                build.assert_called_once()
+                self.assertFalse(revision.exists())
+                self.assertFalse(pending.dirty)
+
+    def test_edits_during_build_defer_reload(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / 'request'
+            revision = Path(directory) / 'revision'
+            pending = dev.PendingBuild((), request, revision)
+            first = ((str(dev.root / 'a.swift'), 1, 1),)
+            latest = ((str(dev.root / 'a.swift'), 2, 1),)
+            pending.observe(first)
+            pending.changed_at = time.monotonic() - 1
+            with patch.object(dev, 'snapshot', side_effect=[first, latest]), \
+                    patch.object(dev, 'app_is_idle', return_value=True), \
+                    patch.object(dev, 'build', return_value=Path('PiMac')):
+                pending.tick(None)
+                self.assertFalse(revision.exists())
+                self.assertTrue(request.exists())
+                self.assertTrue(pending.dirty)
+                self.assertEqual(pending.previous, latest)
 
     def test_ctrl_c_cancels_build_process_group(self):
         with tempfile.TemporaryDirectory() as directory:

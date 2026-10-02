@@ -3,7 +3,7 @@
 export const MAX_TOOL_OUTPUT_CHARS = 200_000;
 export function projectPiToolActivityData(data) {
   const projected = { piTool: true, toolName: data.toolName, toolCallId: data.toolCallId };
-  for (const key of ['input', 'command', 'nestedCalls', 'diff']) {
+  for (const key of ['input', 'command', 'parentToolCallId', 'nestedCalls', 'diff']) {
     if (data[key] !== undefined) projected[key] = data[key];
   }
   const content = data.rawOutput?.content;

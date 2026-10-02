@@ -67,10 +67,12 @@ final class VersionManagerModel: ObservableObject {
     self.projectURL = projectURL
   }
 
-  func refresh() {
+  var isBusy: Bool { isChecking || updatingID != nil }
+
+  func refresh(preservingMessage: Bool = false) {
     guard !isChecking, updatingID == nil else { return }
     isChecking = true
-    message = ""
+    if !preservingMessage { message = "" }
     let path = piPath
     let cwd = projectURL
     Task {
@@ -78,7 +80,11 @@ final class VersionManagerModel: ObservableObject {
       piCurrentVersion = snapshot.piCurrent
       piLatestVersion = snapshot.piLatest
       extensions = snapshot.extensions
-      message = snapshot.message
+      if preservingMessage {
+        if !snapshot.message.isEmpty { message += "\n" + snapshot.message }
+      } else {
+        message = snapshot.message
+      }
       isChecking = false
     }
   }
@@ -96,10 +102,32 @@ final class VersionManagerModel: ObservableObject {
     runUpdate(id: item.id, arguments: ["update", "--extension", item.source])
   }
 
-  private func runUpdate(id: String, arguments: [String]) {
+  func install(source: String, local: Bool) {
+    guard let arguments = Self.installArguments(source: source, local: local),
+      !local || projectURL != nil else { return }
+    runUpdate(id: "install", arguments: arguments, action: "安装")
+  }
+
+  func remove(_ item: ManagedExtension) {
+    guard item.scope != "项目" || projectURL != nil else { return }
+    runUpdate(id: item.id, arguments: Self.removeArguments(for: item), action: "删除")
+  }
+
+  nonisolated static func installArguments(source: String, local: Bool) -> [String]? {
+    let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !source.isEmpty, !source.hasPrefix("-"),
+      !source.contains("\n"), !source.contains("\r") else { return nil }
+    return ["install", source] + (local ? ["--local"] : [])
+  }
+
+  nonisolated static func removeArguments(for item: ManagedExtension) -> [String] {
+    ["remove", item.source] + (item.scope == "项目" ? ["--local"] : [])
+  }
+
+  private func runUpdate(id: String, arguments: [String], action: String = "更新") {
     guard updatingID == nil, !isChecking else { return }
     updatingID = id
-    message = "正在更新…"
+    message = "正在\(action)…"
     let path = piPath
     let cwd = projectURL
     Task {
@@ -107,11 +135,13 @@ final class VersionManagerModel: ObservableObject {
         Self.run(path, arguments: arguments, workingDirectory: cwd)
       }.value
       if result.status == 0 {
-        message = result.output.isEmpty ? "更新完成。重新打开会话后即可使用新版本。" : result.output
+        message = "\(action)完成。重新打开会话后生效。"
+        if !result.output.isEmpty { message += "\n" + result.output }
         updatingID = nil
-        refresh()
+        refresh(preservingMessage: true)
       } else {
-        message = result.output.isEmpty ? "更新失败（状态码 \(result.status)）。" : result.output
+        message = "\(action)失败（状态码 \(result.status)）。"
+        if !result.output.isEmpty { message += "\n" + result.output }
         updatingID = nil
       }
     }

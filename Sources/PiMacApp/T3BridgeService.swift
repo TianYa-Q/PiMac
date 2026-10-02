@@ -36,6 +36,7 @@ final class T3BridgeService: ObservableObject {
   }
 
   private var process: Process?
+  private var childLeaseMarker: URL?
   private var input: FileHandle?
   private var generation = UUID()
   private var writer = DispatchQueue(label: "pimac.t3.bridge.writer")
@@ -94,6 +95,7 @@ final class T3BridgeService: ObservableObject {
     }
     do {
       try child.run()
+      childLeaseMarker = stateDirectory.appendingPathComponent("child-owner.json")
       process = child
       input = stdin.fileHandleForWriting
       adminToken = token
@@ -138,6 +140,23 @@ final class T3BridgeService: ObservableObject {
     status = "未启用"
   }
 
+  /// A replacement must not start until the termination handler has released
+  /// the parent lease and Node has removed its exclusive child marker.
+  func stopAndWait() async -> Bool {
+    stop()
+    for _ in 0..<100 {
+      if !isStopping { return childLeaseHasCleared }
+      if Task.isCancelled { return false }
+      try? await Task.sleep(for: .milliseconds(50))
+    }
+    return !isStopping && childLeaseHasCleared
+  }
+
+  private var childLeaseHasCleared: Bool {
+    guard let childLeaseMarker else { return true }
+    return !FileManager.default.fileExists(atPath: childLeaseMarker.path)
+  }
+
   private func receive(_ record: Data, generation current: UUID) {
     guard generation == current, process?.isRunning == true else { return }
     if let message = try? JSONSerialization.jsonObject(with: record) as? [String: Any],
@@ -165,13 +184,14 @@ final class T3BridgeService: ObservableObject {
 
   private func admin<T: Decodable>(
     _ path: String, method: String = "GET",
-    body: [String: String]? = nil
+    body: [String: Any]? = nil
   ) async throws -> T {
     guard let port, !adminToken.isEmpty else { throw ServiceError.notRunning }
     let current = generation
     var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/internal/auth/\(path)")!)
     request.httpMethod = method
     if path == "connect" { request.timeoutInterval = 45 }
+    if path == "session-control" { request.timeoutInterval = 310 }
     request.setValue("Bearer \(adminToken)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
@@ -181,6 +201,28 @@ final class T3BridgeService: ObservableObject {
       throw ServiceError.managementFailed
     }
     return try JSONDecoder().decode(T.self, from: data)
+  }
+
+  func modelCatalog() async throws -> [String: [[String: Any]]] {
+    struct Response: Decodable { let catalogs: String }
+    let response: Response = try await admin("model-catalog")
+    let data = Data(response.catalogs.utf8)
+    return try JSONSerialization.jsonObject(with: data) as? [String: [[String: Any]]] ?? [:]
+  }
+
+  func syncModelPreferences(hiddenModels: [String], defaultModel: String?) async throws {
+    struct Response: Decodable { let ok: Bool }
+    let _: Response = try await admin("model-preferences", method: "POST", body: [
+      "hiddenModels": hiddenModels, "defaultModel": defaultModel as Any? ?? NSNull(),
+    ])
+  }
+
+  func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws {
+    struct Response: Decodable { let ok: Bool }
+    var body: [String: Any] = ["threadId": threadID, "operation": operation]
+    if let accountName { body["accountName"] = accountName }
+    let result: Response = try await admin("session-control", method: "POST", body: body)
+    guard result.ok else { throw ServiceError.managementFailed }
   }
 
   func desktopCredential() async throws -> String {

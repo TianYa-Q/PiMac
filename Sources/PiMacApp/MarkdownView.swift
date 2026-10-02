@@ -356,9 +356,11 @@ struct MarkdownView: View, Equatable {
         switch section {
         case .text(let blocks):
           combinedText(blocks)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
             .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Measure the selectable renderer at its final wrapping width, not
+            // the plain Text before macOS installs its selection presentation.
+            .fixedSize(horizontal: false, vertical: true)
         case .table(let headers, let rows, let alignments):
           MarkdownTableView(headers: headers, rows: rows, alignments: alignments)
         }
@@ -496,7 +498,9 @@ private struct MarkdownTableView: View {
         if index > 0 { Divider() }
         inlineText(cells[index])
           .font(isHeader ? .callout.bold() : .callout)
+          .textSelection(.enabled)
           .frame(maxWidth: .infinity, alignment: alignment(at: index))
+          .fixedSize(horizontal: false, vertical: true)
           .padding(.horizontal, 8)
           .padding(.vertical, 6)
       }

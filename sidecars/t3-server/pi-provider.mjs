@@ -13,8 +13,10 @@ import { ProviderAdapterRequestError, ProviderAdapterValidationError } from './u
 import { defaultProviderContinuationIdentity } from './upstream/apps/server/src/provider/ProviderDriver.ts';
 import { mergeProviderInstanceEnvironment } from './upstream/apps/server/src/provider/ProviderInstanceEnvironment.ts';
 import { PiRPC } from './pi-rpc.mjs';
+import { modelPreferencesKey, visibleModels, recordModelCatalog } from './model-preferences.mjs';
 import { OutputSpeed } from './output-speed.mjs';
-import { recordAccountStatus } from './account-status.mjs';
+import { registerSessionControls } from './session-controls.mjs';
+import { accountStatus, recordAccountStatus } from './account-status.mjs';
 import { registerSessionMetrics, supportedThinkingLevels } from './session-metrics.mjs';
 import { resolveAttachmentPath } from './upstream/apps/server/src/attachmentStore.ts';
 
@@ -40,7 +42,7 @@ export const ServerOwnedPiDriver = {
     const env = { ...mergeProviderInstanceEnvironment(environment) };
     // Supervisor credentials must never reach agent tools or extensions.
     for (const key of Object.keys(env)) if (key.startsWith('PIMAC_T3_')) delete env[key];
-    let stopping = false, cachedSnapshot, probing, discoveryRPC;
+    let stopping = false, cachedSnapshot, cachedPreferences, probing, discoveryRPC;
     const transport = (args, cwd, onEvent, onExit) => new PiRPC({ ...config, args, cwd, env, onEvent, onExit });
     const publish = (session, type, payload, refs = {}) => {
       if (stopping) return;
@@ -65,6 +67,7 @@ export const ServerOwnedPiDriver = {
     };
     const onEvent = (session, event) => {
       recordAccountStatus(session.info.threadId, event);
+      if (event.type === 'extension_ui_request' && event.method === 'setStatus' && event.statusKey === 'pimac-fast') session.fastStatus = event.statusText;
       session.outputSpeed?.consume(event);
       if (event.type === 'extension_ui_request' && ['confirm', 'select', 'input', 'editor'].includes(event.method)) {
         // Dialog projection is a later slice. Fail closed rather than block or auto-approve.
@@ -100,6 +103,7 @@ export const ServerOwnedPiDriver = {
         publish(session, type, { itemType: 'dynamic_tool_call', title: event.toolName,
           status: event.type === 'tool_execution_end' ? (event.isError ? 'failed' : 'completed') : 'inProgress',
           data: { piTool: true, toolName: event.toolName, toolCallId: event.toolCallId, input: event.args,
+            ...(event.parentToolCallId ? { parentToolCallId: event.parentToolCallId } : {}),
             rawOutput: result ? { content } : undefined,
             ...(result?.nestedCalls ? { nestedCalls: result.nestedCalls } : {}),
             ...(result?.details?.diff ? { diff: result.details.diff } : {}),
@@ -118,7 +122,8 @@ export const ServerOwnedPiDriver = {
       if (slash < 1 || slash === selection.model.length - 1) throw validation('set_model', 'Expected provider/model Pi model slug.');
       const options = selection.options ?? [];
       for (const option of options) {
-        if (option.id !== 'thinkingLevel' || !['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(option.value))
+        if (!(option.id === 'thinkingLevel' && ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(option.value)) &&
+            !(option.id === 'fastMode' && ['on', 'off'].includes(option.value)))
           throw validation('set_model', 'Unsupported Pi model option.');
       }
       if (session.info.model !== selection.model) {
@@ -126,7 +131,21 @@ export const ServerOwnedPiDriver = {
         session.info.model = selection.model;
         session.thinkingLevel = undefined;
       }
-      for (const option of options) if (session.thinkingLevel !== option.value) {
+      const fast = options.find(option => option.id === 'fastMode')?.value ?? 'off';
+      if (session.fastMode !== fast && (fast === 'on' || session.fastMode === 'on')) {
+        if (fast === 'on') {
+          const state = await session.rpc.request({ type: 'get_state' });
+          if (!['openai', 'openai-codex'].includes(state.model?.provider) || !['openai-responses', 'openai-codex-responses'].includes(state.model?.api)) throw new Error('Model does not support Fast mode');
+        }
+        const commands = await session.rpc.request({ type: 'get_commands' });
+        const available = commands.commands?.some(command => command.name === 'pimac-fast' && command.source === 'extension');
+        if (available) {
+          const result = await session.rpc.request({ type: 'prompt', message: `/pimac-fast ${fast}` });
+          if (result?.disposition !== 'handled' || session.fastStatus !== fast) throw new Error('Fast mode not confirmed');
+        } else if (fast === 'on') throw new Error('Fast extension unavailable');
+        session.fastMode = fast;
+      }
+      for (const option of options.filter(option => option.id === 'thinkingLevel')) if (session.thinkingLevel !== option.value) {
         await session.rpc.request({ type: 'set_thinking_level', level: option.value });
         session.thinkingLevel = option.value;
       }
@@ -161,6 +180,7 @@ export const ServerOwnedPiDriver = {
             finish(session, expected ? 'interrupted' : 'failed', expected ? undefined : 'Pi process exited before settlement.');
             update(session, 'closed'); publish(session, 'session.exited', { exitKind: expected ? 'graceful' : 'error', recoverable: !expected });
             session.removeMetrics?.();
+            session.removeControls?.();
             sessions.delete(input.threadId);
           });
         session.outputSpeed = new OutputSpeed();
@@ -180,6 +200,40 @@ export const ServerOwnedPiDriver = {
           return { ...stats, outputTokensPerSecond: session.outputSpeed.value };
         };
         session.removeMetrics = registerSessionMetrics(input.threadId, session.readMetrics);
+        session.removeControls = registerSessionControls(input.threadId, async (operation, accountName, modelSelection) => {
+          if (operation === 'abort-compaction') {
+            if (!session.compacting) throw new Error('No manual compaction');
+            await session.rpc.request({ type: 'abort' });
+            return { ok: true };
+          }
+          if (session.turnId || session.sending || session.controlling) throw new Error('Pi session is busy');
+          session.controlling = true;
+          try {
+            const state = await session.rpc.request({ type: 'get_state' });
+            if (state.isStreaming || state.isCompacting || state.pendingMessageCount) throw new Error('Pi session is busy');
+            await selectModel(session, modelSelection);
+            if (operation === 'compact') {
+              session.compacting = true;
+              const result = await session.rpc.request({ type: 'compact' }, 300000);
+              await session.readMetrics();
+              publish(session, 'runtime.warning', { message: '上下文压缩完成', detail: result?.summary });
+            } else {
+              const provider = state.model?.provider;
+              if (!['openai', 'openai-codex'].includes(provider)) throw new Error('Unsupported account provider');
+              const commands = await session.rpc.request({ type: 'get_commands' });
+              if (!commands.commands?.some(command => command.name === 'accounts' && command.source === 'extension')) throw new Error('Account extension unavailable');
+              const result = await session.rpc.request({ type: 'prompt', message: `/accounts switch ${accountName}` });
+              const snapshot = accountStatus(input.threadId, provider);
+              if (result?.disposition !== 'handled' || snapshot?.activeAccount !== accountName) throw new Error('Account switch not confirmed');
+            }
+            return { ok: true };
+          } catch (error) {
+            // An expired mutation may still be running. Close the runtime rather
+            // than release its gate and allow another prompt into unknown state.
+            if (error.message?.includes('outcome unknown')) await session.rpc.stop();
+            throw error;
+          } finally { session.controlling = false; session.compacting = false; }
+        });
         sessions.set(input.threadId, session);
         try {
           await session.rpc.request({ type: 'get_state' });
@@ -196,7 +250,7 @@ export const ServerOwnedPiDriver = {
     });
     const sendTurn = input => attempt('sendTurn', async () => {
       const session = requireSession(input.threadId);
-      if (session.sending) throw validation('sendTurn', 'Pi is already submitting a prompt.');
+      if (session.sending || session.controlling) throw validation('sendTurn', 'Pi is already submitting a prompt.');
       if (input.continuation || !input.input?.trim()) throw validation('sendTurn', 'An explicit text prompt is required.');
       const attachments = input.attachments ?? [];
       if (attachments.length > 8 || attachments.reduce((total, item) => total + item.sizeBytes, 0) > 8 * 1024 * 1024)
@@ -267,9 +321,7 @@ export const ServerOwnedPiDriver = {
         const result = await rpc.request({ type: 'get_available_models' });
         const state = await rpc.request({ type: 'get_state' });
         const current = state.model && `${state.model.provider}/${state.model.id}`;
-        if (current && Array.isArray(result.models)) {
-          result.models.sort((a, b) => Number(`${b.provider}/${b.id}` === current) - Number(`${a.provider}/${a.id}` === current));
-        }
+        result.current = current;
         return result;
       }
       catch (error) {
@@ -279,19 +331,27 @@ export const ServerOwnedPiDriver = {
       }
     };
     const snapshot = () => Effect.promise(async () => {
-      if (cachedSnapshot) return cachedSnapshot;
+      const preferencesKey = modelPreferencesKey();
+      if (cachedSnapshot && cachedPreferences === preferencesKey) return cachedSnapshot;
+      cachedSnapshot = undefined;
       if (probing) return probing;
       probing = (async () => {
-        let models = [], installed = false;
-        if (enabled) try { models = (await probe()).models ?? []; installed = true; } catch {}
+        let models = [], current, installed = false;
+        if (enabled) try { const result = await probe(); models = result.models ?? []; current = result.current; installed = true; } catch {}
+        const toModel = m => ({ slug: m.provider + '/' + m.id, name: m.name ?? m.id,
+          isCustom: false, isDefault: m.isDefault, capabilities: { optionDescriptors: [{
+            id: 'thinkingLevel', label: 'Thinking level', type: 'select',
+            options: supportedThinkingLevels(m).map(id => ({ id, label: id }))
+          }, ...(['openai', 'openai-codex'].includes(m.provider) && ['openai-responses', 'openai-codex-responses'].includes(m.api) ? [{
+            id: 'fastMode', label: 'Fast mode', type: 'select', options: [{ id: 'off', label: 'Off' }, { id: 'on', label: 'On' }]
+          }] : [])] } });
+        recordModelCatalog(instanceId, models.map(toModel));
+        models = visibleModels(models, current);
         cachedSnapshot = decodeSnapshot({ instanceId, driver: 'pi', displayName: displayName ?? 'Pi', enabled, installed, version: null,
           status: !enabled ? 'disabled' : installed ? 'ready' : 'error', availability: 'available', auth: { status: 'unknown' }, checkedAt: now(),
           supportsConversationRollback: false, supportsTextGeneration: false, requiresNewThreadForModelChange: false,
-          setup: { canAuthenticate: false, canInstall: false }, models: models.map(m => ({ slug: m.provider + '/' + m.id,
-            name: m.name ?? m.id, isCustom: false, capabilities: { optionDescriptors: [{
-              id: 'thinkingLevel', label: 'Thinking level', type: 'select',
-              options: supportedThinkingLevels(m).map(id => ({ id, label: id }))
-            }] } })) });
+          setup: { canAuthenticate: false, canInstall: false }, models: models.map(toModel) });
+        cachedPreferences = preferencesKey;
         return cachedSnapshot;
       })();
       try { return await probing; } finally { probing = undefined; }
@@ -299,7 +359,7 @@ export const ServerOwnedPiDriver = {
     const unsupported = operation => () => Effect.fail(validation(operation, 'Not supported by the Pi provider adapter yet.'));
     return { instanceId, driverKind: 'pi', enabled, displayName,
       continuationIdentity: defaultProviderContinuationIdentity({ driverKind: 'pi', instanceId }),
-      snapshot: { getSnapshot: snapshot(), refresh: () => { cachedSnapshot = undefined; return snapshot(); },
+      snapshot: { getSnapshot: snapshot(), refresh: Effect.suspend(() => { cachedSnapshot = undefined; return snapshot(); }),
         streamChanges: Stream.fromEffect(snapshot()).pipe(Stream.repeat(Schedule.spaced('30 seconds'))),
         resolveMaintenance: () => Effect.succeed({ canInstall: false, canUpdate: false }), applyUsageLimits: () => Effect.void },
       adapter: { provider: 'pi', capabilities: { sessionModelSwitch: 'in-session', supportsConversationRollback: false },

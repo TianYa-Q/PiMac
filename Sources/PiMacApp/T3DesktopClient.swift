@@ -11,14 +11,18 @@ final class T3DesktopClient: ObservableObject {
   private(set) var shell: JSON = [:]
   private(set) var providers: [JSON] = []
   var onShell: ((JSON) -> Void)?
+  var onTaskStatus: ((TaskStatusTracker.Event) -> Void)?
+  private var taskStatusTracker = TaskStatusTracker()
   private weak var service: T3BridgeService?
   private var token = ""
+  private var connectedServerURL: URL?
   private var loop: Task<Void, Never>?
   private var refreshTask: Task<Void, Never>?
   private var generation = UUID()
   private var watches: [UUID: (String, (JSON) -> Void)] = [:]
   private var threadRevisions: [String: Int] = [:]
   private var hasDeliveredShell = false
+  private var syncedModelPreferences: Data?
   private let session: URLSession = {
     let config = URLSessionConfiguration.ephemeral
     config.httpShouldSetCookies = false
@@ -42,13 +46,26 @@ final class T3DesktopClient: ObservableObject {
     let current = generation
     loop = Task { [weak self] in
       while let self, !Task.isCancelled, self.generation == current {
+        var phase = "获取桌面凭证"
         do {
-          if self.service?.serverURL == nil {
+          let serverURL = self.service?.serverURL
+          if serverURL != self.connectedServerURL {
+            self.connectedServerURL = serverURL
+            self.token = ""
+            self.syncedModelPreferences = nil
+            self.providers = []
+            self.threadRevisions.removeAll()
+            self.isConnected = false
+          }
+          if serverURL == nil {
             let status = self.service?.status ?? "Server 未启动"
             if self.status != status { self.status = status }
           } else {
             if self.token.isEmpty { self.token = try await service.desktopCredential() }
+            phase = "同步模型配置"
+            try await self.syncModelPreferences()
             if self.providers.isEmpty { try await self.loadConfig() }
+            phase = "读取会话状态"
             try await self.refresh()
             if !self.isConnected { self.isConnected = true }
             if self.status != "T3 Server 已连接" { self.status = "T3 Server 已连接" }
@@ -56,7 +73,7 @@ final class T3DesktopClient: ObservableObject {
         } catch {
           guard self.generation == current, !Task.isCancelled else { return }
           if self.isConnected { self.isConnected = false }
-          let status = "T3 Server 连接中断；命令不会自动重发。"
+          let status = Self.connectionFailureStatus(error, phase: phase)
           if self.status != status { self.status = status }
           if (error as? ClientError) == .unauthorized { self.token = "" }
         }
@@ -72,10 +89,14 @@ final class T3DesktopClient: ObservableObject {
     refreshTask?.cancel()
     refreshTask = nil
     token = ""
+    connectedServerURL = nil
+    providers = []
+    syncedModelPreferences = nil
     isConnected = false
     watches.removeAll()
     threadRevisions.removeAll()
     hasDeliveredShell = false
+    taskStatusTracker = TaskStatusTracker()
   }
 
   var hasRunningThread: Bool {
@@ -179,6 +200,7 @@ final class T3DesktopClient: ObservableObject {
     guard !hasDeliveredShell || !NSDictionary(dictionary: shell).isEqual(to: next) else { return }
     hasDeliveredShell = true
     shell = next
+    for event in taskStatusTracker.consume(threads) { onTaskStatus?(event) }
     if let data = try? JSONSerialization.data(withJSONObject: next) {
       defaults.set(data, forKey: "t3DesktopShellCache")
     }
@@ -196,6 +218,12 @@ final class T3DesktopClient: ObservableObject {
     return try? JSONDecoder().decode(SessionStats.self, from: data)
   }
 
+  func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws {
+    guard let service else { throw ClientError.unavailable }
+    try await service.sessionControl(threadID: threadID, operation: operation, accountName: accountName)
+    requestRefresh()
+  }
+
   func accountStatus(threadID: String, provider: String? = nil) async throws -> JSON? {
     guard let service else { throw ClientError.unavailable }
     return try await service.accountStatus(threadID: threadID, provider: provider)
@@ -209,9 +237,29 @@ final class T3DesktopClient: ObservableObject {
     }
   }
 
+  private func syncModelPreferences() async throws {
+    guard let service else { throw ClientError.unavailable }
+    let hidden = (defaults.stringArray(forKey: "t3HiddenModels") ?? []).sorted()
+    let model = defaults.string(forKey: "defaultNewSessionModelID")
+    let data = try JSONSerialization.data(withJSONObject: [
+      "hiddenModels": hidden, "defaultModel": model as Any? ?? NSNull(),
+    ], options: [.sortedKeys])
+    guard data != syncedModelPreferences else { return }
+    try await service.syncModelPreferences(hiddenModels: hidden, defaultModel: model)
+    try await loadConfig()
+    syncedModelPreferences = data
+  }
+
   func loadConfig() async throws {
     let result = try await rpc("server.getConfig")
-    providers = result["providers"] as? [JSON] ?? []
+    let catalogs = try await service?.modelCatalog() ?? [:]
+    providers = (result["providers"] as? [JSON] ?? []).map { provider in
+      var nativeProvider = provider
+      if let id = provider["instanceId"] as? String, let models = catalogs[id] {
+        nativeProvider["models"] = models
+      }
+      return nativeProvider
+    }
   }
   private func rpc(_ method: String) async throws -> JSON {
     let current = generation
@@ -286,5 +334,24 @@ final class T3DesktopClient: ObservableObject {
     // Namespace is distinct from thread IDs and legacy file/runtime identifiers.
     "desktop-" + SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
   }
+  // Use only fixed categories, never server error bodies, URLs or credentials.
+  static func connectionFailureStatus(_ error: Error, phase: String) -> String {
+    let reason: String
+    if let error = error as? URLError {
+      switch error.code {
+      case .timedOut: reason = "请求超时"
+      case .cannotConnectToHost, .networkConnectionLost: reason = "本机服务暂不可达"
+      default: reason = "网络请求失败"
+      }
+    } else if (error as? ClientError) == .unauthorized {
+      reason = "授权已失效"
+    } else if (error as? ClientError) == .rejected {
+      reason = "服务拒绝请求"
+    } else {
+      reason = "初始化请求失败"
+    }
+    return "T3 Server 连接失败（\(phase)：\(reason)）；正在重试，命令不会自动重发。"
+  }
+
   enum ClientError: Error { case unavailable, unauthorized, rejected }
 }

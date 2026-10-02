@@ -12,6 +12,7 @@ import { DEFAULT_SIGNAL_EXPORT } from '@t3tools/shared/observability';
 import * as OtelEnvironment from '@t3tools/shared/otelEnvironment';
 import { configureNative } from './native.mjs';
 import { configureAccountStatuses } from './account-status.mjs';
+import { configureModelPreferences } from './model-preferences.mjs';
 export { rpcAllowed, httpAllowed } from './native.mjs';
 export { originAllowed } from './origin-policy.mjs';
 
@@ -37,6 +38,7 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   checkPrivateTree(directory, path.join(directory, 'tools'));
   const broker = configureNative({ environmentId, directory });
   configureAccountStatuses(directory);
+  configureModelPreferences(directory);
   broker.controlToken = randomBytes(32).toString('hex');
   const configLayer = Layer.effect(ServerConfig, Effect.gen(function* () {
     const derived = yield* deriveServerPaths(directory, undefined, { baseDirIsExplicit: true });

@@ -43,6 +43,8 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
   var isError = false
   var toolName: String? = nil
   var toolInput: String? = nil
+  var parentToolEntryID: String? = nil
+  var childToolEntries: [ChatEntry] = []
   var nestedCalls: [NestedToolCall] = []
   var nestedCallsComplete = true
   var diff: String? = nil
@@ -50,6 +52,27 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
   var modelProvider: String? = nil
   var modelID: String? = nil
   var timestamp: Date? = .now
+
+  /// Only explicit parent links determine ownership; concurrent top-level tools stay separate.
+  static func groupingToolEntries(_ entries: [ChatEntry]) -> [ChatEntry] {
+    let ids = Set(entries.map(\.id))
+    let children = Dictionary(grouping: entries.filter {
+      $0.parentToolEntryID != nil && ids.contains($0.parentToolEntryID!)
+        && $0.parentToolEntryID != $0.id
+    }, by: { $0.parentToolEntryID! })
+    func grouped(_ entry: ChatEntry, ancestors: Set<String>) -> ChatEntry {
+      var result = entry
+      result.childToolEntries = (children[entry.id] ?? [])
+        .filter { !ancestors.contains($0.id) }
+        .sorted { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
+        .map { grouped($0, ancestors: ancestors.union([$0.id])) }
+      return result
+    }
+    return entries.filter {
+      guard let parent = $0.parentToolEntryID else { return true }
+      return parent == $0.id || !ids.contains(parent)
+    }.map { grouped($0, ancestors: [$0.id]) }
+  }
 
   var modelLabel: String? {
     guard let modelID else { return nil }

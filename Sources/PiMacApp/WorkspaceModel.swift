@@ -39,6 +39,7 @@ final class WorkspaceModel: ObservableObject {
     addTab(model: AppModel(restoreLastProjectOnLaunch: false), path: nil, draft: false)
     guard restoreUserState else { return }
     server.onShell = { [weak self] snapshot in self?.applyShell(snapshot) }
+    server.onTaskStatus = { TaskStatusNotifications.shared.deliver($0) }
     // Cached shell is presentation only; all commands still require live readiness.
     if !server.shell.isEmpty { applyShell(server.shell) }
     server.start(service: t3Bridge)

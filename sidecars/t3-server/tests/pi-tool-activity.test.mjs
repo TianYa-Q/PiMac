@@ -9,6 +9,7 @@ test('Pi projection preserves input, multiline output and nested calls', () => {
   assert.deepEqual(projected.input, data.input);
   assert.deepEqual(projected.rawOutput, data.rawOutput);
   assert.deepEqual(projected.nestedCalls, data.nestedCalls);
+  assert.equal(projectPiToolActivityData({ toolName: 'bash', parentToolCallId: 'code-1' }).parentToolCallId, 'code-1');
   assert.deepEqual(projectPiToolActivityData({ input: { path: 'file.swift', offset: 10, limit: 20 } }).input,
     { path: 'file.swift', offset: 10, limit: 20 });
 });

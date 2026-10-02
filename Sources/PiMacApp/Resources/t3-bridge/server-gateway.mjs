@@ -50,11 +50,14 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
       if (closed || !official) throw new Error('Unavailable');
       const manager = official.management, route = req.method + ' ' + req.url;
       if (route === 'POST /internal/auth/desktop-session') return json(res, 200, await manager.desktopSession());
+      if (route === 'GET /internal/auth/model-catalog') return json(res, 200, await manager.modelCatalog());
       if (route === 'GET /internal/auth/connect') return json(res, 200, await manager.status());
       if (route === 'GET /internal/auth/clients') return json(res, 200, await manager.clients());
       if (route === 'GET /internal/auth/pairing-links') return json(res, 200, await manager.pairingLinks());
       if (!req.url.startsWith('/internal/auth/')) { json(res, 404, { error: 'use_t3_orchestration' }); req.resume(); return; }
       const body = await input(req); if (closed) throw new Error('Unavailable');
+      if (route === 'POST /internal/auth/session-control') return json(res, 200, await manager.sessionControl(body));
+      if (route === 'POST /internal/auth/model-preferences') return json(res, 200, await manager.modelPreferences(body));
       if (route === 'POST /internal/auth/session-metrics' && typeof body.threadId === 'string') return json(res, 200, await manager.sessionMetrics(body.threadId));
       if (route === 'POST /internal/auth/account-status' && typeof body.threadId === 'string') return json(res, 200, await manager.accountStatus(body.threadId, typeof body.provider === 'string' ? body.provider : undefined));
       if (route === 'POST /internal/auth/connect' && Object.keys(body).length === 1) return json(res, 200, await manager.control(body.operation));
@@ -87,7 +90,7 @@ if (entry === fileURLToPath(import.meta.url)) {
   process.on('SIGTERM', () => void stop()); process.on('SIGINT', () => void stop());
   try {
     gateway = await createServerGateway({ token: process.env.PIMAC_T3_BRIDGE_TOKEN, directory: path.dirname(process.env.PIMAC_T3_AUTH_FILE),
-      piConfig: { binaryPath: process.env.PIMAC_PI_BINARY || 'pi' }, onFailure: () => { process.exitCode = 1; void stop(); } });
+      piConfig: { binaryPath: process.env.PIMAC_PI_BINARY || 'pi', binaryArgs: ['--extension', fileURLToPath(new URL('../pimac-fast.ts', import.meta.url))] }, onFailure: () => { process.exitCode = 1; void stop(); } });
     if (stopping) await gateway.close();
     else {
       await new Promise((resolve, reject) => { gateway.server.once('error', reject); gateway.server.listen(0, '127.0.0.1', resolve); });

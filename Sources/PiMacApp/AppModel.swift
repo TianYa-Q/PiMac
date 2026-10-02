@@ -79,23 +79,23 @@ final class AppModel: ObservableObject {
   }
   var showsStatusProgress: Bool { isBusy || isLoadingConfiguration }
   var isProcessRunning: Bool { server?.isConnected == true && threadID != nil }
-  var isBusy: Bool { isStreaming || isCompacting || submitting || awaitingAgentStart || pendingSelection != nil }
+  var isBusy: Bool { isStreaming || isCompacting || submitting || awaitingAgentStart || pendingSelection != nil || codexRotationInFlight || isChangingFastMode }
   var canRestartSafely: Bool { !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty }
   var canReloadModelList: Bool { server?.isConnected == true && !isBusy }
   var canSubmitPrompt: Bool {
     server?.isConnected == true && connectionState == .connected && !isLoadingConfiguration
-      && !isCompacting && !submitting && !awaitingAgentStart && pendingSelection == nil
+      && !isCompacting && !codexRotationInFlight && !submitting && !awaitingAgentStart && pendingSelection == nil
   }
   var canReuseProcessForNewSession: Bool { false }  // A tab is a view, not a process pool slot.
   var hasUserMessage: Bool { messages.contains { $0.kind == .user } }
   var hasUnsubmittedInput: Bool {
     !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
   }
-  var supportsFastMode: Bool { false }
+  var supportsFastMode: Bool { fastModeAvailable }
   var canManageAccounts: Bool { false }
-  var supportsAccountSwitch: Bool { false }
+  var supportsAccountSwitch: Bool { accountUsageProvider != nil && isProcessRunning }
   var supportsAccountRotation: Bool { false }
-  var accountUsageProvider: AccountUsageProvider? { nil }
+  var accountUsageProvider: AccountUsageProvider? { AccountUsageProvider(modelID: selectedModelId) }
   var remotePendingMessages: [ChatEntry] { [] }
 
   init(
@@ -226,7 +226,7 @@ final class AppModel: ObservableObject {
   private var modelSelection: [String: Any] {
     [
       "instanceId": "pi", "model": selectedModelId,
-      "options": [["id": "thinkingLevel", "value": selectedThinkingLevel]],
+      "options": [["id": "thinkingLevel", "value": selectedThinkingLevel], ["id": "fastMode", "value": fastModeEnabled ? "on" : "off"]],
     ]
   }
   func sendPrompt(delivery: QueuedPromptDelivery = .steer) {
@@ -335,7 +335,13 @@ final class AppModel: ObservableObject {
   func abort() {
     guard let id = threadID, let server else { return }
     Task {
-      do { try await server.dispatch(["type": "thread.turn.interrupt", "threadId": id]) } catch {
+      do {
+        if isCompacting {
+          try await server.sessionControl(threadID: id, operation: "abort-compaction")
+        } else {
+          try await server.dispatch(["type": "thread.turn.interrupt", "threadId": id])
+        }
+      } catch {
         statusText = "取消未确认，请刷新状态。"
       }
     }
@@ -343,6 +349,8 @@ final class AppModel: ObservableObject {
   func changeModel(to id: String) {
     guard !isBusy, models.contains(where: { $0.id == id }) else { return }
     selectedModelId = id
+    fastModeAvailable = fastModeSupported(id)
+    if !fastModeAvailable { fastModeEnabled = false }
     if modelPreferenceKey != "defaultNewSessionModelID" {
       UserDefaults.standard.set(id, forKey: modelPreferenceKey)
     }
@@ -372,7 +380,10 @@ final class AppModel: ObservableObject {
       } catch {
         guard generation == current else { return }
         pendingSelection = nil
-        statusText = "模型/推理级别变更未确认，请刷新 Server 状态。"
+        if let selection = server.thread(id)?["modelSelection"] as? [String: Any] {
+          fastModeEnabled = (selection["options"] as? [[String: Any]])?.first { $0["id"] as? String == "fastMode" }?["value"] as? String == "on"
+        }
+        statusText = "模型/推理级别/Fast 变更未确认，请刷新 Server 状态。"
         server.requestRefresh()
       }
     }
@@ -404,11 +415,18 @@ final class AppModel: ObservableObject {
         defaultModelID.flatMap { preference in models.first { $0.id == preference }?.id } ?? models
         .first?.id ?? ""
     }
+    fastModeAvailable = fastModeSupported(selectedModelId)
     thinkingLevels = allModels.first { $0.id == selectedModelId }?.thinkingLevels ?? ["off"]
     if selectingDefault {
       selectedThinkingLevel = modelDefaultThinkingLevels[selectedModelId] ?? globalDefaultThinkingLevel
     }
     if !thinkingLevels.contains(selectedThinkingLevel) { selectedThinkingLevel = "off" }
+  }
+  private func fastModeSupported(_ modelID: String) -> Bool {
+    let provider = server?.providers.first { $0["instanceId"] as? String == "pi" }
+    let model = (provider?["models"] as? [[String: Any]])?.first { $0["slug"] as? String == modelID }
+    let capabilities = model?["capabilities"] as? [String: Any]
+    return (capabilities?["optionDescriptors"] as? [[String: Any]])?.contains { $0["id"] as? String == "fastMode" } == true
   }
   func updateCatalog(_ values: [SessionItem]) { sessions = values }
   private func apply(_ detail: [String: Any]) {
@@ -421,7 +439,9 @@ final class AppModel: ObservableObject {
       pendingSelection == nil || NSDictionary(dictionary: pendingSelection!).isEqual(to: selection)
     {
       pendingSelection = nil
+      fastModeEnabled = (selection["options"] as? [[String: Any]])?.first { $0["id"] as? String == "fastMode" }?["value"] as? String == "on"
       selectedModelId = selection["model"] as? String ?? selectedModelId
+      fastModeAvailable = fastModeSupported(selectedModelId)
       thinkingLevels = allModels.first { $0.id == selectedModelId }?.thinkingLevels ?? ["off"]
       if let options = selection["options"] as? [[String: Any]],
         let thinking = options.first(where: { $0["id"] as? String == "thinkingLevel" })?["value"]
@@ -492,14 +512,19 @@ final class AppModel: ObservableObject {
             toolName: data["toolName"] as? String ?? payload["title"] as? String ?? "",
             args: data["input"]
           ) ?? (data["command"] as? String).map { "$ \($0)" },
+          parentToolEntryID: (data["parentToolCallId"] as? String).map {
+            "\(activity["turnId"] as? String ?? ""):\($0)"
+          },
           nestedCalls: NestedToolCall.from(data["nestedCalls"]),
           nestedCallsComplete: (data["nestedCalls"] as? [String: Any])?["complete"] as? Bool ?? true,
           diff: data["diff"] as? String,
           timestamp: T3DesktopClient.date(activity["createdAt"]))
       if kind.hasPrefix("tool.") {
         entry.toolInput = entry.toolInput ?? toolEntries[entryID]?.toolInput
+        entry.parentToolEntryID = entry.parentToolEntryID ?? toolEntries[entryID]?.parentToolEntryID
         if completedTools.contains(entryID), let input = entry.toolInput {
           toolEntries[entryID]?.toolInput = input
+          toolEntries[entryID]?.parentToolEntryID = entry.parentToolEntryID
         }
         // Native activities are not guaranteed to be ordered when timestamps
         // tie. Terminal output must beat stale started/updated records.
@@ -513,7 +538,7 @@ final class AppModel: ObservableObject {
         entries.append(entry)
       }
     }
-    entries.append(contentsOf: toolEntries.values)
+    entries.append(contentsOf: ChatEntry.groupingToolEntries(Array(toolEntries.values)))
     entries.sort { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
     if messages != entries { messages = entries }
     if !isStreaming, let turnID, state != nil, lastSettledTurnID != turnID {
@@ -551,9 +576,40 @@ final class AppModel: ObservableObject {
     UserDefaults.standard.set(modelDefaultThinkingLevels, forKey: "t3ModelDefaultThinkingLevels")
   }
   func setCompactionModel(_ id: String?) { unsupported("压缩模型管理") }
-  func compact() { unsupported("手动压缩") }
+  func compact() {
+    guard canRestartSafely, isProcessRunning else { return }
+    performSessionControl("compact")
+  }
+  private func performSessionControl(_ operation: String, accountName: String? = nil) {
+    guard let id = threadID, let server else { return }
+    let current = generation
+    if operation == "compact" { isCompacting = true } else { codexRotationInFlight = true }
+    statusText = operation == "compact" ? "正在压缩上下文…" : "正在切换账户…"
+    Task { [weak self] in
+      guard let self else { return }
+      defer {
+        if self.generation == current {
+          self.isCompacting = false
+          self.codexRotationInFlight = false
+          self.refreshCodexAccounts()
+          self.drainQueuedPrompts()
+        }
+      }
+      do {
+        try await server.sessionControl(threadID: id, operation: operation, accountName: accountName)
+        guard self.generation == current else { return }
+        self.statusText = operation == "compact" ? "上下文压缩完成" : "已切换到 \(accountName ?? "")"
+      } catch {
+        guard self.generation == current else { return }
+        self.statusText = "操作未确认；请检查会话状态和扩展配置，不会自动重试。"
+      }
+    }
+  }
   func scheduleCodexAccountRotation() {}
-  func switchCodexAccount(to accountName: String) { unsupported("账户切换") }
+  func switchCodexAccount(to accountName: String) {
+    guard canRestartSafely, supportsAccountSwitch else { return }
+    performSessionControl("switch-account", accountName: accountName)
+  }
   func refreshCodexAccounts() {
     guard accountStatusTask == nil, let server else { return }
     let threadID = self.threadID ?? "@discovery"
@@ -583,7 +639,11 @@ final class AppModel: ObservableObject {
     }
   }
   func openCodexAccountManager() { unsupported("账户管理") }
-  func changeFastMode(to enabled: Bool) { unsupported("Fast 模式") }
+  func changeFastMode(to enabled: Bool) {
+    guard canRestartSafely, fastModeAvailable else { return }
+    fastModeEnabled = enabled
+    persistSelection()
+  }
   func sendExtensionResponse(
     id: String, value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false
   ) { unsupported("扩展对话") }
