@@ -1,4 +1,5 @@
-// Host presentation only: upstream still owns connector restart/recovery.
+// Host health tracking: upstream owns connector restart/recovery; a separate
+// bounded host watchdog can request a local retry reset during total outage.
 // Raw connector output (which can contain credentials) never leaves this parser.
 export function createTunnelHealth(diagnostics) {
   let pid = null, state = 'disabled';
@@ -10,6 +11,7 @@ export function createTunnelHealth(diagnostics) {
   };
   return {
     get status() { return state; },
+    isConnected(sourcePID) { return sourcePID === pid && connections.size > 0; },
     start(nextPID) {
       pid = nextPID; connections.clear(); transition('connecting');
     },
@@ -24,9 +26,12 @@ export function createTunnelHealth(diagnostics) {
     output(sourcePID, line) {
       if (sourcePID !== pid) return;
       const index = /\bconnIndex=(\d+)\b/u.exec(line)?.[1];
+      if (/You requested \d+ HA connections but I can give you at most \d+/u.test(line)) {
+        diagnostics.record('tunnel-connector', { reason: 'edge-pool-reduced' });
+      }
       if (/\bRegistered tunnel connection\b/iu.test(line)) {
         connections.add(index ?? 'unknown'); transition('connected');
-      } else if (/\b(?:Unregistered tunnel connection|Connection terminated)\b/iu.test(line)) {
+      } else if (/\b(?:Unregistered tunnel connection|Connection terminated|Lost connection with the edge)\b/iu.test(line)) {
         if (index === undefined) connections.clear(); else connections.delete(index);
         if (!connections.size) transition('reconnecting');
       } else if (/\bRegister tunnel error from server side\b/iu.test(line)) {

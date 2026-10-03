@@ -16,7 +16,9 @@ test('process startup is not edge readiness; config reapply cannot regress conne
   health.config({ status: 'running' });
   assert.equal(health.status, 'connected');
   health.output(1, 'INF Registered tunnel connection connIndex=1');
-  health.output(1, 'ERR Connection terminated connIndex=0');
+  health.output(1, 'INF Lost connection with the edge connIndex=0');
+  assert.equal(health.status, 'connected');
+  health.output(1, 'WRN Connection terminated connIndex=0');
   assert.equal(health.status, 'connected');
   health.output(1, 'ERR Connection terminated connIndex=1');
   assert.equal(health.status, 'reconnecting');
@@ -50,6 +52,9 @@ test('errors are finite classifications, not credentials; failures and unlink cl
   health.output(1, 'Registered tunnel connection');
   assert.equal(health.status, 'failed:spawn-failed');
   health.config({ status: 'disabled' }); assert.equal(health.status, 'disabled');
+  health.start(2);
+  health.output(2, 'INF You requested 4 HA connections but I can give you at most 2.');
+  assert(events.some(event => event.reason === 'edge-pool-reduced'));
   assert(!JSON.stringify(events).includes('secret'));
   assert(!JSON.stringify(events).includes('private-path'));
 });

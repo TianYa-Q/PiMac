@@ -98,6 +98,26 @@ struct GitWorkspacePresentationTests {
     #expect(GitWorkspacePresentation.filteredFiles(files, query: "", scope: .selected).isEmpty)
   }
 
+  @Test func unselectedScopeAndSortPreserveSelectionAndHandleOverflow() {
+    #expect(
+      GitWorkspacePresentation.filteredFiles(
+        files, query: "swift", scope: .unselected, selected: [files[0].path]
+      ).map(\.path) == [files[1].path])
+    let sorted = GitWorkspacePresentation.filteredFiles(files, query: "", sort: .changes)
+    #expect(sorted.map(\.path) == [files[2].path, files[1].path, files[0].path])
+    let huge = [
+      GitWorkspaceStatus.File(path: "b", insertions: Int.max, deletions: 1),
+      GitWorkspaceStatus.File(path: "a", insertions: Int.max, deletions: 2),
+      GitWorkspaceStatus.File(path: "z", insertions: 1, deletions: 0),
+    ]
+    #expect(
+      GitWorkspacePresentation.filteredFiles(huge, query: "", sort: .changes).map(\.path)
+        == ["a", "b", "z"])
+    #expect(
+      GitWorkspacePresentation.filteredFiles(huge, query: "", sort: .path).map(\.path)
+        == ["a", "b", "z"])
+  }
+
   @Test func malformedSnapshotsNeverUnlockActionsOrReplaceKnownState() async {
     let store = GitWorkspaceStore()
     await store.refresh(cwd: "/repo") { method, _ in

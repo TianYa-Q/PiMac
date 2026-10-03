@@ -10,14 +10,17 @@ import * as RelayClient from '@t3tools/shared/relayClient';
 import * as ChildProcessSpawner from 'effect/unstable/process/ChildProcessSpawner';
 import { make } from '../../upstream/apps/server/src/cloud/ManagedEndpointRuntime.ts';
 import { configureNative } from '../../native.mjs';
+import { createConnectorRecovery } from '../../connector-recovery.mjs';
 
 export async function exerciseTunnelRuntime() {
   const broker = configureNative({ environmentId: 'test-connector' });
-  const children = [], connectorOutput = [];
+  broker.connectorRecovery = createConnectorRecovery({ outageMs: 100, cooldownMs: 200, stableMs: 400, pollIntervalMs: 5 });
+  const children = [], connectorOutput = [], relayRecoveries = [];
   broker.connectionDiagnostics.recordConnectorOutput = (pid, output) => connectorOutput.push({ pid, output });
   const program = Effect.gen(function* () {
     const runtime = yield* make;
     const config = { providerKind: 'cloudflare_tunnel', connectorToken: 'private-fixture-token' };
+    yield* Effect.forkChild(runtime.recoveryRequests.pipe(Stream.runForEach(value => Effect.sync(() => relayRecoveries.push(value)))));
     const wait = predicate => Effect.gen(function* () {
       for (let n = 0; n < 200; n++) {
         if (predicate()) return;
@@ -40,6 +43,14 @@ export async function exerciseTunnelRuntime() {
     yield* wait(() => broker.tunnelHealth.status === 'reconnecting');
     yield* Queue.offer(children[1].output, new TextEncoder().encode('INF Registered tunnel connection connIndex=1\n'));
     yield* wait(() => broker.tunnelHealth.status === 'connected');
+    assert.equal(relayRecoveries.length, 1, 'natural crash still asks upstream for recovery');
+    yield* Queue.offer(children[1].output, new TextEncoder().encode('INF Lost connection with the edge connIndex=1\n'));
+    yield* wait(() => children.length === 3);
+    assert.equal(relayRecoveries.length, 1, 'local retry reset must not reprovision the Tunnel');
+    assert.equal(broker.tunnelHealth.status, 'connecting');
+    yield* Queue.offer(children[2].output, new TextEncoder().encode('INF Registered tunnel connection connIndex=0\n'));
+    yield* wait(() => broker.tunnelHealth.status === 'connected');
+    assert.match(broker.connectionDiagnostics.summary, /all-edges-stalled-local-restart/);
     yield* runtime.applyConfig(null);
     assert.equal(broker.tunnelHealth.status, 'disabled');
     assert(children.every(child => !child.running));
@@ -53,7 +64,10 @@ export async function exerciseTunnelRuntime() {
     return yield* Effect.acquireRelease(Effect.succeed(ChildProcessSpawner.makeHandle({
       pid: ChildProcessSpawner.ProcessId(children.length),
       exitCode: Deferred.await(child.exited), isRunning: Effect.sync(() => child.running),
-      kill: () => Effect.sync(() => { child.running = false; }), unref: Effect.succeed(Effect.void),
+      kill: () => Effect.gen(function* () {
+        child.running = false;
+        yield* Deferred.succeed(child.exited, ChildProcessSpawner.ExitCode(0));
+      }), unref: Effect.succeed(Effect.void),
       stdin: Sink.drain, stdout: Stream.empty, stderr: Stream.empty, all: Stream.fromQueue(child.output),
       getInputFd: () => Sink.drain, getOutputFd: () => Stream.empty,
     })), () => Effect.sync(() => { child.running = false; }));

@@ -5,19 +5,40 @@ enum GitWorkspacePresentation {
   enum FileScope: String, CaseIterable, Identifiable {
     case all = "全部文件"
     case selected = "仅看已选"
+    case unselected = "仅看未选"
+    var id: String { rawValue }
+  }
+
+  enum FileSort: String, CaseIterable, Identifiable {
+    case server = "默认顺序"
+    case path = "文件路径"
+    case changes = "变更最多"
     var id: String { rawValue }
   }
 
   static func filteredFiles(
     _ files: [GitWorkspaceStatus.File], query: String,
-    scope: FileScope = .all, selected: Set<String> = []
+    scope: FileScope = .all, selected: Set<String> = [], sort: FileSort = .server
   )
     -> [GitWorkspaceStatus.File]
   {
     let terms = query.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-    return files.filter { file in
-      (scope == .all || selected.contains(file.path))
-        && terms.allSatisfy { file.path.localizedStandardContains($0) }
+    let filtered = files.filter { file in
+      let inScope =
+        scope == .all
+        || (scope == .selected && selected.contains(file.path))
+        || (scope == .unselected && !selected.contains(file.path))
+      return inScope && terms.allSatisfy { file.path.localizedStandardContains($0) }
+    }
+    guard sort != .server else { return filtered }
+    return filtered.sorted { lhs, rhs in
+      if sort == .changes {
+        let leftCount = saturatedAdd(lhs.insertions, lhs.deletions)
+        let rightCount = saturatedAdd(rhs.insertions, rhs.deletions)
+        if leftCount != rightCount { return leftCount > rightCount }
+      }
+      let order = lhs.path.localizedStandardCompare(rhs.path)
+      return order == .orderedSame ? lhs.path < rhs.path : order == .orderedAscending
     }
   }
 
@@ -25,13 +46,14 @@ enum GitWorkspacePresentation {
   static func selectedChanges(_ files: [GitWorkspaceStatus.File], selected: Set<String>)
     -> (insertions: Int, deletions: Int)
   {
-    func add(_ total: Int, _ count: Int) -> Int {
-      let (sum, overflow) = total.addingReportingOverflow(max(0, count))
-      return overflow ? Int.max : sum
-    }
     return files.filter { selected.contains($0.path) }.reduce((0, 0)) {
-      (add($0.0, $1.insertions), add($0.1, $1.deletions))
+      (saturatedAdd($0.0, $1.insertions), saturatedAdd($0.1, $1.deletions))
     }
+  }
+
+  private static func saturatedAdd(_ lhs: Int, _ rhs: Int) -> Int {
+    let (sum, overflow) = max(0, lhs).addingReportingOverflow(max(0, rhs))
+    return overflow ? Int.max : sum
   }
 
   /// Toggle only visible files, preserving selections hidden by the current filter.

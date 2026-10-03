@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -30,8 +30,8 @@ type CacheDocument = {
 };
 
 /**
- * Shares quota queries between all Pi RPC processes. The lock is intentionally held while
- * querying: other sessions wait for the first query and then consume exactly the same result.
+ * Coalesce queries within a provider, but let unrelated providers query concurrently.
+ * The document lock is held only for reading/merging, never across network I/O.
  */
 export async function readThroughSharedCache<T>(options: {
   namespace: string;
@@ -45,7 +45,8 @@ export async function readThroughSharedCache<T>(options: {
   options.signal.throwIfAborted();
   mkdirSync(getAgentDir(), { recursive: true, mode: 0o700 });
   let compromised: Error | undefined;
-  const release = await acquireCacheLock(options.signal, {
+  const namespacePath = `${CACHE_PATH}.${createHash("sha256").update(options.namespace).digest("hex")}`;
+  const release = await acquireCacheLock(namespacePath, options.signal, {
     // Never throw from proper-lockfile's heartbeat timer. A throw there bypasses
     // this async function and terminates the entire Pi RPC process.
     onCompromised: (error) => {
@@ -59,8 +60,10 @@ export async function readThroughSharedCache<T>(options: {
   };
   try {
     options.signal.throwIfAborted();
-    const document = readCache();
-    const cached = document.entries[options.namespace];
+    const cached = await withDocumentLock(
+      options.signal,
+      () => readCache().entries[options.namespace],
+    );
     if (
       !options.force &&
       cached?.key === options.key &&
@@ -77,13 +80,38 @@ export async function readThroughSharedCache<T>(options: {
     throwIfCompromised();
     if (options.validate && !options.validate(value))
       throw new Error("额度查询返回结构无效，未更新共享缓存。");
-    document.entries[options.namespace] = {
-      key: options.key,
-      updatedAt: Date.now(),
-      value,
-    };
-    writeCache(document);
+    await withDocumentLock(options.signal, () => {
+      options.signal.throwIfAborted();
+      throwIfCompromised();
+      // Another provider may have published while our network request was in flight.
+      const document = readCache();
+      document.entries[options.namespace] = {
+        key: options.key,
+        updatedAt: Date.now(),
+        value,
+      };
+      writeCache(document);
+    });
     return value;
+  } finally {
+    await releaseCacheLock(release, () => compromised);
+  }
+}
+
+async function withDocumentLock<T>(
+  signal: AbortSignal,
+  operation: () => T,
+): Promise<T> {
+  let compromised: Error | undefined;
+  const release = await acquireCacheLock(CACHE_PATH, signal, {
+    onCompromised: (error) => {
+      compromised = error;
+    },
+  });
+  try {
+    signal.throwIfAborted();
+    if (compromised) throw compromised;
+    return operation();
   } finally {
     await releaseCacheLock(release, () => compromised);
   }
@@ -91,6 +119,7 @@ export async function readThroughSharedCache<T>(options: {
 
 /** Retry outside proper-lockfile so cancellation interrupts contention, not just the query. */
 async function acquireCacheLock(
+  path: string,
   signal: AbortSignal,
   options: { onCompromised: (error: Error) => void },
 ): Promise<() => Promise<void>> {
@@ -98,7 +127,7 @@ async function acquireCacheLock(
     signal.throwIfAborted();
     try {
       // Do not race acquisition against abort: a late successful acquisition would leak its lease.
-      return await lockfile.lock(CACHE_PATH, {
+      return await lockfile.lock(path, {
         realpath: false,
         stale: 5 * 60_000,
         retries: 0,

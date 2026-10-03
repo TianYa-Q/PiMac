@@ -2,12 +2,14 @@
 import { createConnectionDiagnostics } from './connection-diagnostics.mjs';
 import { createPiMobileUsage } from './pi-mobile-usage.mjs';
 import { createTunnelHealth } from './tunnel-health.mjs';
+import { createConnectorRecovery } from './connector-recovery.mjs';
 let host;
 export function configureNative({ environmentId, directory }) {
   if (host && !host.closed) throw new Error('Server host already owned');
   const connectionDiagnostics = createConnectionDiagnostics(directory);
   host = { environmentId, closed: false, mobileUsage: createPiMobileUsage(), connectionDiagnostics,
     tunnelHealth: createTunnelHealth(connectionDiagnostics),
+    connectorRecovery: createConnectorRecovery(),
     diagnostics: { requests: 0, accepted: 0, queuedDeliveries: 0, successfulDeliveries: 0, failedDeliveries: 0 },
     message: '', browserURL: null, close() { this.closed = true; this.mobileUsage.close(); } };
   return host;

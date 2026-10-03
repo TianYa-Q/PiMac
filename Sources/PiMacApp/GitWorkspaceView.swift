@@ -17,6 +17,7 @@ struct GitWorkspaceView: View {
   @State private var newBranch = ""
   @State private var fileQuery = ""
   @State private var fileScope = GitWorkspacePresentation.FileScope.all
+  @State private var fileSort = GitWorkspacePresentation.FileSort.server
   @State private var pending: Operation?
   @State private var previewFile: GitWorkspaceStatus.File?
 
@@ -112,7 +113,7 @@ struct GitWorkspaceView: View {
             ForEach(GitWorkspacePresentation.FileScope.allCases) { scope in
               Text(scope.rawValue).tag(scope)
             }
-          }.pickerStyle(.segmented).frame(width: 180)
+          }.pickerStyle(.segmented).frame(width: 260)
           Button(allVisibleSelected ? "取消选择可见文件" : "选择可见文件") {
             store.selectedFiles = GitWorkspacePresentation.toggledSelection(
               store.selectedFiles, visible: visibleFiles)
@@ -126,6 +127,11 @@ struct GitWorkspaceView: View {
             Button("清除", systemImage: "xmark.circle.fill") { fileQuery = "" }
               .labelStyle(.iconOnly).buttonStyle(.plain).help("清除文件筛选")
           }
+          Picker("排序", selection: $fileSort) {
+            ForEach(GitWorkspacePresentation.FileSort.allCases) { sort in
+              Text(sort.rawValue).tag(sort)
+            }
+          }.labelsHidden().frame(width: 130).accessibilityLabel("文件排序")
           Text("\(visibleFiles.count) / \(status.files.count)")
             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
@@ -229,7 +235,8 @@ struct GitWorkspaceView: View {
 
   private var visibleFiles: [GitWorkspaceStatus.File] {
     GitWorkspacePresentation.filteredFiles(
-      store.status?.files ?? [], query: fileQuery, scope: fileScope, selected: store.selectedFiles)
+      store.status?.files ?? [], query: fileQuery, scope: fileScope, selected: store.selectedFiles,
+      sort: fileSort)
   }
   private var allVisibleSelected: Bool {
     !visibleFiles.isEmpty && Set(visibleFiles.map(\.path)).isSubset(of: store.selectedFiles)

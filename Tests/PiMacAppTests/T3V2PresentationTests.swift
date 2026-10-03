@@ -163,11 +163,13 @@ struct T3V2PresentationTests {
     let native: [String: Any] = [
       "projection": [
         "thread": ["id": "thread"],
-        "providerTurns": [[
-          "turnTokenUsage": usage,
-          "startedAt": "2026-01-01T00:00:00Z",
-          "completedAt": "2026-01-01T00:00:03Z",
-        ]],
+        "providerTurns": [
+          [
+            "turnTokenUsage": usage,
+            "startedAt": "2026-01-01T00:00:00Z",
+            "completedAt": "2026-01-01T00:00:03Z",
+          ]
+        ],
       ]
     ]
     #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == 50)

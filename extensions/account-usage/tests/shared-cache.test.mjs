@@ -61,6 +61,98 @@ try {
     assert.deepEqual(results, [{ remaining: 42 }, { remaining: 42 }]);
   });
 
+  await test("providers query concurrently and merge without losing snapshots", async () => {
+    let started;
+    const querying = new Promise((resolve) => {
+      started = resolve;
+    });
+    let resume;
+    const gate = new Promise((resolve) => {
+      resume = resolve;
+    });
+    const slow = readThroughSharedCache(
+      options({
+        namespace: "slow-provider",
+        force: true,
+        query: async () => {
+          started();
+          await gate;
+          return { remaining: 12 };
+        },
+      }),
+    );
+    await querying;
+    try {
+      const fast = await readThroughSharedCache(
+        options({
+          namespace: "fast-provider",
+          force: true,
+          signal: AbortSignal.timeout(2000),
+          query: async () => ({ remaining: 91 }),
+        }),
+      );
+      assert.deepEqual(fast, { remaining: 91 });
+    } finally {
+      resume();
+      await slow;
+    }
+    const document = JSON.parse(await readFile(path, "utf8"));
+    assert.deepEqual(document.entries["slow-provider"].value, {
+      remaining: 12,
+    });
+    assert.deepEqual(document.entries["fast-provider"].value, {
+      remaining: 91,
+    });
+  });
+
+  await test("cancelled provider waiters do not query or strand their lease", async () => {
+    let started;
+    const querying = new Promise((resolve) => {
+      started = resolve;
+    });
+    let resume;
+    const gate = new Promise((resolve) => {
+      resume = resolve;
+    });
+    const slow = readThroughSharedCache(
+      options({
+        namespace: "cancel-provider",
+        force: true,
+        query: async () => {
+          started();
+          await gate;
+          return { remaining: 12 };
+        },
+      }),
+    );
+    await querying;
+    const controller = new AbortController();
+    let queried = false;
+    try {
+      const waiter = readThroughSharedCache(
+        options({
+          namespace: "cancel-provider",
+          signal: controller.signal,
+          query: async () => {
+            queried = true;
+            return {};
+          },
+        }),
+      );
+      const assertion = assert.rejects(waiter, { name: "AbortError" });
+      controller.abort();
+      await assertion;
+      assert.equal(queried, false);
+    } finally {
+      resume();
+      await slow;
+    }
+    assert.deepEqual(
+      await readThroughSharedCache(options({ namespace: "cancel-provider" })),
+      { remaining: 12 },
+    );
+  });
+
   await test("abort interrupts lock contention without querying or leaking a lease", async () => {
     const release = await lockfile.lock(path, { realpath: false });
     const controller = new AbortController();

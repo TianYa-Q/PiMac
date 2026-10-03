@@ -100,8 +100,9 @@ struct GitWorkspaceTests {
     await store.refresh(client: client, cwd: repo.path)
     #expect(store.status?.files.contains(where: { $0.path == "file.txt" }) == true)
     let preview = try await client.gitRPC("review.getDiffPreview", payload: ["cwd": repo.path])
-    let sources = preview["sources"] as? [[String: Any]] ?? []
-    #expect(sources.contains { ($0["diff"] as? String)?.contains("+after") == true })
+    let validatedPreview = try GitDiffPreview.validated(preview)
+    #expect(validatedPreview.text.contains("+after"))
+    #expect(!validatedPreview.truncated)
     let payload = try #require(
       GitWorkspaceStore.actionPayload(
         cwd: repo.path, action: "commit", message: "selected", files: ["file.txt"]))
