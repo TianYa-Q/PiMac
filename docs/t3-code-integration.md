@@ -44,6 +44,23 @@ failure classification. Query strings, tickets, proofs, tokens, pairing codes,
 request bodies and transcripts are never logged. Logs can identify whether
 Tunnel traffic reaches the Server; absence of traffic is not proof of readiness.
 
+Startup records port reuse/reassignment and managed registration retry phases.
+Connector health summaries record finite classifications. Full cloudflared
+connection output (including error text, target IPs, protocol, edge location and
+retry messages) is also saved to private `server-owned/tunnel-connector.log`,
+with one rotated `.1` file (2 MiB each, mode 0600, at most 64 KiB per line).
+Only the connector token is replaced; network error details are not removed.
+This detailed log is not embedded in settings/RPC summaries. It is produced by
+the upstream output observer, including connector restarts, without enabling
+HTTP request-body/header debug logging or dumping the process environment.
+Logs reject symlinks, hardlinks and unsafe permissions; failures never interrupt
+connection handling. DPoP failures include an allowlisted route, method and transport so URL
+mismatches can be distinguished from Tunnel recovery without logging URLs/proofs.
+Settings distinguish `connecting`, `connected` (Cloudflare edge registration),
+and `reconnecting`; process `running` alone is not readiness. An edge connection
+still does not prove public reachability, phone rendering or notification delivery.
+The linked state now offers **重试恢复** without requiring logout/re-authorization.
+
 ## Native client behavior
 
 The Server provides stock environment discovery, pairing, bearer sessions,
@@ -204,11 +221,33 @@ or changing a SwiftUI view alone does not stop the service. Development reload
 uses the same shutdown barrier. Before an update reload sends EOF, it writes the
 upstream `server-owned/runtime/desktop-update-restart` marker: shutdown consumes
 this one-minute marker and preserves the managed tunnel for the replacement.
-Normal quit does not write it and still releases the tunnel. On this host new
+Normal quit does not write it and still releases the tunnel. This can require
+provisioning a replacement and Cloudflare route propagation on the next launch;
+port stability does not eliminate that upstream lifecycle or network outages.
+
+The private `server-owned/loopback-port.json` stores the actual listening port
+(version 1, mode 0600, atomic replacement). Normal/update restarts reuse that
+loopback-only port, allowing upstream's confirmed-origin fast path instead of
+forcing first-registration jitter on every boot. An occupied port selects a new
+origin and lets upstream re-register; it never kills/probes the other owner or
+resets identity, history or phone authorization. Malformed/unsafe port state is
+rejected rather than silently overwritten. The port availability check cannot
+transfer its socket to upstream: an intervening bind race fails startup safely,
+and a failed startup never commits a new origin.
+
+On this host new
 connectors are pinned to HTTP/2 (TCP/7844), avoiding minutes of QUIC retries when
 UDP is blocked. Inherited `TUNNEL_TRANSPORT_PROTOCOL` cannot enable QUIC.
 This does not bypass a TUN proxy: the TCP connector follows the user's existing
 proxy routing rules; no Clash DIRECT exception is required by the app.
+Regression tests cover repeated real Server restarts with unchanged origin,
+persistent phone DPoP authorization and WebSocket tickets, occupied-port recovery,
+unsafe port files, and patched official connector output/crash/unlink transitions.
+These tests do not contact hosted relay or replace physical-phone acceptance.
+The stock phone's `server.reportClientActivity` is narrowly allowed so upstream
+background subscription policy receives visibility/liveness; host power/process
+administration remains closed.
+
 A rapid relaunch waits up to 15 seconds for the
 old child's kernel lock rather than stealing it. EOF requests shutdown; reparent detection also
 stops Node after the app crashes, even if an inherited pipe keeps EOF delayed.

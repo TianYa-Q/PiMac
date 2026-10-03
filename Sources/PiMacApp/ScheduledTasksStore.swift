@@ -54,7 +54,9 @@ final class ScheduledTasksStore: ObservableObject {
   }
 
   private func mutate(_ method: String, _ payload: [String: Any]) async -> Bool {
-    guard !isMutating, !isLoading else { return false }
+    // Enforce the refresh barrier here too, not only in the view: queued actions
+    // must not dispatch against stale state after an unknown mutation outcome.
+    guard !isMutating, !isLoading, errorMessage == nil else { return false }
     isMutating = true
     errorMessage = nil
     defer { isMutating = false }

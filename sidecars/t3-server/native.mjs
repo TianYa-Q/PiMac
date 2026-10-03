@@ -1,12 +1,15 @@
 // Pi Mac host policy only. T3 owns the engine, receipts, projections and reactors.
 import { createConnectionDiagnostics } from './connection-diagnostics.mjs';
 import { createPiMobileUsage } from './pi-mobile-usage.mjs';
+import { createTunnelHealth } from './tunnel-health.mjs';
 let host;
 export function configureNative({ environmentId, directory }) {
   if (host && !host.closed) throw new Error('Server host already owned');
-  host = { environmentId, closed: false, mobileUsage: createPiMobileUsage(), connectionDiagnostics: createConnectionDiagnostics(directory),
+  const connectionDiagnostics = createConnectionDiagnostics(directory);
+  host = { environmentId, closed: false, mobileUsage: createPiMobileUsage(), connectionDiagnostics,
+    tunnelHealth: createTunnelHealth(connectionDiagnostics),
     diagnostics: { requests: 0, accepted: 0, queuedDeliveries: 0, successfulDeliveries: 0, failedDeliveries: 0 },
-    message: '', browserURL: null, tunnelStatus: 'disabled', close() { this.closed = true; this.mobileUsage.close(); } };
+    message: '', browserURL: null, close() { this.closed = true; this.mobileUsage.close(); } };
   return host;
 }
 export function getNative() { if (!host) throw new Error('Server host unavailable'); return host; }
@@ -15,6 +18,9 @@ const methods = new Set(['server.probe', 'server.getConfig', 'server.getSettings
   // Mobile refreshes the authoritative projection after submitting a message.
   // The official read scope still applies; do not open the whole namespace.
   'orchestration.getThreadProjection', 'auth.subscribeAccess',
+  // Stock mobile liveness feeds upstream's background subscription policy.
+  // Host power state and all other administration remain denied.
+  'server.reportClientActivity',
   'projects.mutate', 'assets.persistChatAttachments', 'assets.createUrl',
   'attachments.createUploadUrl', 'attachments.delete',
   // Mobile Usage / Limits use official services; upstream still enforces scopes.

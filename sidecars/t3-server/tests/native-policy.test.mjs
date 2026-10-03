@@ -8,6 +8,13 @@ test('mobile dispatch and projection refresh are allowed narrowly', () => {
   assert.equal(rpcAllowed('orchestration.getUnknownProjection'), false);
 });
 
+test('mobile activity is allowed without host power or process administration', () => {
+  assert.equal(rpcAllowed('server.reportClientActivity'), true);
+  for (const method of ['server.reportHostPowerState', 'server.getBackgroundPolicy', 'server.signalProcess']) {
+    assert.equal(rpcAllowed(method), false);
+  }
+});
+
 test('mobile thread launch is allowed without opening the orchestration namespace', () => {
   assert.equal(rpcAllowed('orchestration.launchThread'), true);
   assert.equal(rpcAllowed('orchestration.unknown'), false);

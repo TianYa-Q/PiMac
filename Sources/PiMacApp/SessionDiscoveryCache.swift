@@ -22,8 +22,12 @@ final class SessionDiscoveryCache: @unchecked Sendable {
   func item(
     at url: URL, project: String, load: () -> SessionItem?
   ) -> SessionItem? {
+    // URLs returned by directory enumeration (or reused by a caller) may carry
+    // stale resource metadata. Inspect a fresh URL so appends/deletions invalidate
+    // our cache even when the caller keeps the same URL instance.
+    let file = URL(fileURLWithPath: url.path)
     guard
-      let before = try? url.resourceValues(forKeys: [
+      let before = try? file.resourceValues(forKeys: [
         .contentModificationDateKey, .fileSizeKey, .isRegularFileKey,
       ]), before.isRegularFile == true,
       let modifiedAt = before.contentModificationDate, let size = before.fileSize

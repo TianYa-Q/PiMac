@@ -97,11 +97,14 @@ function launch(dir) {
 
 test('real Server follows stdin EOF and can repeatedly restart in the same state', { timeout: 60000 }, async t => {
   const dir = directory(t);
+  let previousPort;
   for (let n = 0; n < 3; n++) {
     const { child, ready } = launch(dir);
     t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
     await waitFor(ready);
     const port = ready().serverPort;
+    if (previousPort !== undefined) assert.equal(port, previousPort, 'restart must preserve the Tunnel origin');
+    previousPort = port;
     assert.equal((await fetch(`http://127.0.0.1:${port}/.well-known/t3/environment`)).status, 200);
     const exited = once(child, 'exit'); child.stdin.end();
     const [code] = await exited;

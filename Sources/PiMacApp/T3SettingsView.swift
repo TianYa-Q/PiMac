@@ -76,11 +76,18 @@ struct T3SettingsView: View {
           VStack(alignment: .leading, spacing: 4) {
             Text(status.linked ? "已绑定" : (status.authorized == true ? "已授权 · 待绑定" : "未绑定"))
               .font(.body.weight(.medium))
-            Text(status.linked
-              ? (status.enabled ? "上报已开启" : "上报已暂停 · 隧道保持开启")
-              : "手机登录同一账号即可连接。" )
-              .font(.caption).foregroundStyle(.secondary)
+            Text(
+              status.linked
+                ? (status.enabled ? "上报已开启" : "上报已暂停 · 隧道保持开启")
+                : "手机登录同一账号即可连接。"
+            )
+            .font(.caption).foregroundStyle(.secondary)
           }
+        }
+
+        if status.linked {
+          Text(status.tunnelDescription)
+            .font(.caption).foregroundStyle(.secondary)
         }
 
         HStack(spacing: 8) {
@@ -90,6 +97,7 @@ struct T3SettingsView: View {
             Button(status.enabled ? "暂停上报" : "恢复上报") {
               Task { await service.connectAction(status.enabled ? "disable" : "enable") }
             }
+            Button("重试恢复") { Task { await service.connectAction("retry-link") } }
             Button("重新授权") { Task { await service.connectAction("reauthorize") } }
             Spacer()
             Button("退出绑定", role: .destructive) { showConnectLogout = true }
@@ -121,9 +129,9 @@ struct T3SettingsView: View {
             if let count = status.deviceCount {
               detailRow("开启通知的 iOS 设备", value: "\(count)")
             }
-            if let tunnel = status.tunnelStatus {
-              detailRow("隧道配置反馈", value: "\(tunnel)（不代表公网已可达）")
-            }
+            detailRow("隧道连接", value: status.tunnelDescription)
+            Text("Cloudflare 连接确认不代表公网请求、手机显示或通知已成功。")
+              .font(.caption).foregroundStyle(.secondary)
             if let endpoint = status.tunnelURL, !endpoint.isEmpty {
               detailRow("官方公网地址", value: endpoint)
             }
@@ -134,8 +142,10 @@ struct T3SettingsView: View {
             }
             Divider()
             Text("本次上报").font(.caption.weight(.medium))
-            Text("\(status.accepted)/\(status.requests) 已接受 · 排队 \(status.queuedDeliveries) · 服务端成功 \(status.successfulDeliveries) · 失败 \(status.failedDeliveries)")
-              .font(.caption.monospacedDigit())
+            Text(
+              "\(status.accepted)/\(status.requests) 已接受 · 排队 \(status.queuedDeliveries) · 服务端成功 \(status.successfulDeliveries) · 失败 \(status.failedDeliveries)"
+            )
+            .font(.caption.monospacedDigit())
             Text("服务端统计不代表手机已显示通知。")
               .font(.caption).foregroundStyle(.secondary)
           }

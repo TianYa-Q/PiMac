@@ -23,23 +23,38 @@ struct StatusPresentationTests {
     #expect(model.showsStatusProgress)
   }
 
+  @Test func replacementWithIdenticalTextCancelsOldTimer() async {
+    let model = AppModel(restoreLastProjectOnLaunch: false)
+    let old = model.showTransientStatus("已保存", duration: .seconds(60))
+    model.statusText = "已保存"
+    await old.value
+    #expect(old.isCancelled)
+    #expect(model.statusText == "已保存")
+    await model.showTransientStatus("短暂提示", duration: .zero).value
+    #expect(model.statusText.isEmpty)
+  }
+
   @Test func changedPathNoticeExpiresWithoutClearingNewerStatus() async throws {
     let defaults = UserDefaults.standard
     let original = defaults.object(forKey: "piPath")
     defer {
-      if let original { defaults.set(original, forKey: "piPath") }
-      else { defaults.removeObject(forKey: "piPath") }
+      if let original {
+        defaults.set(original, forKey: "piPath")
+      } else {
+        defaults.removeObject(forKey: "piPath")
+      }
     }
     let model = AppModel(restoreLastProjectOnLaunch: false)
     model.piPath = "/tmp/pi-status-\(UUID().uuidString)"
     #expect(model.statusText.contains("路径已保存"))
     #expect(!model.showsStatusProgress)
-    try await Task.sleep(for: .milliseconds(5200))
+    await model.transientStatusTask?.value
     #expect(model.statusText.isEmpty)
 
     model.piPath = "/tmp/pi-status-\(UUID().uuidString)"
+    let timer = model.transientStatusTask
     model.statusText = "新的状态"
-    try await Task.sleep(for: .milliseconds(5200))
+    await timer?.value
     #expect(model.statusText == "新的状态")
   }
 }

@@ -59,8 +59,10 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
   const localURL = `http://127.0.0.1:${server.address.port}`;
   const originalApply = runtime.applyConfig;
   runtime.applyConfig = value => originalApply(value).pipe(Effect.tap(status => Effect.sync(() => {
-    broker.tunnelStatus = status.status + ('failure' in status ? ':' + status.failure : '');
-    broker.connectionDiagnostics.record('tunnel-config', { reason: broker.tunnelStatus });
+    broker.tunnelHealth.config(status);
+    broker.connectionDiagnostics.record('tunnel-config', {
+      reason: status.status + ('failure' in status ? ':' + status.failure : ''),
+    });
   })));
   let adminToken, loginFiber, loginPending = false, busy = false, deviceCount = null, tunnelURL = '';
   const run = effect => Effect.runPromise(Effect.provide(effect, controlContext));
@@ -78,7 +80,7 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
       run(CloudConfig.readAgentActivityPublishingActive(secrets)), run(tokens.hasCredential).catch(() => false),
     ]);
     return { available: true, networkDiagnostic: [broker.networkDiagnostic, broker.connectionDiagnostics.summary].filter(Boolean).join('\n'), authorized, linked: !!credential, enabled: publishing, account, loginPending, busy,
-      deviceCount, message: broker.message, tunnelStatus: broker.tunnelStatus, tunnelURL, backend: 't3-server', ...broker.diagnostics };
+      deviceCount, message: broker.message, tunnelStatus: broker.tunnelHealth.status, tunnelURL, backend: 't3-server', ...broker.diagnostics };
   };
   const refreshDevices = async () => {
     const token = await run(tokens.getExisting); if (Option.isNone(token)) throw new Error('Not authorized');

@@ -45,9 +45,13 @@ final class AppModel: ObservableObject {
   @Published var attachments: [PromptAttachment] = []
   @Published var queuedPrompts: [QueuedPrompt] = []
   @Published var statusText = "" {
-    didSet { statusRevision = UUID() }
+    didSet {
+      transientStatusTask?.cancel()
+      statusRevision = UUID()
+    }
   }
   private var statusRevision = UUID()
+  private(set) var transientStatusTask: Task<Void, Never>?
   @Published var diagnosticText = ""
   weak var extensionUI: ExtensionUIModel?
   var onTelegramLifecycleEvent: ((String) -> Void)?
@@ -72,16 +76,27 @@ final class AppModel: ObservableObject {
     set {
       guard newValue != piPath else { return }
       UserDefaults.standard.set(newValue, forKey: "piPath")
-      statusText = "Pi Provider 路径已保存，重启本机 Server 后生效"
-      let revision = statusRevision
-      Task { [weak self] in
-        try? await Task.sleep(for: .seconds(5))
-        guard let self, self.statusRevision == revision else { return }
-        self.statusText = ""
-      }
+      showTransientStatus("Pi Provider 路径已保存，重启本机 Server 后生效")
       objectWillChange.send()
     }
   }
+  /// A replacement status invalidates the timer, even when its text is identical.
+  @discardableResult
+  func showTransientStatus(_ text: String, duration: Duration = .seconds(5)) -> Task<Void, Never> {
+    statusText = text
+    let revision = statusRevision
+    let task = Task { [weak self] in
+      do {
+        try await Task.sleep(for: duration)
+        try Task.checkCancellation()
+      } catch { return }
+      guard let self, self.statusRevision == revision else { return }
+      self.statusText = ""
+    }
+    transientStatusTask = task
+    return task
+  }
+
   var showsStatusProgress: Bool { isBusy || isLoadingConfiguration }
   var isProcessRunning: Bool { server?.isConnected == true && threadID != nil }
   var isBusy: Bool {
@@ -106,7 +121,9 @@ final class AppModel: ObservableObject {
   var supportsFastMode: Bool { fastModeAvailable }
   @Published var accountQuotaMessage = ""
   @Published private(set) var isRefreshingAccountQuota = false
-  var canManageAccounts: Bool { accountUsageProvider != nil && isProcessRunning && canRestartSafely && threadID != nil }
+  var canManageAccounts: Bool {
+    accountUsageProvider != nil && isProcessRunning && canRestartSafely && threadID != nil
+  }
   var supportsAccountSwitch: Bool {
     isProcessRunning && (accountUsageProvider == .chatGPT || accountUsageProvider == .legacyCodex)
   }
@@ -660,7 +677,8 @@ final class AppModel: ObservableObject {
           threadID: id, operation: operation, accountName: accountName)
         guard self.generation == current else { return }
         self.statusText =
-          operation == "compact" ? "压缩请求已提交；等待 Server 完成。" : "切换请求已提交：\(accountName ?? "")；请以 Pi 的执行结果为准。"
+          operation == "compact"
+          ? "压缩请求已提交；等待 Server 完成。" : "切换请求已提交：\(accountName ?? "")；请以 Pi 的执行结果为准。"
       } catch {
         guard self.generation == current else { return }
         self.awaitingAgentStart = false
@@ -683,15 +701,20 @@ final class AppModel: ObservableObject {
       if !accountQuotaMessage.isEmpty { accountQuotaMessage = "" }
       return
     }
-    guard accountQuotaRefreshPolicy.shouldRefresh(
-      generation: generation, provider: provider, isActive: isBusy, force: force
-    ) else { return }
+    guard
+      accountQuotaRefreshPolicy.shouldRefresh(
+        generation: generation, provider: provider, isActive: isBusy, force: force
+      )
+    else { return }
     let threadID = self.threadID ?? "@discovery"
     let current = generation
     isRefreshingAccountQuota = true
     accountStatusTask = Task { [weak self] in
       guard let self else { return }
-      defer { self.accountStatusTask = nil; self.isRefreshingAccountQuota = false }
+      defer {
+        self.accountStatusTask = nil
+        self.isRefreshingAccountQuota = false
+      }
       do {
         // Host quotas are independent of official per-thread token metrics.
         if let payload = try await server.accountStatus(

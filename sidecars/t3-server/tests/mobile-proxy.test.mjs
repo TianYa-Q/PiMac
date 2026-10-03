@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
+import * as DateTime from 'effect/DateTime';
 import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
 import WebSocket from 'ws';
 import http from 'node:http';
@@ -117,6 +118,13 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
     const { ticket } = await result.json();
     return call(gateway.serverURL.replace('http:', 'ws:') + '/ws?orchestrationProtocol=2&wsTicket=' + ticket, method, input);
   };
+  // The stock phone's visibility/liveness report must reach background policy,
+  // not fail as an unrelated authorization error on every reconnect.
+  await rpc('server.reportClientActivity', {
+    clientId: 'phone-fixture', clientKind: 'mobile', visible: true, focused: true,
+    recentlyInteracted: true, appState: 'active', scopes: [{ type: 'server-config' }],
+    observedAt: DateTime.nowUnsafe(),
+  });
   // Limits refresh must reach the official provider/source service over the tunnel.
   const refreshed = await rpc('server.refreshProviders', {});
   assert(Array.isArray(refreshed.providers));
@@ -253,6 +261,7 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
   await rpc('attachments.delete', { attachmentId: signed.attachmentId });
   const logs = await readFile(join(directory, 'server-owned', 'connection-diagnostics.log'), 'utf8');
   assert.match(logs, /https-tunnel/);
+  assert.match(logs, /dpop-denied .*"route":"\/api\/auth\/websocket-ticket"/);
   assert.match(logs, /origin-policy/);
   assert.match(logs, /url_mismatch/);
   for (const secret of [pairing.credential, credential.access_token, signed.relativeUrl, 'invalid-ticket', 'wsTicket=']) {

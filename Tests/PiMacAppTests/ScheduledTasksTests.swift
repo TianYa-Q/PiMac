@@ -113,6 +113,55 @@ struct ScheduledTasksTests {
     #expect(store.tasks.isEmpty)
   }
 
+  @Test func unknownOutcomeBlocksAllMutationsUntilSuccessfulRefresh() async throws {
+    var calls: [String] = []
+    var failMutation = true
+    var refreshFailure = 0
+    let store = ScheduledTasksStore { method, _ in
+      calls.append(method)
+      if method == "scheduledTasks.list" {
+        switch refreshFailure {
+        case 1: throw URLError(.timedOut)
+        case 2: return ["tasks": [["id": "bad"]]]
+        case 3: throw CancellationError()
+        default: return ["tasks": [row()]]
+        }
+      }
+      if failMutation { throw URLError(.timedOut) }
+      return ["task": row()]
+    }
+    await store.refresh()
+    let task = try #require(store.tasks.first)
+    let draft = ScheduledTaskDraft(task: task)
+    await store.runNow(task)
+    #expect(store.errorMessage?.contains("不会自动重试") == true)
+    failMutation = false
+
+    // Each unsuccessful refresh must retain the barrier and last known rows.
+    for failure in 0...3 {
+      if failure != 0 {
+        refreshFailure = failure
+        await store.refresh()
+      }
+      let before = calls.count
+      await store.runNow(task)
+      await store.setEnabled(task)
+      await store.delete(task)
+      #expect(await store.save(draft) == false)
+      #expect(calls.count == before)
+      #expect(store.errorMessage != nil)
+      #expect(store.tasks.count == 1)
+      #expect(!store.isMutating)
+    }
+
+    refreshFailure = 0
+    await store.refresh()
+    #expect(store.errorMessage == nil)
+    let before = calls.count
+    await store.runNow(task)
+    #expect(Array(calls.dropFirst(before)) == ["scheduledTasks.runNow", "scheduledTasks.list"])
+  }
+
   @Test func malformedRefreshDoesNotDiscardTheLastKnownList() async throws {
     var malformed = false
     let store = ScheduledTasksStore { _, _ in ["tasks": malformed ? [["id": "bad"]] : [row()]] }

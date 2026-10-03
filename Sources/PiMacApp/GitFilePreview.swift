@@ -9,6 +9,7 @@ struct GitFilePreview: View {
   @State private var loading = true
   @State private var truncated = false
   @State private var failed = false
+  @State private var requestID = UUID()
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
@@ -18,8 +19,20 @@ struct GitFilePreview: View {
         Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
       }
       if loading { ProgressView("正在读取差异…") }
-      if failed { ContentUnavailableView("差异读取失败", systemImage: "exclamationmark.triangle", description: Text("请关闭预览并刷新 Git 状态。")) }
-      if truncated { Label("差异过大，Server 返回的预览已截断。", systemImage: "info.circle").font(.caption).foregroundStyle(.orange) }
+      if failed {
+        ContentUnavailableView {
+          Label("差异读取失败", systemImage: "exclamationmark.triangle")
+        } description: {
+          Text("检查 Server 连接后重试。读取差异不会修改工作区。")
+        } actions: {
+          Button("重试", systemImage: "arrow.clockwise") { requestID = UUID() }
+            .disabled(!server.isConnected)
+        }
+      }
+      if truncated {
+        Label("差异过大，Server 返回的预览已截断。", systemImage: "info.circle").font(.caption).foregroundStyle(
+          .orange)
+      }
       if !loading && !failed {
         if diff.isEmpty { Text("没有可显示的文本差异（可能是二进制文件）。").foregroundStyle(.secondary) }
         ScrollView([.horizontal, .vertical]) {
@@ -31,12 +44,22 @@ struct GitFilePreview: View {
       Spacer(minLength: 0)
     }
     .padding(20).frame(width: 780, height: 540)
-    .task {
+    .task(id: requestID) {
+      loading = true
+      failed = false
+      truncated = false
+      diff = ""
       do {
-        let result = try await server.gitRPC("review.getDiffPreview", payload: ["cwd": cwd,
-          "file": ["path": file, "previousPath": NSNull(), "sourceKind": "working-tree"]])
+        let result = try await server.gitRPC(
+          "review.getDiffPreview",
+          payload: [
+            "cwd": cwd,
+            "file": ["path": file, "previousPath": NSNull(), "sourceKind": "working-tree"],
+          ])
         try Task.checkCancellation()
-        let sources = (result["sources"] as? [[String: Any]] ?? []).filter { $0["kind"] as? String == "working-tree" }
+        let sources = (result["sources"] as? [[String: Any]] ?? []).filter {
+          $0["kind"] as? String == "working-tree"
+        }
         diff = sources.compactMap { $0["diff"] as? String }.joined(separator: "\n")
         truncated = sources.contains { $0["truncated"] as? Bool == true }
         loading = false

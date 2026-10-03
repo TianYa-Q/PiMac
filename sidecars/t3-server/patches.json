@@ -12,11 +12,27 @@
   "apps/server/src/cloud/ManagedEndpointRuntime.ts": [
     {
       "oldText": "import * as Clock from \"effect/Clock\";",
-      "newText": "import * as Clock from \"effect/Clock\";\nimport { cloudflaredEnvironment } from \"pimac:cloudflared-transport.mjs\";"
+      "newText": "import * as Clock from \"effect/Clock\";\nimport { cloudflaredEnvironment } from \"pimac:cloudflared-transport.mjs\";\nimport { getNative } from \"pimac:native.mjs\";"
     },
     {
       "oldText": "            env: {\n              ...process.env,\n              TUNNEL_TOKEN: config.connectorToken,\n            },",
       "newText": "            env: cloudflaredEnvironment(process.env, config.connectorToken),"
+    },
+    {
+      "oldText": "    yield* stopConnector(active);",
+      "newText": "    if (active) getNative().tunnelHealth.stop(Number(active.child.pid));\n    yield* stopConnector(active);"
+    },
+    {
+      "oldText": "      const uptimeMillis = (yield* Clock.currentTimeMillis) - connector.startedAtMillis;",
+      "newText": "      getNative().tunnelHealth.exit(Number(connector.child.pid));\n      const uptimeMillis = (yield* Clock.currentTimeMillis) - connector.startedAtMillis;"
+    },
+    {
+      "oldText": "        const output = line.replaceAll(connector.config.connectorToken, \"<redacted>\");",
+      "newText": "        getNative().tunnelHealth.output(Number(connector.child.pid), line);\n        const output = line.replaceAll(connector.config.connectorToken, \"<redacted>\");\n        getNative().connectionDiagnostics.recordConnectorOutput(Number(connector.child.pid), output);"
+    },
+    {
+      "oldText": "      yield* Ref.set(activeRef, connector);",
+      "newText": "      yield* Ref.set(activeRef, connector);\n      getNative().tunnelHealth.start(Number(child.pid));"
     }
   ],
   "apps/server/src/review/ReviewService.ts": [
@@ -160,12 +176,12 @@
   "apps/server/src/auth/dpop.ts": [
     {
       "oldText": "import {\n  type DpopVerificationFailureCode",
-      "newText": "import * as PiNative from \"pimac:native.mjs\";\nimport {\n  type DpopVerificationFailureCode",
+      "newText": "import * as PiNative from \"pimac:native.mjs\";\nimport { connectionRoute } from \"pimac:connection-diagnostics.mjs\";\nimport {\n  type DpopVerificationFailureCode",
       "count": 1
     },
     {
       "oldText": "    if (!result.ok) {\n      yield* Effect.annotateCurrentSpan({",
-      "newText": "    if (!result.ok) {\n      PiNative.getNative().connectionDiagnostics.record(\"dpop-denied\", { reason: result.code });\n      yield* Effect.annotateCurrentSpan({",
+      "newText": "    if (!result.ok) {\n      PiNative.getNative().connectionDiagnostics.record(\"dpop-denied\", { reason: result.code, route: connectionRoute(input.request.url) ?? \"other\", method: input.request.method, transport: input.request.headers[\"x-forwarded-proto\"] === \"https\" ? \"https-tunnel\" : \"http-local\" });\n      yield* Effect.annotateCurrentSpan({",
       "count": 1
     }
   ],
@@ -177,6 +193,18 @@
     }
   ],
   "apps/server/src/server.ts": [
+    {
+      "oldText": "              registerManagedCloudTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }),",
+      "newText": "              registerManagedCloudTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }).pipe(Effect.tapError(() => Effect.sync(() => PiNative.getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: \"registration-failed\" })))),"
+    },
+    {
+      "oldText": "              yield* Effect.sleep(Duration.millis(jitter));",
+      "newText": "              PiNative.getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: \"first-registration-wait\" });\n              yield* Effect.sleep(Duration.millis(jitter));"
+    },
+    {
+      "oldText": "            const startupAction = managedTunnelStartupAction({ wantsCliLink, registration });",
+      "newText": "            PiNative.getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: registration.status });\n            const startupAction = managedTunnelStartupAction({ wantsCliLink, registration });"
+    },
     {
       "oldText": "const ReviewLayerLive = ReviewService.layer.pipe(\n  Layer.provideMerge(GitVcsDriver.layer),",
       "newText": "const ReviewLayerLive = ReviewService.layer.pipe(\n  Layer.provide(Layer.merge(ProjectStore.layer, ProjectionStoreV2.layer)),\n  Layer.provideMerge(GitVcsDriver.layer),"

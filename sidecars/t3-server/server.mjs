@@ -13,6 +13,7 @@ import * as OtelEnvironment from '@t3tools/shared/otelEnvironment';
 import { configureNative } from './native.mjs';
 import { migratePiSettings } from './settings-migration.mjs';
 import { configureModelPreferences } from './model-preferences.mjs';
+import { prepareServerPort } from './server-port.mjs';
 export { rpcAllowed, httpAllowed } from './native.mjs';
 export { originAllowed } from './origin-policy.mjs';
 
@@ -42,7 +43,11 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('Unsafe T3 Server directory');
   checkPrivateTree(directory, path.join(directory, 'tools'));
   const broker = configureNative({ environmentId, directory });
-  configureModelPreferences(directory);
+  let binding;
+  try {
+    configureModelPreferences(directory);
+    binding = await prepareServerPort(directory, broker.connectionDiagnostics);
+  } catch (error) { broker.close(); throw error; }
   broker.controlToken = randomBytes(32).toString('hex');
   const configLayer = Layer.effect(ServerConfig, Effect.gen(function* () {
     const derived = yield* deriveServerPaths(directory, undefined, { baseDirIsExplicit: true });
@@ -55,7 +60,7 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
       defaultThreadEnvMode: 'local', defaultRuntimeMode: 'full-access', defaultAutoPull: false,
       enableAgentBrowserAccess: false, enableAgentDeviceAccess: false,
     }), { mode: 0o600, flag: 'wx' });
-    return { ...derived, mode: 'web', port: 0, host: '127.0.0.1', cwd: directory, baseDir: directory,
+    return { ...derived, mode: 'web', port: binding.port, host: '127.0.0.1', cwd: directory, baseDir: directory,
       logLevel: 'None', traceMinLevel: 'None', traceTimingEnabled: false, traceBatchWindowMs: 200,
       traceMaxBytes: 1024 * 1024, traceMaxFiles: 2,
       otlpTracesExport: DEFAULT_SIGNAL_EXPORT, otlpMetricsExport: DEFAULT_SIGNAL_EXPORT, otlpLogsExport: DEFAULT_SIGNAL_EXPORT, otelEnvironment: OtelEnvironment.none,
@@ -73,7 +78,12 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   };
   signal?.addEventListener('abort', cancel, { once: true });
   if (signal?.aborted) cancel();
-  broker.onManagementReady = resolveManagement;
+  broker.onManagementReady = management => {
+    try {
+      binding.commit(Number(new URL(management.localURL).port));
+      resolveManagement(management);
+    } catch (error) { rejectManagement(error); }
+  };
   const program = runServer.pipe(Effect.provide(configLayer), Effect.provide(Logger.layer([])),
     Effect.provideService(Console.Console, quietConsole));
   const completion = Effect.runPromise(program, { signal: controller.signal }).catch(error => {
