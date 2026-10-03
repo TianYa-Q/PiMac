@@ -1,6 +1,6 @@
 # Official T3 Server sidecar
 
-Pinned upstream: `pingdotgg/t3code@cc1e634bfa62edd56ff792eea666e436fdef788f`.
+Pinned upstream: `pingdotgg/t3code@8d846660cecfc69ef4e192322fced29fa07f374c`.
 This uses upstream orchestrator V2 and its official `PiDriver`, `PiAdapterV2`,
 and `PiRpc`, without modifying those implementations. The former custom Pi
 adapter, transport, runtime controls, and their tests have been removed.
@@ -13,7 +13,7 @@ Provider subprocesses must not inherit supervisor secrets.
 ## Reproducible build
 
 Commit host sources, patches, tests, dependency locks, and `upstream-pin.json`.
-The manifest hashes 1,742 upstream files. `upstream/`, `node_modules/`,
+The manifest hashes 1,745 upstream files. `upstream/`, `node_modules/`,
 `generated/` and the app's generated `vendor/t3-server.mjs` are build artifacts.
 The upstream MIT license is copied to `vendor/T3-SERVER-LICENSE.txt`.
 
@@ -47,4 +47,4 @@ by upstream wire projection. Terminal-only extension status and old private
 account/Fast/compaction-model overrides are not preserved.
 
 See `docs/t3-server-migration.md` for capabilities, limitations and acceptance
-boundaries. Protocol-fixture tests do not prove real-model or App Store acceptance.
+boundaries, and `docs/t3-upstream-maintenance.md` for the upgrade and patch audit. Protocol-fixture tests do not prove real-model or App Store acceptance.

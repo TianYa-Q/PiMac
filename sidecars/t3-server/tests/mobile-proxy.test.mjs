@@ -118,6 +118,15 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
     const { ticket } = await result.json();
     return call(gateway.serverURL.replace('http:', 'ws:') + '/ws?orchestrationProtocol=2&wsTicket=' + ticket, method, input);
   };
+  // The host allowlist must apply in upstream's group middleware to ordinary
+  // and streaming RPCs alike, before any handler or subscription is entered.
+  await assert.rejects(rpc('server.getProcessDiagnostics', {}),
+    error => error._tag === 'EnvironmentAuthorizationError');
+  const deniedTicket = await mintTicket();
+  const { ticket: deniedSecret } = await deniedTicket.json();
+  await assert.rejects(readStream(gateway.serverURL.replace('http:', 'ws:') +
+    '/ws?orchestrationProtocol=2&wsTicket=' + deniedSecret, 'subscribeTerminalMetadata',
+    {}, { count: 1 }), error => error._tag === 'EnvironmentAuthorizationError');
   // The stock phone's visibility/liveness report must reach background policy,
   // not fail as an unrelated authorization error on every reconnect.
   await rpc('server.reportClientActivity', {

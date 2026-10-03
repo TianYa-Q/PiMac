@@ -80,13 +80,12 @@ pending. See docs/t3-server-migration.md for wire-output and upgrade limitations
 Command acceptance is not task completion; unknown outcomes must be inspected
 before resubmitting. `agent_settled`, not `agent_end`, determines completion.
 
-Pi output-speed telemetry is a narrow build-time adapter patch, not a separate
-orchestration or persistence path. It aggregates provider-reported `usage.output`
-from assistant messages into native `turnTokenUsage`, with an optional
-`assistantDurationMs` wire field measured between assistant start/end events.
-Tool time and requests without known output usage are excluded. The desktop can
-show speed without context-window stats; new runs do not reuse old throughput.
-Both server and desktop-client bundles must be rebuilt when this schema changes.
+Pi tool/file-change projection and token usage now use the unmodified official
+Pi Adapter and contracts. Local diff enrichment, tool-parent inference and
+assistant-duration/output aggregation patches have been removed. The desktop
+uses official `turnTokenUsage` and turn timestamps when supplied; absent usage
+means no output-speed display, not an inferred or host-injected metric. Upstream
+Pi currently emits flat tool items and does not supply per-turn output usage.
 
 The desktop currently reads native HTTP snapshots by polling. iOS uses upstream
 shell/thread subscriptions and completion markers. Pairing or socket connection
@@ -278,7 +277,7 @@ swift test
 ./scripts/package-app.sh
 ```
 
-The preparation step verifies 673 pinned upstream files and bundles the real
+The preparation step verifies 1,745 pinned upstream files and bundles the real
 Server; it does not launch Pi or download anything at app startup. Native Server
 integration tests use a protocol-only Pi fixture without real accounts/models.
 The retired bridge tests are not part of the new verification chain.

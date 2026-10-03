@@ -61,8 +61,8 @@
       "count": 1
     },
     {
-      "oldText": "if (record.provider === \"codex\" && record.sessionId.length > 0) {",
-      "newText": "if (record.provider === \"codex\" && record.sessionId.length > 0 && !record.dedupeKey?.startsWith(\"pi:\")) {",
+      "oldText": "if (record.provider === \"codex\" && sharedSessions.has(record.sessionId)) {",
+      "newText": "if (record.provider === \"codex\" && sharedSessions.has(record.sessionId) && !record.dedupeKey?.startsWith(\"pi:\")) {",
       "count": 1
     }
   ],
@@ -75,70 +75,6 @@
     {
       "oldText": "    yield* publish(snapshots);",
       "newText": "    const piSources = yield* Effect.promise(() => getNative().mobileUsage.readLimits());\n    yield* publish([...snapshots, ...piSources]);",
-      "count": 1
-    }
-  ],
-  "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts": [
-    {
-      "oldText": "  readonly toolArgs: Map<string, unknown>;",
-      "newText": "  readonly toolArgs: Map<string, unknown>;\n  readonly toolParents: Map<string, string>;",
-      "count": 1
-    },
-    {
-      "oldText": "              toolArgs: new Map(),",
-      "newText": "              toolArgs: new Map(),\n              toolParents: new Map(),",
-      "count": 1
-    },
-    {
-      "oldText": "        const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);",
-      "newText": "        const parentToolCallId = recordString(event, \"parentToolCallId\");\n        if (parentToolCallId !== undefined) turn.toolParents.set(toolCallId, parentToolCallId);\n        const parentId = turn.toolParents.get(toolCallId);\n        const base = {\n          ...baseItemFields(turn, toolCallId, startedAt, emittedAt),\n          parentItemId: parentId === undefined ? null : idAllocator.derive.turnItemFromProviderItem({ driver: PI_PROVIDER, nativeItemId: parentId }),\n        };",
-      "count": 1
-    },
-    {
-      "oldText": "import * as Cause from \"effect/Cause\";",
-      "newText": "import { observePiOutputUsage, piOutputUsage } from \"pimac:pi-output-usage.mjs\";\nimport { piFileChangeDetails } from \"pimac:pi-file-change.mjs\";\nimport * as Cause from \"effect/Cause\";", 
-      "count": 1
-    },
-    {
-      "oldText": "if (toolName === \"edit\" || toolName === \"write\") {",
-      "newText": "if (!isError && (toolName === \"edit\" || toolName === \"write\")) {",
-      "count": 1
-    },
-    {
-      "oldText": "                type: \"file_change\",\n                fileName,",
-      "newText": "                type: \"file_change\",\n                fileName,\n                ...piFileChangeDetails(toolName, args, resultRecord),",
-      "count": 1
-    },
-    {
-      "oldText": "              turn.messageOrdinal += 1;",
-      "newText": "              turn.messageOrdinal += 1;\n              observePiOutputUsage(turn, event);",
-      "count": 1
-    },
-    {
-      "oldText": "            yield* reportLiveUsage(turn, event[\"usage\"]);",
-      "newText": "            observePiOutputUsage(turn, event);\n            yield* reportLiveUsage(turn, event[\"usage\"] ?? (event[\"assistantMessageEvent\"] as any)?.partial?.usage);",
-      "count": 1
-    },
-    {
-      "oldText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            yield* completeOpenStreamItems(turn);",
-      "newText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            observePiOutputUsage(turn, event);\n            yield* reportLiveUsage(turn, (message as any)?.usage);\n            yield* emit({ type: \"provider_turn.updated\", driver: PI_PROVIDER, threadId: turn.turnInput.threadId, providerTurn: { ...turn.providerTurn, ...piOutputUsage(turn) } });\n            yield* completeOpenStreamItems(turn);",
-      "count": 1
-    },
-    {
-      "oldText": "              ...turn.providerTurn,\n              tokenUsage: {",
-      "newText": "              ...turn.providerTurn,\n              ...piOutputUsage(turn),\n              tokenUsage: {",
-      "count": 1
-    },
-    {
-      "oldText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),",
-      "newText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),\n            ...piOutputUsage(turn),",
-      "count": 1
-    }
-  ],
-  "packages/contracts/src/providerRuntime.ts": [
-    {
-      "oldText": "const TurnTokenUsageCommonFields = {",
-      "newText": "const TurnTokenUsageCommonFields = {\n  assistantDurationMs: Schema.optional(Schema.Number),",
       "count": 1
     }
   ],
@@ -244,18 +180,13 @@
   ],
   "apps/server/src/ws.ts": [
     {
-      "oldText": "              \"rpc.aggregate\": \"orchestrationV2\",\n              \"orchestration_v2.command_id\": command.commandId,",
-      "newText": "              \"rpc.aggregate\": \"orchestrationV2\",\n              \"pimac.dispatch_mode\": command.type === \"message.dispatch\" ? command.dispatchMode.type : undefined,\n              \"pimac.delivery_intent\": command.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n              \"orchestration_v2.command_id\": command.commandId,",
-      "count": 1
-    },
-    {
       "oldText": "import * as Queue from \"effect/Queue\";",
       "newText": "import { visibleProviders, subscribeModelPreferences } from \"pimac:model-preferences.mjs\";\nimport * as Queue from \"effect/Queue\";",
       "count": 1
     },
     {
-      "oldText": "            providers,\n            availableEditors,",
-      "newText": "            providers: visibleProviders(providers),\n            availableEditors,",
+      "oldText": "            providers,\n            ...editorConfig,",
+      "newText": "            providers: visibleProviders(providers),\n            ...editorConfig,",
       "count": 1
     },
     {
@@ -271,21 +202,6 @@
     {
       "oldText": "                // Both sides replay their current value, so the first pairing normally",
       "newText": "                Stream.map(visibleProviders),\n                // Both sides replay their current value, so the first pairing normally",
-      "count": 1
-    },
-    {
-      "oldText": "import {\n  sameUsageLimitCommandCoverage,",
-      "newText": "import * as PiNative from \"pimac:native.mjs\";\nimport { observeNativeRpc } from \"pimac:rpc-diagnostics.mjs\";\nimport {\n  sameUsageLimitCommandCoverage,",
-      "count": 1
-    },
-    {
-      "oldText": "authorizeEffect(requiredScopeForRpcMethod(method), effect),",
-      "newText": "observeNativeRpc(method, PiNative.rpcAllowed(method) ? authorizeEffect(requiredScopeForRpcMethod(method), effect) : Effect.fail(authorizationError(requiredScopeForRpcMethod(method))), traceAttributes, { allowed: PiNative.rpcAllowed(method), authorized: currentSession.scopes.includes(requiredScopeForRpcMethod(method)) }),",
-      "count": 2
-    },
-    {
-      "oldText": "authorizeStream(requiredScopeForRpcMethod(method), stream),",
-      "newText": "PiNative.rpcAllowed(method) ? authorizeStream(requiredScopeForRpcMethod(method), stream) : Stream.fail(authorizationError(requiredScopeForRpcMethod(method))),",
       "count": 1
     }
   ],
@@ -337,6 +253,16 @@
       "oldText": "requireCursorSdk(\"@cursor/sdk\") as typeof import(\"@cursor/sdk\")",
       "newText": "new Proxy({}, { get: () => class { constructor() { throw new Error(\"Cursor is disabled in the Pi Mac host\"); } } }) as typeof import(\"@cursor/sdk\")",
       "count": 1
+    }
+  ],
+  "apps/server/src/auth/RpcAuthorization.ts": [
+    {
+      "oldText": "import * as Effect from \"effect/Effect\";",
+      "newText": "import * as Effect from \"effect/Effect\";\nimport * as PiNative from \"pimac:native.mjs\";\nimport { observeNativeRpc } from \"pimac:rpc-diagnostics.mjs\";"
+    },
+    {
+      "oldText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc }) => {\n    const requiredScope = requiredScopeForRpcMethod(rpc._tag);\n    return scopes.includes(requiredScope)\n      ? effect\n      : Effect.fail(rpcAuthorizationError(requiredScope));\n  });",
+      "newText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    const requiredScope = requiredScopeForRpcMethod(rpc._tag);\n    const allowed = PiNative.rpcAllowed(rpc._tag);\n    const authorized = scopes.includes(requiredScope);\n    const command = rpc._tag === \"orchestration.dispatchCommand\" ? (payload as any) : undefined;\n    return observeNativeRpc(rpc._tag,\n      allowed && authorized ? effect : Effect.fail(rpcAuthorizationError(requiredScope)),\n      {\n        \"orchestration_v2.command_id\": command?.commandId,\n        \"orchestration_v2.command_type\": command?.type,\n        \"orchestration_v2.thread_id\": command?.threadId,\n        \"pimac.dispatch_mode\": command?.type === \"message.dispatch\" ? command.dispatchMode?.type : undefined,\n        \"pimac.delivery_intent\": command?.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n      }, { allowed, authorized });\n  });"
     }
   ]
 }

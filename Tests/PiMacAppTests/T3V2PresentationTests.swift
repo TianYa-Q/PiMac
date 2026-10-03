@@ -158,12 +158,16 @@ struct T3V2PresentationTests {
     #expect(metrics["contextWindow"] as? Int == 1000)
   }
 
-  @Test func outputSpeedUsesRequestTimingWithoutRequiringContextUsage() {
-    let usage: [String: Any] = ["outputTokens": 150, "assistantDurationMs": 3000.0]
+  @Test func outputSpeedUsesOfficialTurnTimingWithoutRequiringContextUsage() {
+    let usage: [String: Any] = ["outputTokens": 150]
     let native: [String: Any] = [
       "projection": [
         "thread": ["id": "thread"],
-        "providerTurns": [["turnTokenUsage": usage]],
+        "providerTurns": [[
+          "turnTokenUsage": usage,
+          "startedAt": "2026-01-01T00:00:00Z",
+          "completedAt": "2026-01-01T00:00:03Z",
+        ]],
       ]
     ]
     #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == 50)
@@ -171,7 +175,7 @@ struct T3V2PresentationTests {
   }
 
   @Test func newRunDoesNotReusePreviousOutputSpeed() {
-    let usage: [String: Any] = ["outputTokens": 150, "assistantDurationMs": 3000.0]
+    let usage: [String: Any] = ["outputTokens": 150]
     let native: [String: Any] = [
       "projection": [
         "runs": [["id": "new", "status": "running"]],

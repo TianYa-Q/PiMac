@@ -185,7 +185,8 @@ test('official Pi tools, model selection, steering and cancellation', async t =>
   const nested = tools.find(item => item.input?.path === 'nested.txt');
   assert(code);
   assert(nested);
-  assert.equal(nested.parentItemId, code.id);
+  // Upstream Pi currently emits flat tool items; do not add host-owned nesting.
+  assert.equal(nested.parentItemId, null);
   assert.equal(tools.find(item => item.input?.path === 'fixture.txt').parentItemId, null);
   await f.dispatch({ type: 'thread.model-selection.set', threadId, modelSelection: { instanceId: 'pi', model: 'test/model', options: [{ id: 'thinking', value: 'high' }] } });
   await f.dispatch(f.message(threadId, 'wait'));

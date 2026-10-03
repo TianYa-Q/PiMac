@@ -146,8 +146,9 @@ enum T3V2Presentation {
       })
     let outputUsage = latest?["turnTokenUsage"] as? JSON
     let output = outputUsage?["outputTokens"] as? Int ?? 0
-    var duration = (outputUsage?["assistantDurationMs"] as? Double ?? 0) / 1000
-    if duration <= 0, let started = latest?["startedAt"] as? String,
+    // Use only upstream timing fields; Pi may not supply per-turn output usage.
+    var duration: Double = 0
+    if let started = latest?["startedAt"] as? String,
       let completed = latest?["completedAt"] as? String
     {
       duration = T3DesktopClient.date(completed).timeIntervalSince(T3DesktopClient.date(started))

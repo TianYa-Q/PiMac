@@ -225,8 +225,9 @@ struct T3DesktopTests {
     let code = try #require(model.messages.first { $0.toolName == "codemode" })
     #expect(code.toolInput == "const value = 1;\ntext(value);")
     #expect(code.text.isEmpty)
-    #expect(code.childToolEntries.contains { $0.toolInput == "nested.txt" })
-    #expect(!model.messages.contains { $0.toolInput == "nested.txt" })
+    // Stock Pi Adapter projects tools as flat items, including nested Pi events.
+    #expect(code.childToolEntries.isEmpty)
+    #expect(model.messages.contains { $0.toolInput == "nested.txt" })
     #expect(model.messages.contains { $0.kind == .assistant })
     #expect(model.lastSettledTurnID != nil)  // Also covers turns completed between polls.
     #expect(model.terminalStopReason == nil)
@@ -239,8 +240,8 @@ struct T3DesktopTests {
     #expect(model.stats?.cost == nil)  // Upstream V2 does not report Pi cost.
     #expect(defaults.data(forKey: "t3DesktopShellCache") != nil)
     #expect(defaults.data(forKey: "t3DesktopV2Metrics.\(model.threadID!)") != nil)
-    // Actual Pi response usage survives V2 wire decoding.
-    #expect((model.outputTokensPerSecond ?? 0) > 0)
+    // Stock Pi Adapter does not supply per-turn output usage; do not invent speed.
+    #expect(model.outputTokensPerSecond == nil)
     let beforeCompact = model.lastSettledTurnID
     model.compact()
     for _ in 0..<200 where model.lastSettledTurnID == beforeCompact || model.isBusy {
