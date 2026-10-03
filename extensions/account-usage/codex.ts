@@ -1,6 +1,6 @@
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { logQuotaFailure } from "./diagnostics.js";
-import { readBoundedJson } from "./http.js";
+import { HttpStatusError, requestBoundedJson } from "./http.js";
 import { getCodexOAuth } from "./oauth.js";
 import { createAccountStore } from "./store.js";
 import type {
@@ -117,27 +117,15 @@ async function requestUsage(
   );
 
   try {
-    const response = await fetch(USAGE_URL, {
+    const body = await requestBoundedJson(USAGE_URL, {
       headers: {
         Authorization: `Bearer ${credential.access}`,
         "chatgpt-account-id": accountId,
         "User-Agent": "pi-codex-account-usage",
       },
-      redirect: "error",
       signal: controller.signal,
+      maxBytes: MAX_BODY_BYTES,
     });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => {});
-      throw new HttpStatusError(
-        response.status,
-        `额度接口返回 HTTP ${response.status}。`,
-      );
-    }
-    const body = await readBoundedJson(
-      response,
-      MAX_BODY_BYTES,
-      controller.signal,
-    );
     const rateLimit = asRecord(body.rate_limit);
     if (!rateLimit) throw new Error("额度接口缺少 rate_limit 数据。");
     const primary = parseWindow(rateLimit.primary_window);
@@ -172,22 +160,19 @@ async function requestResetCredits(
 ): Promise<ResetCredits | undefined> {
   const startedAt = Date.now();
   try {
-    const response = await fetch(RESET_CREDITS_URL, {
+    // This optional endpoint has its own short deadline and no retries. A stalled
+    // credits service must not spend the whole primary quota request budget.
+    const body = await requestBoundedJson(RESET_CREDITS_URL, {
       headers: {
         Authorization: `Bearer ${credential.access}`,
         "chatgpt-account-id": accountId,
         "User-Agent": "pi-codex-account-usage",
       },
-      redirect: "error",
       signal,
+      maxBytes: MAX_BODY_BYTES,
+      timeoutMs: 3_000,
+      retries: 0,
     });
-    // Reset credits are supplementary. Unsupported plans/endpoints must not hide
-    // otherwise valid usage windows.
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => {});
-      return undefined;
-    }
-    const body = await readBoundedJson(response, MAX_BODY_BYTES, signal);
     const rawCount = finiteNumber(body.available_count);
     if (rawCount === undefined || rawCount < 0) return undefined;
     const credits = Array.isArray(body.credits)
@@ -285,13 +270,4 @@ function safeErrorMessage(error: unknown): string {
     return "刷新已取消";
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/Bearer\s+\S+/giu, "Bearer [REDACTED]").slice(0, 200);
-}
-
-class HttpStatusError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
 }

@@ -1,5 +1,17 @@
 # PiMac / account-usage 稳定性与体验优化
 
+## 本轮：Server 正文搜索与请求恢复
+
+- 修复 T3 迁移后会话正文搜索仍读取 `t3:` 路径的问题：从官方线程 projection 提取可见 user / assistant 文本，不加载附件、不索引 reasoning 或工具输出。搜索按需串行读取，避免每次输入同时请求全部线程；失败显示连接错误，不伪装成零结果。
+- 新增空白分隔的 AND 关键词、双引号短语、`-排除词`；关键词可跨标题与多条消息匹配，排除词检查标题与所有可见正文。搜索框支持 ⇧⌘F、Esc、回车打开首项，显示语法提示和结果数量，独立 SwiftUI 组件降低主视图耦合。
+- Server 文本缓存限额 48 MiB，按线程更新时间失效，切换 Server / 停止客户端时清空；失败、取消与旧连接返回不写入缓存。所有会话的标题和更新时间参与搜索任务身份，非首行更新也能触发重新搜索。
+- 保留旧 JSONL 索引兼容，改为分块读取和有界单条记录解码，不再复制整个文件为 String；损坏 UTF-8 只影响所在记录。与 RPC 相同，超过 16 MiB 的记录丢弃至下一 LF。
+- Server 启动增加 60 秒 watchdog：未获得有效的管理端口和 Server 端口则停止子进程，显示可操作错误。成功 readiness 和停止均取消计时器；旧启动轮次不能影响新进程。
+- account-usage 提取共享安全 GET helper：网络 TypeError、HTTP 502/503/504 最多重试一次，等待 250 ms；401/403/429/500、非法 JSON 和 OAuth refresh 不自动重试。整个请求（含 body 与等待）受统一超时/取消信号约束，继续禁止凭据跟随重定向，并限制响应为 64 KiB。
+- 附加 reset-credit 请求独立最多等待 3 秒、不重试，失败仍保留主额度结果。Codex 主查询保留 15 秒总预算与一次 401 凭据刷新语义。
+
+验证：`./scripts/check.sh` 全部通过（Swift 219 项、account-usage 53 项、PiCompatibility 5 项、Server 80 项，包含 Fast 与真实 Pi RPC/codemode sandbox 检查）；DevWatcher 20 项通过。新增覆盖 Server 正文搜索真实集成、缓存失效与失败恢复、查询语法、损坏记录、启动超时后的重启，以及有限 HTTP 重试/取消/超时。真实窗口操作、真实 OAuth 与额度服务仍需人工验收；未发布、推送或修改真实账户。
+
 ## 本轮：并发额度查询与 Git 差异体验
 
 - 额度缓存改为双层锁：provider namespace 的 SHA-256 锁负责合并同源查询；全局文档锁仅用于短暂读取和写入。Gemini、Codex、OpenAI 可并发查询，慢接口不再占住其他 provider 的网络刷新。

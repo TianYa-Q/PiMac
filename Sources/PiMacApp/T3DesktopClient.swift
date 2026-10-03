@@ -22,6 +22,7 @@ final class T3DesktopClient: ObservableObject {
   private var watches: [UUID: (String, (JSON) -> Void, (JSON) -> Void)] = [:]
   private var imageCache: [String: PromptAttachment] = [:]
   private var threadRevisions: [String: Int] = [:]
+  private let searchIndex = ServerSessionSearchIndex()
   private var hasDeliveredShell = false
   private var syncedModelPreferences: Data?
   private let session: URLSession = {
@@ -57,6 +58,7 @@ final class T3DesktopClient: ObservableObject {
             self.syncedModelPreferences = nil
             self.providers = []
             self.threadRevisions.removeAll()
+            self.searchIndex.reset()
             self.isConnected = false
           }
           if serverURL == nil {
@@ -85,6 +87,7 @@ final class T3DesktopClient: ObservableObject {
   }
 
   func stop() {
+    searchIndex.reset()
     generation = UUID()
     loop?.cancel()
     loop = nil
@@ -256,6 +259,29 @@ final class T3DesktopClient: ObservableObject {
       defaults.set(data, forKey: "t3DesktopShellCache")
     }
     onShell?(next)
+  }
+
+  func sessionSearchMessages(query: String, sessions: [SessionItem]) async throws
+    -> [String: [String]]
+  {
+    let current = generation
+    return try await searchIndex.messages(for: query, in: sessions) { id in
+      guard self.generation == current, self.isConnected else { throw ClientError.unavailable }
+      let escaped = id.addingPercentEncoding(
+        withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
+      let native = try await self.request("/api/orchestration/threads/\(escaped)")
+      guard self.generation == current else { throw CancellationError() }
+      let detail = T3V2Presentation.detail(native)
+      guard let thread = detail["thread"] as? JSON,
+        let messages = thread["messages"] as? [JSON]
+      else { throw ClientError.rejected }
+      return messages.compactMap { message in
+        guard let role = message["role"] as? String, ["user", "assistant"].contains(role),
+          let text = message["text"] as? String, !text.isEmpty
+        else { return nil }
+        return text
+      }
+    }
   }
 
   func sessionMetrics(threadID: String) async throws -> SessionStats? {

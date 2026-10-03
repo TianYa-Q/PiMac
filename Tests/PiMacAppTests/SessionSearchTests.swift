@@ -4,6 +4,41 @@ import Testing
 @testable import PiMacApp
 
 struct SessionSearchTests {
+  @Test func queryGrammarSupportsPhrasesExclusionsAndUnicode() {
+    let query = SessionSearchQuery("  café \"修复 库存\" -秘密  ")
+    #expect(query.required == ["café", "修复 库存"])
+    #expect(query.excluded == ["秘密"])
+    #expect(query.matches(["Cafe 项目", "修复 库存已经完成"]))
+    #expect(!query.matches(["Cafe 项目", "修复 库存秘密"]))
+    #expect(!query.matches(["Cafe 项目", "修复另一项库存"]))
+    #expect(SessionSearchQuery("\"未闭合 短语").required == ["未闭合 短语"])
+    #expect(SessionSearchQuery("-秘密").matches(["公开记录"]))
+    #expect(SessionSearchQuery(" - \"\" ").isEmpty)
+  }
+
+  @Test func combinesTitleAndMessagesAndExcludesContent() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let records: [[String: Any]] = [
+      ["type": "message", "message": ["role": "user", "content": "修复 库存"]],
+      ["type": "message", "message": ["role": "assistant", "content": "刷新成功"]],
+    ]
+    var data = Data()
+    for record in records {
+      data.append(try JSONSerialization.data(withJSONObject: record))
+      data.append(Data("\n".utf8))
+    }
+    // Bad bytes in a separate record must not make all earlier messages unsearchable.
+    data.append(Data([0xff, 0x0a]))
+    try data.write(to: url)
+    let session = SessionItem(path: url.path, title: "Cafe 项目", modifiedAt: .now)
+    let results = SessionSearch.results(for: "café \"修复 库存\" 刷新", in: [session])
+    #expect(results.count == 1)
+    #expect(results.first?.snippet == "修复 库存")
+    #expect(SessionSearch.results(for: "café -刷新", in: [session]).isEmpty)
+    #expect(SessionSearch.results(for: "-秘密", in: [session]).count == 1)
+  }
+
   @Test
   func searchesTitlesAndVisibleMessageTextButNotToolsOrDiscardedBranches() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

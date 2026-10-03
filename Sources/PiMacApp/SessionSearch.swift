@@ -47,27 +47,30 @@ enum SessionSearch {
     index.setObject(CachedSessionText(messages: messages), forKey: key, cost: cost)
     return messages
   }
-  nonisolated static func results(for query: String, in sessions: [SessionItem])
-    -> [SessionSearchResult]
-  {
-    let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !term.isEmpty else { return [] }
+  nonisolated static func results(
+    for query: String, in sessions: [SessionItem], messagesByPath: [String: [String]] = [:]
+  ) -> [SessionSearchResult] {
+    let query = SessionSearchQuery(query)
+    guard !query.isEmpty else { return [] }
     var results: [SessionSearchResult] = []
     for session in sessions {
       if Task<Never, Never>.isCancelled { break }
-      let titleMatches = session.title.localizedStandardContains(term)
+      let titleMatches = query.matches([session.title])
       // Search the same visible branch and message text as the conversation view, not raw
       // JSONL (which also contains tool output, discarded branches and metadata).
       // A matching title needs no disk I/O. For content matches, parse each unchanged
       // session only once rather than reopening every JSONL file on every keystroke.
-      if titleMatches {
+      if titleMatches && query.excluded.isEmpty {
         results.append(SessionSearchResult(session: session, snippet: nil))
         continue
       }
-      if let match = messages(in: session).first(where: { $0.localizedStandardContains(term) }) {
-        results.append(
-          SessionSearchResult(session: session, snippet: snippet(match, matching: term)))
+      let messages = messagesByPath[session.path] ?? messages(in: session)
+      guard query.matches([session.title] + messages) else { continue }
+      let term = query.required.first { !session.title.localizedStandardContains($0) }
+      let match = term.flatMap { term in
+        messages.first { $0.localizedStandardContains(term) }.map { snippet($0, matching: term) }
       }
+      results.append(SessionSearchResult(session: session, snippet: match))
     }
     return results
   }
@@ -75,16 +78,15 @@ enum SessionSearch {
   // Unlike transcript rendering, indexing must not restore images or build tool/Markdown
   // entries. Decode each JSONL record once and retain only visible-branch user/assistant text.
   nonisolated private static func readSearchableMessages(at url: URL) -> [String] {
-    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
-      let text = String(data: data, encoding: .utf8)
-    else { return [] }
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+    defer { try? handle.close() }
+    let decoder = JSONLineDecoder()
     var parents: [String: String] = [:]
     var messages: [(id: String?, text: String)] = []
     var leafID: String?
-    for line in text.split(separator: "\n") {
-      guard let data = line.data(using: .utf8),
-        let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-      else { continue }
+    func consume(_ data: Data) {
+      guard let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+      else { return }
       if let id = record["id"] as? String {
         leafID = id
         if let parent = record["parentId"] as? String { parents[id] = parent }
@@ -95,7 +97,7 @@ enum SessionSearch {
         let message = record["message"] as? [String: Any],
         let role = message["role"] as? String,
         role == "user" || role == "assistant"
-      else { continue }
+      else { return }
       let content = message["content"]
       let messageText: String
       if let plain = content as? String {
@@ -111,6 +113,16 @@ enum SessionSearch {
       if !messageText.isEmpty {
         messages.append((record["id"] as? String, messageText))
       }
+    }
+    // No whole-file String, image decoding, or tool-output retention. A malformed UTF-8
+    // record affects only that record, not the entire session's searchability.
+    do {
+      while let chunk = try handle.read(upToCount: 64 * 1_024), !chunk.isEmpty {
+        for record in decoder.append(chunk) { consume(record) }
+      }
+      if let tail = decoder.finish() { consume(tail) }
+    } catch {
+      return []
     }
     guard let leafID else { return messages.map(\.text) }
     var branch = Set<String>()

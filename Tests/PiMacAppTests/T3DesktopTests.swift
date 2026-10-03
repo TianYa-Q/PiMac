@@ -279,6 +279,17 @@ struct T3DesktopTests {
     #expect(
       model.messages.contains { $0.kind == .assistant && $0.text == "Reply: queued-followup" })
     let id = try #require(model.threadID)
+    let searchSession = SessionItem(path: "t3:\(id)", title: "搜索测试", modifiedAt: .now)
+    let searchable = try await client.sessionSearchMessages(
+      query: "queued-followup", sessions: [searchSession])
+    #expect(
+      searchable[searchSession.path]?.contains("Reply: queued-followup") == true,
+      "Fixture searchable text: \(searchable[searchSession.path] ?? [])")
+    #expect(searchable[searchSession.path]?.contains("fixture.txt") == false)
+    #expect(
+      SessionSearch.results(
+        for: "搜索测试 queued-followup", in: [searchSession], messagesByPath: searchable
+      ).count == 1)
     let detail = try await client.request("/api/orchestration/threads/\(id)")
     #expect(
       ((detail["projection"] as? [String: Any])?["thread"] as? [String: Any])?["id"] as? String

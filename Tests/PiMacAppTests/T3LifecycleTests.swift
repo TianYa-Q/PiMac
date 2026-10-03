@@ -52,6 +52,35 @@ struct T3LifecycleTests {
     #expect(T3BridgeStateLease.isAvailable(root.appendingPathComponent("child-owner.lock")))
   }
 
+  @Test(.timeLimit(.minutes(1)))
+  func startupDeadlineStopsChildAndAllowsRetry() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let workspace = WorkspaceModel(restoreUserState: false)
+    let service = T3BridgeService(stateDirectory: root, startupTimeout: .milliseconds(1))
+    defer {
+      service.stop()
+      workspace.disconnectAll()
+    }
+    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret())
+    for _ in 0..<100 where !service.status.contains("启动超时") {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(service.status.contains("启动超时"))
+    #expect(service.serverURL == nil)
+    #expect(service.port == nil)
+    #expect(await service.stopAndWait())
+    #expect(T3BridgeStateLease.isAvailable(root.appendingPathComponent("child-owner.lock")))
+    let retry = T3BridgeService(stateDirectory: root)
+    defer { retry.stop() }
+    try retry.start(workspace: workspace, token: T3NetworkEndpoint.secret())
+    for _ in 0..<200 where retry.serverURL == nil {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(retry.serverURL != nil)
+    #expect(await retry.stopAndWait())
+  }
+
   @Test func childLeaseProbeNeverFollowsSymlinks() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

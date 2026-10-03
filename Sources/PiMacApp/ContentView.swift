@@ -232,6 +232,7 @@ struct ContentView: View {
   @FocusState private var sessionSearchFocused: Bool
   @State private var sessionSearchResults: [SessionSearchResult] = []
   @State private var isSearchingSessions = false
+  @State private var sessionSearchError: String?
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
   @AppStorage(SidebarWidth.storageKey) private var sidebarWidth = SidebarWidth.defaultValue
   @GestureState private var sidebarDragTranslation: CGFloat = 0
@@ -377,10 +378,22 @@ struct ContentView: View {
         return
       }
       isSearchingSessions = true
+      sessionSearchError = nil
       do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
       let sessions = allSessions
+      let messagesByPath: [String: [String]]
+      do {
+        messagesByPath = try await workspace.server.sessionSearchMessages(
+          query: query, sessions: sessions)
+      } catch {
+        guard !Task.isCancelled else { return }
+        sessionSearchResults = []
+        isSearchingSessions = false
+        sessionSearchError = "无法读取 Server 会话，请检查连接后重新搜索。"
+        return
+      }
       let search = Task.detached(priority: .userInitiated) {
-        SessionSearch.results(for: query, in: sessions)
+        SessionSearch.results(for: query, in: sessions, messagesByPath: messagesByPath)
       }
       let results = await withTaskCancellationHandler {
         await search.value
@@ -556,31 +569,22 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .help(sessionSearchExpanded ? "关闭搜索" : "搜索聊天记录")
+            .keyboardShortcut("f", modifiers: [.command, .shift])
+            .help(sessionSearchExpanded ? "关闭搜索（⇧⌘F）" : "搜索聊天记录（⇧⌘F）")
             .accessibilityLabel(sessionSearchExpanded ? "关闭搜索" : "搜索聊天记录")
           }
 
           if sessionSearchExpanded {
-            HStack(spacing: 6) {
-              Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-              TextField("搜索聊天记录", text: $sessionSearchText)
-                .textFieldStyle(.plain)
-                .focused($sessionSearchFocused)
-                .accessibilityLabel("搜索聊天记录")
-                .onExitCommand { closeSessionSearch() }
-              if !sessionSearchText.isEmpty {
-                Button {
-                  sessionSearchText = ""
-                } label: {
-                  Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("清除搜索")
+            SessionSearchField(
+              text: $sessionSearchText, focused: $sessionSearchFocused,
+              onClose: closeSessionSearch,
+              onSubmit: {
+                guard !isSearchingSessions, let result = sessionSearchResults.first,
+                  let projectURL = app.projectURL
+                else { return }
+                workspace.openSession(path: result.session.path, in: projectURL)
               }
-            }
-            .font(.callout)
-            .padding(8)
-            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            )
           }
 
           if searching {
@@ -589,10 +593,20 @@ struct ContentView: View {
                 .controlSize(.small)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 8)
+            } else if let sessionSearchError {
+              Text(sessionSearchError)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 8)
             } else if sessionSearchResults.isEmpty {
               ContentUnavailableView.search(text: sessionSearchText)
                 .controlSize(.small)
             } else {
+              Text("找到 \(sessionSearchResults.count) 个会话 · 回车打开首项")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
               ScrollView {
                 LazyVStack(spacing: 3) {
                   ForEach(sessionSearchResults) { result in
@@ -771,7 +785,9 @@ struct ContentView: View {
   private var sessionSearchKey: String {
     let sessions = allSessions
     return
-      "\(app.projectURL?.standardizedFileURL.path ?? "")|\(sessionSearchText)|\(sessions.count)|\(sessions.first?.path ?? "")|\(sessions.first?.modifiedAt.timeIntervalSince1970 ?? 0)"
+      "\(app.projectURL?.standardizedFileURL.path ?? "")|\(sessionSearchText)|"
+      + sessions.map { "\($0.path)|\($0.title)|\($0.modifiedAt.timeIntervalSince1970)" }
+      .joined(separator: "\n")
   }
 
   private func redesignedSessionRow(_ session: SessionItem, snippet: String? = nil) -> some View {

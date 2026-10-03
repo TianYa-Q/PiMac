@@ -10,6 +10,8 @@ final class T3BridgeService: ObservableObject {
   @Published private(set) var isStopping = false
   private let defaults: UserDefaults
   private let stateDirectory: URL?
+  private let startupTimeout: Duration
+  private var startupWatchdog: Task<Void, Never>?
   private var stoppingPID: Int32?
   private var stoppingProcess: Process?
   @Published private(set) var serverURL: URL?
@@ -29,9 +31,13 @@ final class T3BridgeService: ObservableObject {
     return URLSession(configuration: configuration)
   }()
 
-  init(defaults: UserDefaults = .standard, stateDirectory: URL? = nil) {
+  init(
+    defaults: UserDefaults = .standard, stateDirectory: URL? = nil,
+    startupTimeout: Duration = .seconds(60)
+  ) {
     self.defaults = defaults
     self.stateDirectory = stateDirectory
+    self.startupTimeout = startupTimeout
     // Migrate away from LAN-only consent; never reopen a saved listener.
     T3ConnectionPreferences.save(nil, to: defaults)
   }
@@ -105,6 +111,13 @@ final class T3BridgeService: ObservableObject {
       input = stdin.fileHandleForWriting
       adminToken = token
       status = "本机 T3 Server 启动中"
+      startupWatchdog?.cancel()
+      startupWatchdog = Task { [weak self, startupTimeout] in
+        do { try await Task.sleep(for: startupTimeout) } catch { return }
+        guard let self, self.generation == current, self.serverURL == nil else { return }
+        self.stop()
+        self.status = "本机 T3 Server 启动超时，请检查 Node 与服务资源后重试。"
+      }
       // Read supervisor readiness only, after process/input/generation are ready.
       T3BridgePipeReader.start(stdout.fileHandleForReading) { [weak self] record in
         Task { @MainActor [weak self] in self?.receive(record, generation: current) }
@@ -124,6 +137,8 @@ final class T3BridgeService: ObservableObject {
   }
 
   func stop() {
+    startupWatchdog?.cancel()
+    startupWatchdog = nil
     generation = UUID()
     adminToken = ""
     serverURL = nil
@@ -206,12 +221,13 @@ final class T3BridgeService: ObservableObject {
     }
     if let message = try? JSONSerialization.jsonObject(with: record) as? [String: Any],
       message["type"] as? String == "ready", let port = message["port"] as? Int,
-      (1...65535).contains(port)
+      (1...65535).contains(port), let serverPort = message["serverPort"] as? Int,
+      (1...65535).contains(serverPort)
     {
+      startupWatchdog?.cancel()
+      startupWatchdog = nil
       self.port = port
-      if let serverPort = message["serverPort"] as? Int, (1...65535).contains(serverPort) {
-        serverURL = URL(string: "http://127.0.0.1:\(serverPort)")
-      }
+      serverURL = URL(string: "http://127.0.0.1:\(serverPort)")
       status = "本机 T3 Server 已启动（桌面统一使用 Server）"
       return
     }

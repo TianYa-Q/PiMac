@@ -35,6 +35,8 @@ An OpenAI API key (stored or environment/runtime) is not automatically replaced 
 
 Quota requests use the ChatGPT usage/reset-credit endpoints. Both response bodies are read incrementally with a 64 KiB limit on received bytes, even without a reliable Content-Length header. Oversized/error bodies are cancelled rather than drained into memory; cancellation releases stream readers. Request timeouts are distinguished from user cancellation. A direct-token credential must include a usable ChatGPT account ID (credential metadata or token claims) and be authorized by those endpoints. Missing IDs, unsupported grants, or HTTP failures produce an account error, not invented quota or a fallback to another provider's credentials. **Live browser login and direct-token endpoint permissions require manual validation; mocked tests do not establish upstream authorization.**
 
+Usage GETs retry transient network failures and HTTP 502/503/504 at most once after 250 ms, within the 15-second total query budget. Authentication failures, HTTP 429, malformed responses and OAuth refreshes are not automatically retried. The supplementary reset-credit endpoint has a separate 3-second ceiling and no retries: its failure does not hide valid usage windows. Requests never follow redirects with credentials.
+
 ## Automatic rotation and weekly balancing
 
 Both policies run **inside this Pi extension**, in TUI/RPC/headless sessions;
