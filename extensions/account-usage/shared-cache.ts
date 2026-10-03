@@ -4,9 +4,11 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
 
@@ -35,12 +37,10 @@ export async function readThroughSharedCache<T>(options: {
   signal: AbortSignal;
   query: () => Promise<T>;
 }): Promise<T> {
+  options.signal.throwIfAborted();
   mkdirSync(getAgentDir(), { recursive: true, mode: 0o700 });
   let compromised: Error | undefined;
-  const release = await lockfile.lock(CACHE_PATH, {
-    realpath: false,
-    stale: 5 * 60_000,
-    retries: { retries: 360, factor: 1, minTimeout: 500, maxTimeout: 500 },
+  const release = await acquireCacheLock(options.signal, {
     // Never throw from proper-lockfile's heartbeat timer. A throw there bypasses
     // this async function and terminates the entire Pi RPC process.
     onCompromised: (error) => {
@@ -59,8 +59,10 @@ export async function readThroughSharedCache<T>(options: {
     if (
       !options.force &&
       cached?.key === options.key &&
+      cached.updatedAt <= Date.now() &&
       Date.now() - cached.updatedAt < options.maxAgeMs
     ) {
+      throwIfCompromised();
       return structuredClone(cached.value) as T;
     }
 
@@ -76,6 +78,34 @@ export async function readThroughSharedCache<T>(options: {
     return value;
   } finally {
     await releaseCacheLock(release, () => compromised);
+  }
+}
+
+/** Retry outside proper-lockfile so cancellation interrupts contention, not just the query. */
+async function acquireCacheLock(
+  signal: AbortSignal,
+  options: { onCompromised: (error: Error) => void },
+): Promise<() => Promise<void>> {
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    try {
+      // Do not race acquisition against abort: a late successful acquisition would leak its lease.
+      return await lockfile.lock(CACHE_PATH, {
+        realpath: false,
+        stale: 5 * 60_000,
+        retries: 0,
+        ...options,
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      if (
+        (error as NodeJS.ErrnoException).code !== "ELOCKED" ||
+        attempt >= 360
+      ) {
+        throw error;
+      }
+      await delay(500, undefined, { signal });
+    }
   }
 }
 
@@ -98,15 +128,16 @@ function readCache(): CacheDocument {
   try {
     const value = JSON.parse(readFileSync(CACHE_PATH, "utf8")) as unknown;
     if (!isRecord(value) || value.version !== 1 || !isRecord(value.entries)) {
-      return { version: 1, entries: {} };
+      return { version: 1, entries: Object.create(null) };
     }
-    const entries: Record<string, CacheEntry> = {};
+    const entries: Record<string, CacheEntry> = Object.create(null);
     for (const [namespace, raw] of Object.entries(value.entries)) {
       if (
         isRecord(raw) &&
         typeof raw.key === "string" &&
         typeof raw.updatedAt === "number" &&
         Number.isFinite(raw.updatedAt) &&
+        raw.updatedAt >= 0 &&
         Object.hasOwn(raw, "value")
       ) {
         entries[namespace] = {
@@ -118,19 +149,29 @@ function readCache(): CacheDocument {
     }
     return { version: 1, entries };
   } catch {
-    return { version: 1, entries: {} };
+    return { version: 1, entries: Object.create(null) };
   }
 }
 
 function writeCache(document: CacheDocument): void {
   const temporaryPath = `${CACHE_PATH}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporaryPath, `${JSON.stringify(document)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  chmodSync(temporaryPath, 0o600);
-  renameSync(temporaryPath, CACHE_PATH);
-  chmodSync(CACHE_PATH, 0o600);
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify(document)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    });
+    renameSync(temporaryPath, CACHE_PATH);
+    chmodSync(CACHE_PATH, 0o600);
+  } catch (error) {
+    // Cleanup must not mask the original write/rename failure.
+    try {
+      unlinkSync(temporaryPath);
+    } catch {
+      // The rename may have succeeded, or the filesystem may be unavailable.
+    }
+    throw error;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

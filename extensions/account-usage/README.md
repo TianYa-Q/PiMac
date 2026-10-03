@@ -73,7 +73,7 @@ not live paid requests. Live quota exhaustion/continuation still needs validatio
 
 ## Refresh and warm-up behavior
 
-Quota results are shared through owner-only caches, partitioned by provider. Active sessions refresh at most once per minute; idle sessions at most once every three minutes. `/usage refresh` bypasses the cache. Gemini quota display remains available through the `antigravity` provider.
+Quota results are shared through owner-only caches, partitioned by provider. Active sessions refresh at most once per minute; idle sessions at most once every three minutes. `/usage refresh` bypasses the cache. Waiting for another process's cache lock is cancellable; cancelled or failed queries never replace the previous snapshot. Future-dated snapshots are re-queried after clock changes. Gemini quota display remains available through the `antigravity` provider.
 
 The existing warm-up behavior is retained: a full, unused 5-hour or 7-day window may trigger a small `你好` request with `gpt-5.6-luna` at low reasoning, using the account's own provider. Window claims and the 10-minute cooldown are provider-specific. These requests can consume subscription quota. Hidden accounts are excluded.
 

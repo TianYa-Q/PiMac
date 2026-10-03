@@ -24,7 +24,8 @@ struct DesktopScheduledTask: Identifiable {
   var scheduleLabel: String {
     let schedule = raw["schedule"] as? [String: Any] ?? [:]
     if schedule["type"] as? String == "interval" {
-      return "每 \((schedule["everyMs"] as? Int ?? 0) / 60000) 分钟"
+      let minutes = Double(schedule["everyMs"] as? Int ?? 0) / 60000
+      return "每 \(minutes.formatted(.number.precision(.fractionLength(0...3)))) 分钟"
     }
     let days = schedule["weekdays"] as? [Int]
     let labels = ["日", "一", "二", "三", "四", "五", "六"]
@@ -90,10 +91,12 @@ struct ScheduledTaskDraft: Identifiable {
     if projectID.isEmpty || modelID.isEmpty || modelInstanceID.isEmpty { return "请选择项目和模型。" }
     if scheduleType == "interval" {
       guard let minutes = Double(intervalMinutes), minutes.isFinite, minutes >= 1,
-        minutes * 60000 < Double(Int.max)
-      else { return "间隔至少为 1 分钟，且不能超出整数范围。" }
+        minutes * 60000 <= 9_007_199_254_740_991
+      else { return "间隔至少为 1 分钟，且不能超出 Server 的安全整数范围。" }
     } else if scheduleType == "fixed_time" {
-      guard timeOfDay.range(of: #"^([01]?\d|2[0-3]):[0-5]\d$"#, options: .regularExpression) != nil,
+      guard
+        timeOfDay.range(of: #"\A([01]?[0-9]|2[0-3]):[0-5][0-9]\z"#, options: .regularExpression)
+          != nil,
         !weekdays.isEmpty, weekdays.allSatisfy({ (0...6).contains($0) })
       else { return "请输入有效的 HH:MM，并至少选择一天。" }
     } else {

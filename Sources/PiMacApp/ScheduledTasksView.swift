@@ -158,6 +158,18 @@ private struct ScheduledTaskEditor: View {
   private var threads: [[String: Any]] {
     server.threads.filter { $0["projectId"] as? String == draft.projectID }
   }
+  private var providerOptions: [ProjectOption] {
+    var options = server.providers.compactMap { row -> ProjectOption? in
+      guard let id = row["instanceId"] as? String else { return nil }
+      return ProjectOption(id: id, title: row["title"] as? String ?? id)
+    }
+    if !options.contains(where: { $0.id == draft.modelInstanceID }) {
+      options.append(
+        ProjectOption(id: draft.modelInstanceID, title: "\(draft.modelInstanceID)（当前不可用）"))
+    }
+    return options.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+  }
+
   private var modelIDs: [String] {
     let provider = server.providers.first { $0["instanceId"] as? String == draft.modelInstanceID }
     let ids = (provider?["models"] as? [[String: Any]] ?? []).compactMap { $0["slug"] as? String }
@@ -194,6 +206,9 @@ private struct ScheduledTaskEditor: View {
             }
           ) { option in Text(option.title).tag(option.id) }
         }
+        Picker("Provider", selection: $draft.modelInstanceID) {
+          ForEach(providerOptions) { option in Text(option.title).tag(option.id) }
+        }
         Picker("模型", selection: $draft.modelID) {
           Text("请选择").tag("")
           ForEach(modelIDs, id: \.self) { Text($0).tag($0) }
@@ -204,6 +219,14 @@ private struct ScheduledTaskEditor: View {
         }
         if draft.scheduleType == "interval" {
           TextField("间隔（分钟，至少 1）", text: $draft.intervalMinutes)
+          HStack {
+            Text("快捷周期").foregroundStyle(.secondary)
+            Button("15 分钟") { draft.intervalMinutes = "15" }
+            Button("每小时") { draft.intervalMinutes = "60" }
+            Button("每 24 小时") { draft.intervalMinutes = "1440" }
+          }
+          .buttonStyle(.bordered)
+          .font(.caption)
         } else {
           TextField("本机时间（HH:MM）", text: $draft.timeOfDay)
           HStack {
@@ -252,6 +275,7 @@ private struct ScheduledTaskEditor: View {
     .padding(24).frame(width: 600)
     .interactiveDismissDisabled(busy)
     .onChange(of: draft.projectID) { draft.threadID = "" }
+    .onChange(of: draft.modelInstanceID) { draft.modelID = "" }
   }
 
   private struct ProjectOption: Identifiable {

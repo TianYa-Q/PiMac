@@ -54,22 +54,39 @@ struct ScheduledTasksTests {
     #expect(first["requireExisting"] == nil)
     #expect(first["threadId"] is NSNull)
     #expect(first["title"] as? String == "task")
-    for value in ["0", "0.99", "-1", "NaN", "inf", "1e100", "abc"] {
+    for value in ["0", "0.99", "-1", "NaN", "inf", "1e100", "abc", "150119987580"] {
       draft.intervalMinutes = value
       #expect(draft.validationMessage != nil)
     }
     draft.intervalMinutes = "1.5"
     #expect((try draft.payload()["schedule"] as? [String: Any])?["everyMs"] as? Int == 90000)
     draft.scheduleType = "fixed_time"
-    for value in ["24:00", "09:60", "9:5", "bad"] {
+    for value in ["24:00", "09:60", "9:5", "09:00\n", "０９:００", "bad"] {
       draft.timeOfDay = value
       #expect(draft.validationMessage != nil)
     }
+    draft.timeOfDay = "9:05"
+    #expect(draft.validationMessage == nil)
     draft.timeOfDay = "09:30"
     draft.weekdays = []
     #expect(draft.validationMessage != nil)
     draft.weekdays = [5, 1]
     #expect((try draft.payload()["schedule"] as? [String: Any])?["weekdays"] as? [Int] == [1, 5])
+  }
+
+  @Test func fractionalIntervalLabelsRetainPrecision() throws {
+    var raw = row()
+    raw["schedule"] = ["type": "interval", "everyMs": 90000]
+    let task = try DesktopScheduledTask(raw)
+    let minutes = 1.5.formatted(.number.precision(.fractionLength(0...3)))
+    #expect(task.scheduleLabel == "每 \(minutes) 分钟")
+    var draft = ScheduledTaskDraft(task: task)
+    #expect(draft.intervalMinutes == "1.5")
+    #expect((try draft.payload()["schedule"] as? [String: Any])?["everyMs"] as? Int == 90000)
+    draft.modelInstanceID = "custom-provider"
+    let selection = try #require(try draft.payload()["modelSelection"] as? [String: Any])
+    #expect(selection["instanceId"] as? String == "custom-provider")
+    #expect(selection["options"] == nil)
   }
 
   @Test func storeUsesNarrowMutationsAndNeverRetriesUnknownOutcomes() async throws {

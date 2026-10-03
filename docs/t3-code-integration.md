@@ -185,8 +185,10 @@ schedules use the Server's local wall clock. Pi Mac must stay running and awake.
 The desktop's sidebar calendar button opens the same Server-owned task list.
 It supports create/edit, pause/enable, delete (with confirmation) and run-now
 (with confirmation), with next/last dispatch times and errors. The form offers
-intervals or wall-clock time/weekdays, project/model selection and either a new
-conversation per run or an existing thread. New tasks use the project root and
+intervals or wall-clock time/weekdays, project/provider/model selection and either a new
+conversation per run or an existing thread. Interval shortcuts offer 15 minutes,
+one hour and 24 hours; fractional-minute intervals retain their display precision.
+Changing provider requires choosing a model again to avoid cross-provider mismatches. New tasks use the project root and
 full-access/default mode; edits retain the original project, workspace strategy,
 access mode and model options (changing model clears old options).
 
