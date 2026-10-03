@@ -32,10 +32,14 @@ async function open(directory) {
   };
   const rpc = async (method, input) => call(await ws(), method, input);
   const dispatch = fields => rpc('orchestration.dispatchCommand', { commandId: randomUUID(), ...fields });
-  const create = async () => {
-    const projectId = randomUUID(), threadId = randomUUID();
-    await rpc('projects.mutate', { type: 'project.create', commandId: randomUUID(), projectId, title: 'Official Pi', workspaceRoot: directory });
-    await dispatch({ type: 'thread.create', projectId, threadId, title: 'Official thread', createdBy: 'user', creationSource: 'web',
+  let projectId;
+  const create = async (title = 'Official thread') => {
+    const threadId = randomUUID();
+    if (!projectId) {
+      projectId = randomUUID();
+      await rpc('projects.mutate', { type: 'project.create', commandId: randomUUID(), projectId, title: 'Official Pi', workspaceRoot: directory });
+    }
+    await dispatch({ type: 'thread.create', projectId, threadId, title, createdBy: 'user', creationSource: 'web',
       modelSelection: { instanceId: 'pi', model: 'test/model' }, runtimeMode: 'full-access', interactionMode: 'default', branch: null, worktreePath: null });
     return threadId;
   };
@@ -44,6 +48,25 @@ async function open(directory) {
   const snapshot = async threadId => (await get('/api/orchestration/threads/' + threadId)).projection;
   return { gateway, get, ws, rpc, dispatch, create, message, snapshot, close: () => gateway.close() };
 }
+
+test('server names a desktop draft on its first mobile message without overwriting custom titles', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-mobile-title-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  for (const title of ['新任务', 'New thread', 'My custom title']) {
+    const threadId = await f.create(title);
+    // Mobile dispatch has no titleSeed and performs no follow-up metadata update.
+    await f.dispatch(f.message(threadId, '  手机继续\n  修复问题  '));
+    let projection = await f.snapshot(threadId);
+    assert.equal(projection.thread.title, title === 'My custom title' ? title : '手机继续 修复问题');
+    await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+    await f.dispatch(f.message(threadId, 'second message must not rename'));
+    projection = await f.snapshot(threadId);
+    assert.notEqual(projection.thread.title, 'second message must not rename');
+    if (title === 'My custom title') assert.equal(projection.thread.title, title);
+    await eventually(async () => (await f.snapshot(threadId)).runs.filter(r => r.status === 'completed').length === 2);
+  }
+});
 
 test('official Pi discovery, model preferences, and protocol authorization', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-official-config-'));

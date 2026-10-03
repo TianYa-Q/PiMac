@@ -111,7 +111,9 @@ For development, run `python3 scripts/dev.py` instead: it coalesces source chang
 
 The watcher builds and runs `.build/Pi Mac Dev.app`, enabling native notifications with the app icon. Allow notifications on first launch. The development app has its own identity (`com.jianfeng.pi-mac.dev`), with notification permissions and preferences separate from the release app. Task completion notifications appear in both foreground and background and use the default system sound. Bare executables launched with `swift run` do not support system notifications.
 
-The watcher prints compact timestamped build/change/reload statuses. Full output is saved to `.build/dev-build.log` (latest build) and `.build/dev-app.log` (current watcher run); failed builds also print the last 40 lines. Use `python3 scripts/dev.py --verbose` to show build details and live app logs in the terminal.
+The watcher owns relaunches: the app drains services and waits for the child lease, submits a restart handoff, then exits. Only after reaping the old app does the watcher launch the replacement and check its heartbeat within 30 seconds. Handoff/startup timeouts report an error instead of waiting indefinitely or launching a second owner. After upgrading the watcher, stop the old watcher with Ctrl-C and run `python3 scripts/dev.py` again.
+
+The watcher prints compact timestamped build/change/reload statuses. Full output is saved to `.build/dev-build.log` (latest build), `.build/dev-app.log` (app lifecycle output, appended across launches), and `.build/dev-watch.log` (watcher lifecycle, appended); failed builds also print the last 40 lines. Use `python3 scripts/dev.py --verbose` to show build details and live app logs in the terminal.
 
 With the full Xcode installation, you can also open `Package.swift` directly.
 

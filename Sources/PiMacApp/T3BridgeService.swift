@@ -160,6 +160,7 @@ final class T3BridgeService: ObservableObject {
   /// A diagnostic PID file left by SIGKILL is never a shutdown barrier.
   func stopAndWait() async -> Bool {
     stop()
+    NSLog("Pi Mac T3 shutdown barrier: waiting for process and child lease")
     for _ in 0..<360 {
       // The termination callback may be queued after the process is already gone.
       // Do not keep the UI in "stopping" solely because that callback is late.
@@ -170,11 +171,20 @@ final class T3BridgeService: ObservableObject {
         stoppingProcess = nil
         isStopping = false
       }
-      if !isStopping && childLeaseHasCleared { return true }
-      if Task.isCancelled { return false }
+      if !isStopping && childLeaseHasCleared {
+        NSLog("Pi Mac T3 shutdown barrier: cleared")
+        return true
+      }
+      if Task.isCancelled {
+        NSLog("Pi Mac T3 shutdown barrier: cancelled")
+        return false
+      }
       try? await Task.sleep(for: .milliseconds(50))
     }
-    return !isStopping && childLeaseHasCleared
+    let cleared = !isStopping && childLeaseHasCleared
+    NSLog("Pi Mac T3 shutdown barrier: cleared=%d, stopping=%d, childLeaseAvailable=%d",
+      cleared, isStopping, childLeaseHasCleared)
+    return cleared
   }
 
   private var childLeaseHasCleared: Bool {

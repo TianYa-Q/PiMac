@@ -107,7 +107,9 @@ final class AppModel: ObservableObject {
   @Published var accountQuotaMessage = ""
   @Published private(set) var isRefreshingAccountQuota = false
   var canManageAccounts: Bool { accountUsageProvider != nil && isProcessRunning && canRestartSafely && threadID != nil }
-  var supportsAccountSwitch: Bool { false }
+  var supportsAccountSwitch: Bool {
+    isProcessRunning && (accountUsageProvider == .chatGPT || accountUsageProvider == .legacyCodex)
+  }
   var supportsAccountRotation: Bool { false }
   var accountUsageProvider: AccountUsageProvider? { AccountUsageProvider(modelID: selectedModelId) }
   var remotePendingMessages: [ChatEntry] { [] }
@@ -323,7 +325,6 @@ final class AppModel: ObservableObject {
     submittedFromTurnID = lastTurnID
     let selection = modelSelection
     let submittedMessageID = messageID ?? UUID().uuidString
-    let shouldNameThread = !hasUserMessage && (sessionName.isEmpty || sessionName == "新任务")
     Task { [weak self] in
       guard let self else { return }
       defer { self.submitting = false }
@@ -350,20 +351,7 @@ final class AppModel: ObservableObject {
         ])
         completion(true)
         self.statusText = isSteering ? "已提交插入消息，当前工具调用结束后处理。" : "已提交到 T3 Server"
-        if shouldNameThread {
-          let title = String(
-            prompt.text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ").prefix(60)
-          )
-          if !title.isEmpty {
-            do {
-              try await server.dispatch([
-                "type": "thread.metadata.update", "threadId": id, "title": title,
-              ])
-            } catch {
-              // Naming failure must not turn an accepted prompt into a failed submission.
-            }
-          }
-        }
+        // Server owns initial naming, including first messages sent from mobile.
       } catch {
         self.awaitingAgentStart = false
         completion(false)
@@ -649,10 +637,10 @@ final class AppModel: ObservableObject {
   private func performSessionControl(_ operation: String, accountName: String? = nil) {
     guard let id = threadID, let server else { return }
     let current = generation
+    awaitingAgentStart = true
+    submittedFromTurnID = lastTurnID
     if operation == "compact" {
       isCompacting = true
-      awaitingAgentStart = true
-      submittedFromTurnID = lastTurnID
     } else {
       codexRotationInFlight = true
     }
@@ -672,16 +660,21 @@ final class AppModel: ObservableObject {
           threadID: id, operation: operation, accountName: accountName)
         guard self.generation == current else { return }
         self.statusText =
-          operation == "compact" ? "压缩请求已提交；等待 Server 完成。" : "已切换到 \(accountName ?? "")"
+          operation == "compact" ? "压缩请求已提交；等待 Server 完成。" : "切换请求已提交：\(accountName ?? "")；请以 Pi 的执行结果为准。"
       } catch {
         guard self.generation == current else { return }
-        if operation == "compact" { self.awaitingAgentStart = false }
+        self.awaitingAgentStart = false
         self.statusText = "操作未确认；请检查会话状态和扩展配置，不会自动重试。"
       }
     }
   }
   func switchCodexAccount(to accountName: String) {
-    guard canRestartSafely, supportsAccountSwitch else { return }
+    guard canRestartSafely, supportsAccountSwitch,
+      T3DesktopClient.isSwitchableAccountName(accountName),
+      extensionUI?.usage(for: self).accounts.contains(where: {
+        $0.name == accountName && !$0.isActive
+      }) == true
+    else { return }
     performSessionControl("switch-account", accountName: accountName)
   }
   func refreshCodexAccounts(force: Bool = false) {

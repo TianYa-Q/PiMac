@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts' / 'dev.py'
 IMPORT = f"import importlib.util; s=importlib.util.spec_from_file_location('dev', {str(SCRIPT)!r}); d=importlib.util.module_from_spec(s); s.loader.exec_module(d)\n"
@@ -31,6 +31,111 @@ class DevWatcherTests(unittest.TestCase):
         dev = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(dev)
         return dev
+
+    def supervisor(self, dev, directory, code=None):
+        state = Path(directory) / 'state'
+        restart = Path(directory) / 'restart'
+        supervisor = dev.AppSupervisor(Path('/fake/PiMac'), {}, state, restart, set())
+        supervisor.app = Mock(pid=123)
+        supervisor.app.poll.return_value = code
+        return supervisor
+
+    def test_restart_reaps_old_app_before_launching(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.supervisor(dev, directory)
+            supervisor.restart.write_text(json.dumps({'pid': 123, 'timestamp': time.time()}))
+            with patch.object(supervisor, 'launch') as launch:
+                supervisor.tick()
+                launch.assert_not_called()
+                supervisor.app.poll.return_value = 0
+                supervisor.tick()
+                supervisor.app.poll.assert_called()
+                launch.assert_called_once()
+
+    def test_real_child_handoff_preserves_logs_and_tracks_replacement(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            dev.app_log = directory / 'app.log'
+            state, restart = directory / 'state', directory / 'restart'
+            count = directory / 'count'
+            binary = directory / 'fake-app'
+            binary.write_text(f'''#!{sys.executable}
+import json, os, pathlib, time
+count = pathlib.Path({str(count)!r})
+n = int(count.read_text()) + 1 if count.exists() else 1
+count.write_text(str(n))
+print('launch', n, flush=True)
+pathlib.Path({str(state)!r}).write_text(json.dumps({{'pid': os.getpid(), 'timestamp': time.time(), 'idle': False}}))
+if n == 1:
+    pathlib.Path({str(restart)!r}).write_text(json.dumps({{'pid': os.getpid(), 'timestamp': time.time()}}))
+else:
+    time.sleep(60)
+''')
+            binary.chmod(0o700)
+            groups = set()
+            supervisor = dev.AppSupervisor(binary, os.environ.copy(), state, restart, groups)
+            supervisor.launch()
+            old = supervisor.app
+            try:
+                old.wait(timeout=5)
+                supervisor.tick()
+                replacement = supervisor.app
+                self.assertNotEqual(old.pid, replacement.pid)
+                for _ in range(100):
+                    supervisor.tick()
+                    if supervisor.startup_deadline is None:
+                        break
+                    time.sleep(0.02)
+                self.assertIsNone(supervisor.startup_deadline)
+                self.assertEqual(count.read_text(), '2')
+                self.assertEqual(groups, {old.pid, replacement.pid})
+                self.assertIn('launch 1', dev.app_log.read_text())
+                self.assertIn('launch 2', dev.app_log.read_text())
+                self.assertFalse(restart.exists())
+            finally:
+                if supervisor.app.poll() is None:
+                    supervisor.app.terminate()
+                supervisor.app.wait(timeout=5)
+
+    def test_stale_wrong_pid_or_failed_exit_never_relaunches(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            for pid, stamp, code in [(124, time.time(), 0), (123, time.time() - 20, 0),
+                                      (123, time.time(), 1)]:
+                supervisor = self.supervisor(dev, directory, code)
+                supervisor.restart.write_text(json.dumps({'pid': pid, 'timestamp': stamp}))
+                with patch.object(supervisor, 'launch') as launch:
+                    with self.assertRaises(RuntimeError):
+                        supervisor.tick()
+                    launch.assert_not_called()
+
+    def test_exit_and_startup_waits_are_bounded(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.supervisor(dev, directory)
+            supervisor.restart.write_text(json.dumps({'pid': 123, 'timestamp': time.time()}))
+            supervisor.exit_deadline = time.monotonic() - 1
+            with self.assertRaisesRegex(RuntimeError, 'old app did not exit'):
+                supervisor.tick()
+            supervisor.restart.unlink()
+            supervisor.exit_deadline = None
+            supervisor.startup_deadline = time.monotonic() - 1
+            with self.assertRaisesRegex(RuntimeError, 'heartbeat timed out'):
+                supervisor.tick()
+
+    def test_startup_requires_heartbeat_of_replacement_pid(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.supervisor(dev, directory)
+            supervisor.startup_deadline = time.monotonic() + 30
+            supervisor.state.write_text(json.dumps({'pid': 122, 'timestamp': time.time()}))
+            supervisor.tick()
+            self.assertIsNotNone(supervisor.startup_deadline)
+            supervisor.state.write_text(json.dumps({'pid': 123, 'timestamp': time.time()}))
+            supervisor.tick()
+            self.assertIsNone(supervisor.startup_deadline)
 
     def test_successful_build_output_goes_to_log(self):
         dev = self.load_dev()

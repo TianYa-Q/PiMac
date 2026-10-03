@@ -986,11 +986,6 @@ struct ContentView: View {
       ScrollViewReader { proxy in
         ScrollView {
           VStack(alignment: .leading, spacing: 14) {
-            if app.messages.isEmpty {
-              ConversationWelcomeView(project: workspace.selectedProject?.name,
-                chooseProject: { choosingProject = true })
-            }
-
             VirtualConversationStack(
               ids: turns.map(\.id),
               pinnedToBottom: conversationScrollMode == .pinnedToBottom
@@ -1029,6 +1024,30 @@ struct ContentView: View {
         }
         .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
+        .overlay(alignment: .bottomTrailing) {
+          if conversationScrollMode == .manual && !conversationBottomIsVisible && !turns.isEmpty {
+            Button {
+              initialScrollGeneration += 1
+              initialSessionScrollPending = false
+              autoScrollGeneration += 1
+              autoScrollScheduled = false
+              conversationScrollMode = .pinnedToBottom
+              proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
+            } label: {
+              Label(app.isStreaming ? "跟随输出" : "回到最新", systemImage: "arrow.down")
+                .font(.callout.weight(.medium))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.12)))
+                .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+            }
+            .buttonStyle(.plain)
+            .help("滚动到最新消息并恢复自动跟随")
+            .accessibilityLabel("回到最新消息")
+            .padding(16)
+          }
+        }
         // 让长会话在首帧布局时就以底部为基准，避免先显示靠上的位置，
         // 再等待延迟校正滚到底部。后续显式滚动仍用于 Markdown 高度变化。
         .defaultScrollAnchor(.bottom)
@@ -2788,7 +2807,8 @@ private struct CodexAccountsCard: View, Equatable {
           Button("切换") { switchAccount(account.name) }
             .buttonStyle(.borderless)
             .font(.caption2)
-            .disabled(!snapshot.canSwitch)
+            .disabled(!snapshot.canSwitch || !T3DesktopClient.isSwitchableAccountName(account.name))
+            .help("空闲时通过 account-usage 扩展切换账户；执行结果以 Pi 回复为准")
         }
       }
       // The hover card extends over the quota rows, so its source row must paint above them.
@@ -3219,7 +3239,7 @@ private struct ModelSettingsView: View {
 private struct SettingsView: View {
   @Environment(\.dismiss) private var dismiss
   @State private var path: String
-  @State private var editingPath = false
+  private let originalPath: String
   @State private var selectedTab: SettingsTab = .runtime
   @StateObject private var versions: VersionManagerModel
   @State private var extensionSource = ""
@@ -3231,6 +3251,16 @@ private struct SettingsView: View {
     case mobile = "手机连接"
     case telegram = "Telegram"
     case updates = "版本与扩展"
+
+    var icon: String {
+      switch self {
+      case .runtime: return "desktopcomputer"
+      case .mobile: return "iphone"
+      case .telegram: return "paperplane"
+      case .updates: return "shippingbox"
+      }
+    }
+
   }
   let projectURL: URL?
   let telegram: TelegramControl
@@ -3242,6 +3272,7 @@ private struct SettingsView: View {
     save: @escaping (String) -> Void
   ) {
     _path = State(initialValue: path)
+    originalPath = path
     _versions = StateObject(
       wrappedValue: VersionManagerModel(piPath: path, projectURL: projectURL))
     self.projectURL = projectURL
@@ -3251,198 +3282,184 @@ private struct SettingsView: View {
   }
 
   var body: some View {
-    VStack(spacing: 0) {
-      HStack {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("设置").font(.title2.bold())
-          Text("管理运行环境、手机连接与扩展包")
-            .font(.caption).foregroundStyle(.secondary)
-        }
-        Spacer()
-        Button("完成") {
-          save(path)
-          dismiss()
-        }
-        .buttonStyle(.borderedProminent)
-      }
-      .padding(20)
-
+    HStack(spacing: 0) {
+      sidebar
       Divider()
+      VStack(spacing: 0) {
+        ScrollView {
+          VStack(alignment: .leading, spacing: 18) {
+            if selectedTab == .runtime {
+              LidSleepSettingsView()
 
-      Picker("设置分类", selection: $selectedTab) {
-        ForEach(SettingsTab.allCases, id: \.self) { tab in
-          Text(tab.rawValue).tag(tab)
-        }
-      }
-      .pickerStyle(.segmented)
-      .labelsHidden()
-      .padding(.horizontal, 20)
-      .padding(.top, 16)
-
-      ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-          if selectedTab == .runtime {
-            GroupBox("Pi 可执行文件") {
-              VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                  if editingPath {
-                    TextField("/path/to/pi", text: $path)
+              GroupBox("Pi 路径") {
+                VStack(alignment: .leading, spacing: 8) {
+                  HStack(spacing: 8) {
+                    TextField("pi 或完整路径", text: $path)
                       .textFieldStyle(.roundedBorder)
-                  } else {
-                    Text(path)
-                      .lineLimit(1)
-                      .truncationMode(.middle)
-                      .textSelection(.enabled)
-                      .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
-                      .padding(.horizontal, 8)
-                      .background(.background, in: RoundedRectangle(cornerRadius: 6))
-                      .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                  }
-                  Button(editingPath ? "完成编辑" : "编辑路径") { editingPath.toggle() }
-                }
-                Text("修改后保存并重新打开设置，即可检查对应的 Pi。")
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-              }
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .padding(.vertical, 4)
-            }
-
-          }
-
-          if selectedTab == .mobile {
-            T3SettingsView(service: workspace.t3Bridge, workspace: workspace)
-          }
-          if selectedTab == .telegram {
-            TelegramSettingsView(control: telegram)
-          }
-
-          if selectedTab == .updates {
-            GroupBox("Pi 版本") {
-              HStack(spacing: 12) {
-                versionIcon(hasUpdate: versions.piHasUpdate)
-                VStack(alignment: .leading, spacing: 3) {
-                  Text("Pi coding agent").font(.headline)
-                  Text(versionDescription)
-                    .font(.caption)
-                    .foregroundStyle(versions.piHasUpdate ? Color.orange : Color.secondary)
-                }
-                Spacer()
-                if versions.updatingID == "pi" {
-                  ProgressView().controlSize(.small)
-                } else if versions.piHasUpdate {
-                  Button("更新到 \(versions.piLatestVersion ?? "最新版")") {
-                    versions.updatePi()
-                  }
-                  .buttonStyle(.borderedProminent)
-                  .disabled(versions.isBusy)
-                }
-              }
-              .padding(.vertical, 5)
-            }
-
-            GroupBox("安装扩展包") {
-              VStack(alignment: .leading, spacing: 8) {
-                TextField("npm:包名、git:仓库地址或本地路径", text: $extensionSource)
-                  .textFieldStyle(.roundedBorder)
-                  .disabled(versions.isBusy)
-                HStack {
-                  Picker("安装范围", selection: $installLocally) {
-                    Text("用户（所有项目）").tag(false)
-                    Text("当前项目").tag(true)
-                      .disabled(projectURL == nil)
-                  }
-                  .frame(maxWidth: 280)
-                  .disabled(versions.isBusy)
-                  Spacer()
-                  Button {
-                    versions.install(source: extensionSource, local: installLocally)
-                  } label: {
-                    if versions.updatingID == "install" {
-                      ProgressView().controlSize(.small)
-                    } else {
-                      Label("安装", systemImage: "plus")
+                    Button("选择…", action: choosePiExecutable)
+                    if pathChanged {
+                      Button("还原") { path = originalPath }
+                        .buttonStyle(.borderless)
                     }
                   }
-                  .buttonStyle(.borderedProminent)
-                  .disabled(
-                    versions.isBusy
-                      || VersionManagerModel.installArguments(
-                        source: extensionSource, local: installLocally) == nil
-                      || (installLocally && projectURL == nil))
+                  if normalizedPath.isEmpty {
+                    Label("Pi 路径不能为空", systemImage: "exclamationmark.circle")
+                      .font(.caption).foregroundStyle(.red)
+                  }
                 }
-                Text("扩展包可以执行代码，请仅安装可信来源。支持 npm、Git 与本地路径。")
-                  .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
               }
-              .padding(.vertical, 5)
+
             }
 
-            GroupBox("已安装扩展包") {
-              VStack(alignment: .leading, spacing: 0) {
-                if versions.extensions.isEmpty, versions.isChecking {
-                  HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("正在读取扩展包并检查版本…")
+            if selectedTab == .mobile {
+              T3SettingsView(service: workspace.t3Bridge, workspace: workspace)
+            }
+            if selectedTab == .telegram {
+              TelegramSettingsView(control: telegram)
+            }
+
+            if selectedTab == .updates {
+              GroupBox("Pi 版本") {
+                HStack(spacing: 12) {
+                  versionIcon(
+                    hasUpdate: versions.piHasUpdate,
+                    verified: versions.piCurrentVersion != nil && versions.piLatestVersion != nil)
+                  VStack(alignment: .leading, spacing: 3) {
+                    Text("Pi coding agent").font(.headline)
+                    Text(versionDescription)
+                      .font(.caption)
+                      .foregroundStyle(versions.piHasUpdate ? Color.orange : Color.secondary)
                   }
-                  .foregroundStyle(.secondary)
-                  .padding(.vertical, 12)
-                } else if versions.extensions.isEmpty {
-                  Text("没有通过 Pi 包管理器安装的扩展包。")
+                  Spacer()
+                  if versions.updatingID == "pi" {
+                    ProgressView().controlSize(.small)
+                  } else if versions.piHasUpdate {
+                    Button("更新到 \(versions.piLatestVersion ?? "最新版")") {
+                      versions.updatePi()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(versions.isBusy)
+                  }
+                }
+                .padding(.vertical, 5)
+              }
+
+              GroupBox("安装扩展包") {
+                VStack(alignment: .leading, spacing: 8) {
+                  TextField("npm:包名、git:仓库地址或本地路径", text: $extensionSource)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(versions.isBusy)
+                  HStack {
+                    Picker("安装范围", selection: $installLocally) {
+                      Text("全局").tag(false)
+                      Text("当前项目").tag(true)
+                        .disabled(projectURL == nil)
+                    }
+                    .frame(maxWidth: 280)
+                    .disabled(versions.isBusy)
+                    Spacer()
+                    Button {
+                      versions.install(source: extensionSource, local: installLocally)
+                    } label: {
+                      if versions.updatingID == "install" {
+                        ProgressView().controlSize(.small)
+                      } else {
+                        Label("安装", systemImage: "plus")
+                      }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                      versions.isBusy
+                        || VersionManagerModel.installArguments(
+                          source: extensionSource, local: installLocally) == nil
+                        || (installLocally && projectURL == nil))
+                  }
+                }
+                .padding(.vertical, 5)
+              }
+
+              GroupBox("已安装扩展包") {
+                VStack(alignment: .leading, spacing: 0) {
+                  if versions.extensions.isEmpty, versions.isChecking {
+                    HStack(spacing: 8) {
+                      ProgressView().controlSize(.small)
+                      Text("检查中…")
+                    }
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 12)
-                } else {
-                  ForEach(Array(versions.extensions.enumerated()), id: \.element.id) {
-                    index, item in
-                    extensionRow(item)
-                    if index < versions.extensions.count - 1 { Divider() }
+                  } else if versions.extensions.isEmpty {
+                    Text("暂无扩展")
+                      .foregroundStyle(.secondary)
+                      .padding(.vertical, 12)
+                  } else {
+                    ForEach(Array(versions.extensions.enumerated()), id: \.element.id) {
+                      index, item in
+                      extensionRow(item)
+                      if index < versions.extensions.count - 1 { Divider() }
+                    }
                   }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
               }
-              .frame(maxWidth: .infinity, alignment: .leading)
-            }
 
-            if !versions.message.isEmpty {
-              Text(versions.message)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .lineLimit(8)
+              Text("扩展变更后需重开会话。")
+                .font(.caption).foregroundStyle(.secondary)
+
+              if !versions.message.isEmpty {
+                Text(versions.message)
+                  .font(.caption.monospaced())
+                  .foregroundStyle(.secondary)
+                  .textSelection(.enabled)
+                  .lineLimit(8)
+              }
             }
           }
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(24)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(20)
-      }
-      .id(selectedTab)
+        .id(selectedTab)
+        .background(Color.primary.opacity(0.02))
 
-      if selectedTab == .updates {
         Divider()
-        HStack {
-          Text("安装、删除或更新扩展后，需要重新打开会话才能生效。")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        HStack(spacing: 10) {
+          if selectedTab == .updates {
+            Button {
+              versions.refresh()
+            } label: {
+              if versions.isChecking {
+                ProgressView().controlSize(.small)
+              } else {
+                Text("检查更新")
+              }
+            }
+            .disabled(versions.isBusy)
+            if versions.extensionUpdateCount > 0 {
+              Button("更新全部（\(versions.extensionUpdateCount)）") {
+                versions.updateAllExtensions()
+              }
+              .disabled(versions.isBusy)
+            }
+          }
+          if pathChanged {
+            Text("路径待保存")
+              .font(.caption).foregroundStyle(.secondary)
+          }
           Spacer()
-          if versions.extensionUpdateCount > 0 {
-            Button("更新全部扩展（\(versions.extensionUpdateCount)）") {
-              versions.updateAllExtensions()
-            }
-            .disabled(versions.updatingID != nil || versions.isChecking)
+          Button(pathChanged ? "保存并关闭" : "关闭") {
+            save(normalizedPath)
+            dismiss()
           }
-          Button {
-            versions.refresh()
-          } label: {
-            if versions.isChecking {
-              ProgressView().controlSize(.small)
-            } else {
-              Label("检查更新", systemImage: "arrow.clockwise")
-            }
-          }
-          .disabled(versions.isChecking || versions.updatingID != nil)
+          .buttonStyle(.borderedProminent)
+          .keyboardShortcut(.defaultAction)
+          .disabled(normalizedPath.isEmpty)
         }
-        .padding(16)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
       }
     }
-    .frame(width: 650, height: 620)
+    .frame(width: 760, height: 580)
     .onAppear { versions.refresh() }
     .alert(
       "删除扩展包？",
@@ -3463,22 +3480,73 @@ private struct SettingsView: View {
     }
   }
 
+  private var sidebar: some View {
+    VStack(alignment: .leading, spacing: 20) {
+      Text("设置").font(.title2.bold())
+        .padding(.horizontal, 12).padding(.top, 8)
+      VStack(spacing: 5) {
+        ForEach(SettingsTab.allCases, id: \.self) { tab in
+          Button {
+            selectedTab = tab
+          } label: {
+            HStack(spacing: 10) {
+              Image(systemName: tab.icon).frame(width: 20)
+              Text(tab.rawValue).font(.callout.weight(selectedTab == tab ? .semibold : .regular))
+              Spacer(minLength: 0)
+            }
+            .foregroundStyle(selectedTab == tab ? Color.accentColor : Color.primary)
+            .padding(.horizontal, 12).padding(.vertical, 11)
+            .background(selectedTab == tab ? Color.accentColor.opacity(0.10) : Color.clear,
+              in: RoundedRectangle(cornerRadius: 9))
+            .contentShape(RoundedRectangle(cornerRadius: 9))
+          }
+          .buttonStyle(.plain)
+          .accessibilityAddTraits(selectedTab == tab ? [.isSelected] : [])
+        }
+      }
+      Spacer()
+    }
+    .padding(12)
+    .frame(width: 156)
+    .frame(maxHeight: .infinity)
+    .background(.regularMaterial)
+  }
+
+  private var normalizedPath: String {
+    path.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  private var pathChanged: Bool { normalizedPath != originalPath }
+
+  private func choosePiExecutable() {
+    let panel = NSOpenPanel()
+    panel.title = "选择 Pi 可执行文件"
+    panel.message = "请选择已安装的 Pi 命令或可执行文件。"
+    panel.canChooseDirectories = false
+    panel.allowsMultipleSelection = false
+    panel.showsHiddenFiles = true
+    if panel.runModal() == .OK, let url = panel.url {
+      path = url.path
+    }
+  }
+
   private var versionDescription: String {
-    guard let current = versions.piCurrentVersion else { return "尚未读取版本" }
+    guard let current = versions.piCurrentVersion else { return versions.isChecking ? "正在检查版本…" : "尚未读取版本" }
     if versions.piHasUpdate { return "当前 \(current) · 最新 \(versions.piLatestVersion ?? "未知")" }
     if let latest = versions.piLatestVersion { return "当前 \(current) · 已是最新版本（\(latest)）" }
     return "当前 \(current) · 最新版本未知"
   }
 
-  private func versionIcon(hasUpdate: Bool) -> some View {
-    Image(systemName: hasUpdate ? "arrow.up.circle.fill" : "checkmark.circle.fill")
+  private func versionIcon(hasUpdate: Bool, verified: Bool) -> some View {
+    Image(systemName: hasUpdate ? "arrow.up.circle.fill" : (verified ? "checkmark.circle.fill" : "shippingbox"))
       .font(.title2)
-      .foregroundStyle(hasUpdate ? Color.orange : Color.green)
+      .foregroundStyle(hasUpdate ? Color.orange : (verified ? Color.green : Color.secondary))
   }
 
   private func extensionRow(_ item: ManagedExtension) -> some View {
     HStack(spacing: 11) {
-      versionIcon(hasUpdate: item.hasUpdate)
+      versionIcon(hasUpdate: item.hasUpdate,
+        verified: item.error == nil && item.currentVersion != nil && item.latestVersion != nil)
       VStack(alignment: .leading, spacing: 3) {
         HStack(spacing: 6) {
           Text(item.source).font(.callout.weight(.medium)).lineLimit(1)

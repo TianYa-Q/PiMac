@@ -337,6 +337,33 @@ private enum MarkdownDocumentCache {
   }
 }
 
+private final class MarkdownInlineBox {
+  let value: AttributedString
+  init(_ value: AttributedString) { self.value = value }
+}
+
+/// Shared by prose and table cells; bounded so streamed prefixes cannot grow memory forever.
+enum MarkdownInlineCache {
+  private static let cache: NSCache<NSString, MarkdownInlineBox> = {
+    let cache = NSCache<NSString, MarkdownInlineBox>()
+    cache.countLimit = 1_024
+    cache.totalCostLimit = 4 * 1_024 * 1_024
+    return cache
+  }()
+
+  static func attributedString(for source: String) -> AttributedString {
+    let key = source as NSString
+    if let cached = cache.object(forKey: key) { return cached.value }
+    let options = AttributedString.MarkdownParsingOptions(
+      interpretedSyntax: .inlineOnlyPreservingWhitespace)
+    let value = (try? AttributedString(markdown: source, options: options))
+      ?? AttributedString(source)
+    // Account for the source key and attributed storage, not just UTF-8 input.
+    cache.setObject(MarkdownInlineBox(value), forKey: key, cost: max(1, source.utf8.count * 4))
+    return value
+  }
+}
+
 struct MarkdownView: View, Equatable {
   let source: String
   let document: MarkdownDocument
@@ -434,11 +461,7 @@ struct MarkdownView: View, Equatable {
   }
 
   private func inlineText(_ source: String) -> Text {
-    let options = AttributedString.MarkdownParsingOptions(
-      interpretedSyntax: .inlineOnlyPreservingWhitespace)
-    let attributed =
-      (try? AttributedString(markdown: source, options: options)) ?? AttributedString(source)
-    return Text(attributed)
+    Text(MarkdownInlineCache.attributedString(for: source))
   }
 
   private func headingFont(_ level: Int) -> Font {
@@ -478,8 +501,9 @@ private struct MarkdownTableView: View {
     VStack(spacing: 0) {
       row(headers, isHeader: true)
       Divider()
-      ForEach(Array(rows.enumerated()), id: \.offset) { index, cells in
-        row(cells, isHeader: false)
+      ForEach(rows.indices, id: \.self) { index in
+        row(rows[index], isHeader: false)
+          .background(index.isMultiple(of: 2) ? Color.clear : Color.primary.opacity(0.025))
         if index < rows.count - 1 { Divider() }
       }
     }
@@ -510,11 +534,7 @@ private struct MarkdownTableView: View {
   }
 
   private func inlineText(_ source: String) -> Text {
-    let options = AttributedString.MarkdownParsingOptions(
-      interpretedSyntax: .inlineOnlyPreservingWhitespace)
-    let attributed =
-      (try? AttributedString(markdown: source, options: options)) ?? AttributedString(source)
-    return Text(attributed)
+    Text(MarkdownInlineCache.attributedString(for: source))
   }
 
   private func alignment(at index: Int) -> Alignment {

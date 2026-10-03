@@ -24,7 +24,14 @@ build_number = 0
 
 
 def status(message):
-    print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}"
+    print(line, flush=True)
+    try:
+        app_log.parent.mkdir(parents=True, exist_ok=True)
+        with (app_log.parent / 'dev-watch.log').open('a') as log:
+            log.write(line + '\n')
+    except OSError:
+        pass  # Diagnostics must not break shutdown.
 
 
 def changed_files(previous, current):
@@ -54,6 +61,72 @@ def snapshot():
         except FileNotFoundError:
             pass  # An editor can replace a file during a scan.
     return tuple(sorted(result))
+
+
+def read_state(path):
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+class AppSupervisor:
+    """The only launcher: reap the old child before starting a replacement."""
+    def __init__(self, binary, env, state, restart, app_groups):
+        self.binary, self.env = binary, env
+        self.state, self.restart, self.app_groups = state, restart, app_groups
+        self.app = None
+        self.exit_deadline = None
+        self.startup_deadline = None
+
+    def launch(self):
+        self.state.unlink(missing_ok=True)
+        self.restart.unlink(missing_ok=True)
+        app_log.parent.mkdir(parents=True, exist_ok=True)
+        with app_log.open("a") as log:
+            log.write(f"\n--- App launch {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+            log.flush()
+            self.app = subprocess.Popen(
+                [str(self.binary)], env=self.env, start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=None if verbose else log,
+                stderr=None if verbose else subprocess.STDOUT)
+        self.app_groups.add(self.app.pid)
+        self.startup_deadline = time.monotonic() + 30
+        self.exit_deadline = None
+        status(f"Pi Mac started · PID {self.app.pid}")
+
+    def tick(self):
+        code = self.app.poll()  # Reap zombies; kill -0 cannot do this.
+        intent = read_state(self.restart)
+        timestamp = intent.get("timestamp")
+        valid = (intent.get("pid") == self.app.pid
+                 and isinstance(timestamp, (int, float))
+                 and 0 <= time.time() - timestamp <= 15)
+        if code is not None:
+            if not valid or code != 0:
+                raise RuntimeError(f"Pi Mac exited ({code}) without a valid restart handoff; see {app_log}")
+            status(f"Old app reaped · PID {self.app.pid} · starting replacement")
+            self.launch()
+            return
+        if valid:
+            if self.exit_deadline is None:
+                self.exit_deadline = time.monotonic() + 12
+                status(f"Restart handoff received · waiting for PID {self.app.pid} to exit")
+            if time.monotonic() >= self.exit_deadline:
+                raise RuntimeError("Restart timed out: old app did not exit; no second app was launched")
+            return
+        if self.exit_deadline is not None:
+            raise RuntimeError("Restart handoff cancelled or expired; no second app was launched")
+        if self.startup_deadline is not None:
+            heartbeat = read_state(self.state)
+            stamp = heartbeat.get("timestamp")
+            if (heartbeat.get("pid") == self.app.pid
+                    and isinstance(stamp, (int, float)) and 0 <= time.time() - stamp <= 3):
+                self.startup_deadline = None
+                status(f"App heartbeat confirmed · PID {self.app.pid}")
+            elif time.monotonic() >= self.startup_deadline:
+                raise RuntimeError(f"New app heartbeat timed out; see {app_log}")
 
 
 def app_is_idle(state):
@@ -356,25 +429,19 @@ def watch(app_groups):
     request.unlink(missing_ok=True)
     env["PIMAC_DEV_STATE_PATH"] = str(state)
     env["PIMAC_DEV_REQUEST_PATH"] = str(request)
-    # Isolate the app tree so shutdown can also collect orphaned services.
-    app_log.parent.mkdir(parents=True, exist_ok=True)
-    with app_log.open("w") as log:
-        app = subprocess.Popen(
-            [str(binary)], env=env, start_new_session=True, stdin=subprocess.DEVNULL,
-            stdout=None if verbose else log, stderr=None if verbose else subprocess.STDOUT)
-    # SIGINT can also arrive during startup/build/snapshot (handled by main).
-    app_groups.add(app.pid)
-    app.poll()
-    status(f"Pi Mac started · PID {app.pid}")
+    restart = root / ".build" / "pimac-dev-restart.json"
+    env["PIMAC_DEV_RESTART_PATH"] = str(restart)
+    supervisor = AppSupervisor(binary, env, state, restart, app_groups)
+    supervisor.launch()
     status("Watching Swift, Server, extensions and resources · Ctrl-C to stop")
     if verbose:
         status(f"Build log: {build_log.relative_to(root)} · App logs: terminal")
     else:
-        status(f"Logs: {build_log.relative_to(root)} (latest build), {app_log.relative_to(root)} (app)")
+        status(f"Logs: {build_log.relative_to(root)} (latest build), {app_log.relative_to(root)} (app), .build/dev-watch.log (lifecycle)")
     pending = PendingBuild(snapshot(), request, revision)
     while True:
         time.sleep(1)
-        app.poll()  # Reap the initial app if it has relaunched itself.
+        supervisor.tick()
         pending.tick(state)
 
 
@@ -391,3 +458,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         status("Stopped · Pi Mac and its services have been stopped")
         sys.exit(130)
+    except RuntimeError as error:
+        status(f"Stopped · {error}")
+        sys.exit(1)

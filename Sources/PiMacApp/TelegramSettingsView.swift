@@ -24,11 +24,11 @@ struct TelegramSettingsView: View {
   }
 
   private var stateTitle: String {
-    guard control.enabled else { return "远程控制已关闭" }
+    guard control.enabled else { return "已关闭" }
     switch control.connectionState {
-    case .connected: return "已连接 · 可以开始对话"
-    case .connecting: return "正在连接 Telegram"
-    case .failed: return "连接暂时不可用"
+    case .connected: return "已连接"
+    case .connecting: return "连接中…"
+    case .failed: return "连接失败"
     case .disconnected: return "等待连接"
     }
   }
@@ -36,20 +36,6 @@ struct TelegramSettingsView: View {
   var body: some View {
     GroupBox {
       VStack(alignment: .leading, spacing: 20) {
-        HStack(alignment: .top, spacing: 12) {
-          Image(systemName: "paperplane.fill")
-            .font(.title2)
-            .foregroundStyle(.tint)
-            .frame(width: 44, height: 44)
-            .background(.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
-          VStack(alignment: .leading, spacing: 5) {
-            Text("把工作带到 Telegram").font(.headline)
-            Text("发送消息、照片或文件，让 Mac 上的 Pi 接着处理。")
-              .font(.caption).foregroundStyle(.secondary)
-          }
-          Spacer(minLength: 0)
-        }
-
         VStack(alignment: .leading, spacing: 10) {
           HStack(spacing: 8) {
             if control.enabled && control.connectionState == .connecting {
@@ -68,15 +54,10 @@ struct TelegramSettingsView: View {
           Text(control.status)
             .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
           Divider()
-          Toggle("启用远程控制", isOn: $enabled)
+          Toggle("启用", isOn: $enabled)
             .toggleStyle(.switch).controlSize(.small)
-          if hasChanges {
-            Text("修改尚未生效，保存后才会改变连接。")
-              .font(.caption).foregroundStyle(.secondary)
-          }
         }
-        .padding(14)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
+
 
         VStack(alignment: .leading, spacing: 12) {
           HStack {
@@ -101,18 +82,14 @@ struct TelegramSettingsView: View {
                 .onSubmit { focusedField = .userID }
             }
             VStack(alignment: .leading, spacing: 6) {
-              Text("允许的用户 ID").font(.caption.weight(.medium))
-              TextField("你的 Telegram 数字 ID", text: $userID)
+              Text("用户 ID").font(.caption.weight(.medium))
+              TextField("Telegram 数字 ID", text: $userID)
                 .focused($focusedField, equals: .userID)
-              Text("仅此用户的私聊可以操作 Mac；不是 @用户名或 Bot ID。")
-                .font(.caption).foregroundStyle(.secondary)
             }
             if enabled && !credentialsValid {
               Label("请填写有效的 Token 和正整数用户 ID", systemImage: "exclamationmark.circle")
                 .font(.caption).foregroundStyle(.orange)
             }
-            Text("Token 明文保存在本机设置中。关闭开关、清空 Token 并保存可删除它。")
-              .font(.caption).foregroundStyle(.secondary)
           } else {
             HStack(alignment: .top) {
               Label(token.isEmpty ? "Token 未设置" : "Token 已设置", systemImage: "lock.shield")
@@ -125,11 +102,11 @@ struct TelegramSettingsView: View {
         }
 
         HStack(spacing: 10) {
-          Button("保存并应用", action: requestSave)
+          Button("应用", action: requestSave)
             .buttonStyle(.borderedProminent)
             .disabled(!hasChanges || (enabled && !credentialsValid))
           if hasChanges {
-            Button("撤销修改", action: load).buttonStyle(.borderless)
+            Button("还原", action: load).buttonStyle(.borderless)
           } else if control.enabled {
             Button("重新连接") { control.reconnect() }.buttonStyle(.borderless)
           }
@@ -142,26 +119,22 @@ struct TelegramSettingsView: View {
         }
 
         Divider()
-        VStack(alignment: .leading, spacing: 8) {
-          Label("连接后，在 Bot 私聊中发送 /help", systemImage: "bubble.left.and.text.bubble.right")
-            .font(.callout.weight(.medium))
-          Text("选择项目 → 发送任务 → 收到结果。Mac 需保持唤醒、联网并运行 Pi Mac；扩展确认仍需在 Mac 上处理。")
-            .font(.caption).foregroundStyle(.secondary)
-          DisclosureGroup("安全与消息处理") {
-            Text(
-              "远程任务拥有本机 Pi 的文件及命令执行权限，聊天内容会经过 Telegram（非端到端加密），请使用专属 Bot。首次连接前的旧消息不会执行，已连接过的 Bot 会在重启后继续处理待收消息。更换凭据会清除等待任务、未送达消息及会话关联；旧版钥匙串 Token 不会自动迁移或删除。"
-            )
-            .font(.caption).foregroundStyle(.secondary)
-            .padding(.top, 6)
+        DisclosureGroup("说明") {
+          VStack(alignment: .leading, spacing: 8) {
+            Text("Bot 私聊发送 /help。Mac 需保持唤醒、联网；扩展确认在 Mac 处理。")
+            Text("仅允许该用户 ID 的私聊。远程任务可读写文件、执行命令；消息非端到端加密。")
+            Text("Token 明文存于本机。关闭开关、清空 Token 并应用可删除；旧钥匙串记录需手动删除。")
+            Text("首次连接不执行旧消息，重启后继续待收消息。更换凭据会清空队列、未送达消息及会话关联。")
           }
-          .font(.caption)
+          .foregroundStyle(.secondary).padding(.top, 6)
         }
+        .font(.caption)
       }
       .textFieldStyle(.roundedBorder)
       .frame(maxWidth: .infinity, alignment: .leading)
       .padding(12)
     } label: {
-      Label("Telegram 远程控制", systemImage: "paperplane")
+      Text("Telegram")
     }
     .onAppear(perform: load)
     .onChange(of: enabled) { _, _ in if hasChanges { clearFeedback() } }
@@ -206,7 +179,7 @@ struct TelegramSettingsView: View {
       try control.configure(token: token, userID: userID, enabled: enabled)
       token = control.botToken
       userID = control.userID
-      message = enabled ? "已应用，连接状态见上方" : "已保存 · 远程控制关闭"
+      message = "已应用"
       saveFailed = false
       editingCredentials = false
       focusedField = nil

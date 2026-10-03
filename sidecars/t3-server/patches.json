@@ -1,4 +1,14 @@
 {
+  "apps/server/src/orchestration-v2/Orchestrator.ts": [
+    {
+      "oldText": "((command.titleSeed !== undefined &&\n          (yield* projectionStore",
+      "newText": "(((command.titleSeed !== undefined ||\n          (command.createdBy === \"user\" &&\n            [\"\", \"新任务\", \"New thread\"].includes(projection.thread.title.trim()))) &&\n          (yield* projectionStore"
+    },
+    {
+      "oldText": "title: command.titleSeed ?? projection.thread.title,",
+      "newText": "title: command.titleSeed ??\n            ([\"\", \"新任务\", \"New thread\"].includes(projection.thread.title.trim())\n              ? command.text.trim().replace(/\\s+/g, \" \").slice(0, 60) || projection.thread.title\n              : projection.thread.title),"
+    }
+  ],
   "apps/server/src/cloud/ManagedEndpointRuntime.ts": [
     {
       "oldText": "import * as Clock from \"effect/Clock\";",

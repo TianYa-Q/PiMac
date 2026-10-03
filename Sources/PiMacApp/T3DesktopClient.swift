@@ -272,12 +272,28 @@ final class T3DesktopClient: ObservableObject {
 
   func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws
   {
-    guard ["compact", "manage-accounts"].contains(operation) else { throw ClientError.rejected }
+    let text = try Self.sessionControlText(operation: operation, accountName: accountName)
     try await dispatch([
       "type": "message.dispatch", "threadId": threadID,
-      "messageId": UUID().uuidString, "text": operation == "compact" ? "/compact" : "/accounts", "attachments": [],
+      "messageId": UUID().uuidString, "text": text, "attachments": [],
       "dispatchMode": ["type": "start_immediately"],
     ])
+  }
+
+  static func isSwitchableAccountName(_ name: String) -> Bool {
+    name.range(of: "^[A-Za-z0-9._-]{1,64}$", options: .regularExpression) != nil
+      && !name.contains("\n") && !name.contains("\r")
+  }
+
+  static func sessionControlText(operation: String, accountName: String? = nil) throws -> String {
+    switch operation {
+    case "compact": return "/compact"
+    case "manage-accounts": return "/accounts"
+    case "switch-account":
+      guard let accountName, isSwitchableAccountName(accountName) else { throw ClientError.rejected }
+      return "/accounts switch \(accountName)"
+    default: throw ClientError.rejected
+    }
   }
 
   func extensionResponse(
