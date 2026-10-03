@@ -24,6 +24,22 @@ type AntigravityUsage = {
   }>;
 };
 
+/** Use the same boundary parser for disk snapshots and live provider responses. */
+export function validAntigravityUsageState(
+  value: unknown,
+): value is AntigravityUsageState {
+  try {
+    const state = requireRecord(value, "Antigravity 缓存");
+    if (state.kind === "unconfigured") return true;
+    if (state.kind === "failed") return typeof state.error === "string";
+    if (state.kind !== "loaded") return false;
+    parseUsage(state.usage);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function queryAntigravityUsage(
   ctx: ExtensionContext,
   signal: AbortSignal,

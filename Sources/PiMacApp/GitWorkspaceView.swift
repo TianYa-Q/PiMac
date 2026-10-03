@@ -16,6 +16,7 @@ struct GitWorkspaceView: View {
   @State private var commitMessage = ""
   @State private var newBranch = ""
   @State private var fileQuery = ""
+  @State private var fileScope = GitWorkspacePresentation.FileScope.all
   @State private var pending: Operation?
   @State private var previewFile: GitWorkspaceStatus.File?
 
@@ -41,7 +42,14 @@ struct GitWorkspaceView: View {
         }.disabled(store.busy || store.loading || !server.isConnected)
         Button("完成") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.busy)
       }
-      Text(cwd).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+      HStack {
+        Text(cwd).font(.caption.monospaced()).textSelection(.enabled)
+        Spacer()
+        if let refreshedAt = store.refreshedAt {
+          Text("刷新于 \(refreshedAt.formatted(date: .omitted, time: .standard))")
+            .font(.caption).help("最近一次成功读取状态的时间；失败时保留旧快照。")
+        }
+      }.foregroundStyle(.secondary)
       if !server.isConnected {
         Label("Server 未连接，Git 操作不可用", systemImage: "wifi.slash").foregroundStyle(.orange)
       }
@@ -100,6 +108,11 @@ struct GitWorkspaceView: View {
         HStack {
           Text("工作区变更 · \(status.files.count)").font(.headline)
           Spacer()
+          Picker("文件范围", selection: $fileScope) {
+            ForEach(GitWorkspacePresentation.FileScope.allCases) { scope in
+              Text(scope.rawValue).tag(scope)
+            }
+          }.pickerStyle(.segmented).frame(width: 180)
           Button(allVisibleSelected ? "取消选择可见文件" : "选择可见文件") {
             store.selectedFiles = GitWorkspacePresentation.toggledSelection(
               store.selectedFiles, visible: visibleFiles)
@@ -164,7 +177,13 @@ struct GitWorkspaceView: View {
           .lineLimit(2...4).textFieldStyle(.roundedBorder).disabled(locked)
         HStack {
           VStack(alignment: .leading) {
-            Text("已选择 \(store.selectedFiles.count) 个文件")
+            Text(
+              "已选择 \(store.selectedFiles.count) 个文件 · +\(selectedChanges.insertions) −\(selectedChanges.deletions)"
+            )
+            .monospacedDigit()
+            if !store.selectedFiles.isEmpty {
+              Button("清空选择") { store.selectedFiles = [] }.disabled(locked)
+            }
             if hiddenSelectedCount > 0 {
               Text("含 \(hiddenSelectedCount) 个筛选外文件，提交时也会包含。")
                 .foregroundStyle(.orange)
@@ -209,13 +228,19 @@ struct GitWorkspaceView: View {
   }
 
   private var visibleFiles: [GitWorkspaceStatus.File] {
-    GitWorkspacePresentation.filteredFiles(store.status?.files ?? [], query: fileQuery)
+    GitWorkspacePresentation.filteredFiles(
+      store.status?.files ?? [], query: fileQuery, scope: fileScope, selected: store.selectedFiles)
   }
   private var allVisibleSelected: Bool {
     !visibleFiles.isEmpty && Set(visibleFiles.map(\.path)).isSubset(of: store.selectedFiles)
   }
   private var hiddenSelectedCount: Int {
     store.selectedFiles.subtracting(Set(visibleFiles.map(\.path))).count
+  }
+
+  private var selectedChanges: (insertions: Int, deletions: Int) {
+    GitWorkspacePresentation.selectedChanges(
+      store.status?.files ?? [], selected: store.selectedFiles)
   }
 
   private var canCommit: Bool {

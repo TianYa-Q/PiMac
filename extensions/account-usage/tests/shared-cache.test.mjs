@@ -151,6 +151,49 @@ try {
     });
   });
 
+  await test("invalid cached payloads requery and invalid query results never publish", async () => {
+    const request = options({
+      namespace: "validated",
+      validate: (value) =>
+        typeof value === "object" &&
+        value !== null &&
+        typeof value.remaining === "number",
+    });
+    await readThroughSharedCache({
+      ...request,
+      validate: undefined,
+      query: async () => "corrupt",
+    });
+    assert.deepEqual(await readThroughSharedCache(request), { remaining: 80 });
+    const before = await readFile(path, "utf8");
+    await assert.rejects(
+      readThroughSharedCache({
+        ...request,
+        force: true,
+        query: async () => null,
+      }),
+      /结构无效/u,
+    );
+    assert.equal(await readFile(path, "utf8"), before);
+    await assert.rejects(stat(`${path}.lock`), { code: "ENOENT" });
+  });
+
+  await test("oversized disk caches recover; oversized writes preserve previous data", async () => {
+    await writeFile(path, " ".repeat(1024 * 1024 + 1));
+    assert.deepEqual(await readThroughSharedCache(options()), {
+      remaining: 80,
+    });
+    const before = await readFile(path, "utf8");
+    await assert.rejects(
+      readThroughSharedCache(
+        options({ force: true, query: async () => "x".repeat(1024 * 1024) }),
+      ),
+      /缓存过大/u,
+    );
+    assert.equal(await readFile(path, "utf8"), before);
+    await assert.rejects(stat(`${path}.lock`), { code: "ENOENT" });
+  });
+
   await test("prototype-like namespaces remain ordinary persistent entries", async () => {
     await readThroughSharedCache(
       options({ namespace: "__proto__", force: true }),

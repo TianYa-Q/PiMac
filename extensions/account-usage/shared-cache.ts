@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  fstatSync,
   mkdirSync,
-  readFileSync,
+  openSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -13,6 +16,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
 
 const CACHE_PATH = join(getAgentDir(), "account-usage-shared-cache.json");
+const MAX_CACHE_BYTES = 1024 * 1024;
 
 type CacheEntry = {
   key: string;
@@ -36,6 +40,7 @@ export async function readThroughSharedCache<T>(options: {
   force: boolean;
   signal: AbortSignal;
   query: () => Promise<T>;
+  validate?: (value: unknown) => boolean;
 }): Promise<T> {
   options.signal.throwIfAborted();
   mkdirSync(getAgentDir(), { recursive: true, mode: 0o700 });
@@ -60,7 +65,8 @@ export async function readThroughSharedCache<T>(options: {
       !options.force &&
       cached?.key === options.key &&
       cached.updatedAt <= Date.now() &&
-      Date.now() - cached.updatedAt < options.maxAgeMs
+      Date.now() - cached.updatedAt < options.maxAgeMs &&
+      (!options.validate || options.validate(cached.value))
     ) {
       throwIfCompromised();
       return structuredClone(cached.value) as T;
@@ -69,6 +75,8 @@ export async function readThroughSharedCache<T>(options: {
     const value = await options.query();
     options.signal.throwIfAborted();
     throwIfCompromised();
+    if (options.validate && !options.validate(value))
+      throw new Error("额度查询返回结构无效，未更新共享缓存。");
     document.entries[options.namespace] = {
       key: options.key,
       updatedAt: Date.now(),
@@ -126,7 +134,7 @@ async function releaseCacheLock(
 
 function readCache(): CacheDocument {
   try {
-    const value = JSON.parse(readFileSync(CACHE_PATH, "utf8")) as unknown;
+    const value = JSON.parse(readBoundedCache()) as unknown;
     if (!isRecord(value) || value.version !== 1 || !isRecord(value.entries)) {
       return { version: 1, entries: Object.create(null) };
     }
@@ -153,10 +161,33 @@ function readCache(): CacheDocument {
   }
 }
 
+// Bound allocation and reads even if an external writer grows the file after fstat.
+function readBoundedCache(): string {
+  const fd = openSync(CACHE_PATH, "r");
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_CACHE_BYTES)
+      throw new Error("额度共享缓存过大或不是普通文件。");
+    const buffer = Buffer.alloc(MAX_CACHE_BYTES + 1);
+    let size = 0;
+    for (;;) {
+      const count = readSync(fd, buffer, size, buffer.length - size, null);
+      size += count;
+      if (size > MAX_CACHE_BYTES) throw new Error("额度共享缓存过大。");
+      if (count === 0) return buffer.subarray(0, size).toString("utf8");
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function writeCache(document: CacheDocument): void {
   const temporaryPath = `${CACHE_PATH}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    writeFileSync(temporaryPath, `${JSON.stringify(document)}\n`, {
+    const serialized = `${JSON.stringify(document)}\n`;
+    if (Buffer.byteLength(serialized) > MAX_CACHE_BYTES)
+      throw new Error("额度共享缓存过大，未写入。");
+    writeFileSync(temporaryPath, serialized, {
       encoding: "utf8",
       mode: 0o600,
       flag: "wx",

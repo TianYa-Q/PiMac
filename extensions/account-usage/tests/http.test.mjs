@@ -81,6 +81,13 @@ await test("invalid JSON, primitives, arrays and empty bodies are rejected", asy
   await assert.rejects(readBoundedJson(new Response(null), 64), /JSON/u);
 });
 
+await test("malformed UTF-8 cannot silently replace quota text", async () => {
+  const bytes = new Uint8Array([123, 34, 120, 34, 58, 34, 0xff, 34, 125]);
+  const response = new Response(bytes);
+  await assert.rejects(readBoundedJson(response, 64), /无效 JSON/u);
+  assert.equal(response.body.locked, false);
+});
+
 await test("abort cancels a stalled reader and releases its lock", async () => {
   let cancelled = false;
   const response = new Response(

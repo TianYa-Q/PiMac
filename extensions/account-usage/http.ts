@@ -31,7 +31,9 @@ export async function readBoundedJson(
     let value: unknown;
     try {
       value = JSON.parse(
-        Buffer.concat(chunks, size).toString("utf8"),
+        new TextDecoder("utf-8", { fatal: true }).decode(
+          Buffer.concat(chunks, size),
+        ),
       ) as unknown;
     } catch {
       throw new Error("额度接口返回了无效 JSON。");

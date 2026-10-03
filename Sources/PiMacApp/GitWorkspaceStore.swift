@@ -1,4 +1,5 @@
 import Combine
+import CoreFoundation
 import Foundation
 
 struct GitWorkspaceStatus: Equatable {
@@ -14,6 +15,43 @@ struct GitWorkspaceStatus: Equatable {
   let ahead: Int
   let behind: Int
   let files: [File]
+
+  enum InvalidSnapshot: Error { case malformed }
+
+  /// Validate consumed fields before replacing authoritative state or unlocking mutations.
+  static func validated(_ json: [String: Any]) throws -> GitWorkspaceStatus {
+    guard let isRepo = boolean(json["isRepo"]) else { throw InvalidSnapshot.malformed }
+    if !isRepo { return GitWorkspaceStatus(json) }
+    guard json["refName"] is NSNull || (json["refName"] as? String)?.isEmpty == false,
+      boolean(json["hasUpstream"]) != nil,
+      nonnegativeInteger(json["aheadCount"]), nonnegativeInteger(json["behindCount"]),
+      let tree = json["workingTree"] as? [String: Any],
+      let files = tree["files"] as? [[String: Any]]
+    else { throw InvalidSnapshot.malformed }
+    var paths = Set<String>()
+    for file in files {
+      guard let path = file["path"] as? String, !path.isEmpty, !path.contains("\0"),
+        paths.insert(path).inserted,
+        nonnegativeInteger(file["insertions"]), nonnegativeInteger(file["deletions"])
+      else { throw InvalidSnapshot.malformed }
+    }
+    return GitWorkspaceStatus(json)
+  }
+
+  private static func boolean(_ value: Any?) -> Bool? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+      return nil
+    }
+    return number.boolValue
+  }
+
+  private static func nonnegativeInteger(_ value: Any?) -> Bool {
+    guard let number = value as? NSNumber,
+      CFGetTypeID(number) != CFBooleanGetTypeID(),
+      let integer = value as? Int, integer >= 0
+    else { return false }
+    return number.doubleValue == Double(integer)
+  }
 
   init(_ json: [String: Any]) {
     isRepo = json["isRepo"] as? Bool ?? false
@@ -45,6 +83,7 @@ final class GitWorkspaceStore: ObservableObject {
   @Published private(set) var message = ""
   @Published private(set) var progress = ""
   @Published private(set) var pullRequestURL: URL?
+  @Published private(set) var refreshedAt: Date?
   @Published var selectedFiles: Set<String> = []
   private var cwd = ""
   private var refreshID = UUID()
@@ -68,6 +107,7 @@ final class GitWorkspaceStore: ObservableObject {
       branches = []
       selectedFiles = []
       pullRequestURL = nil
+      refreshedAt = nil
       message = ""
       requiresRefresh = true
     }
@@ -75,7 +115,7 @@ final class GitWorkspaceStore: ObservableObject {
       let snapshot = try await rpc("vcs.refreshStatus", ["cwd": cwd])
       try Task.checkCancellation()
       guard refreshID == current else { return }
-      let nextStatus = GitWorkspaceStatus(snapshot)
+      let nextStatus = try GitWorkspaceStatus.validated(snapshot)
       // Non-repositories have no refs; asking for them can turn a valid empty state into an error.
       let refs =
         nextStatus.isRepo
@@ -83,13 +123,25 @@ final class GitWorkspaceStore: ObservableObject {
         : [:]
       try Task.checkCancellation()
       guard refreshID == current else { return }
+      let names: [String]
+      if nextStatus.isRepo {
+        guard let rawRefs = refs["refs"] as? [[String: Any]],
+          rawRefs.allSatisfy({ ($0["name"] as? String)?.isEmpty == false })
+        else { throw GitWorkspaceStatus.InvalidSnapshot.malformed }
+        names = rawRefs.compactMap { $0["name"] as? String }
+      } else {
+        names = []
+      }
       status = nextStatus
-      branches = Array(
-        Set((refs["refs"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String })
-      ).sorted()
+      branches = Array(Set(names)).sorted()
+      refreshedAt = Date()
       selectedFiles.formIntersection(Set(status?.files.map(\.path) ?? []))
       requiresRefresh = false
       message = (refs["nextCursor"] as? Int) != nil ? "仅显示前 200 个本地分支。" : ""
+    } catch is GitWorkspaceStatus.InvalidSnapshot {
+      guard refreshID == current else { return }
+      requiresRefresh = true
+      message = "Server 返回了无效 Git 状态，已保留最近快照。请刷新后再执行操作。"
     } catch is CancellationError {
       guard refreshID == current else { return }
       requiresRefresh = true

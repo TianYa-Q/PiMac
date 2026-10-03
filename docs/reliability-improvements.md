@@ -17,6 +17,24 @@
 - JSONL 解码器保持增量线性扫描，默认最多保留 16 MiB 的单条记录。超限记录一直丢弃到下一 LF，再恢复解析，不把残片当作新记录；可通过 `droppedRecordCount` 查看丢弃数。该限制作用于宿主 Server stdout reader，不改变 Pi 会话文件或 Server 的 RPC 数据。
 - Server stdout EOF 会提交最后一条无换行尾记录。旧 Fast 扩展仅用于兼容测试，明确从 Swift target 排除，消除未声明资源警告。
 
+## Git 状态边界与提交范围（本轮）
+
+- Git 刷新在替换快照前严格校验仓库标记、分支、非负整数计数、文件路径及 refs。缺字段、重复文件身份、布尔值冒充计数等响应不会解锁写操作；保留最近有效快照并要求重新刷新。
+- 最近成功刷新时间独立于 loading/error，刷新失败不更新；切换工作区清空旧时间。
+- 文件范围支持“全部文件 / 仅看已选”，与多关键词搜索组合。筛选不修改选择；增加清空选择及所选文件增删行统计。统计使用饱和加法，避免极端计数导致宿主崩溃。
+- 筛选与统计均集中在纯展示层，Git 操作仍由官方 Server 执行，不新增自动重试。
+
+## 共享额度缓存边界（本轮）
+
+- Codex / OpenAI 缓存值必须逐项符合账户额度结构，且精确匹配此次请求的账户集合；错误账户、重复账户、非法百分比或 reset-credit 结构均作为 cache miss，重新查询。
+- Gemini 磁盘快照复用实时接口解析器，不再仅凭缓存版本信任内部结构。
+- 查询结果同样经过校验；无效结果不覆盖旧缓存，锁仍正常释放。
+- 账户集合 key 使用 JSON 编码，避免分隔符造成的集合歧义；旧 key 自然失效，不迁移真实账户。
+- 磁盘缓存读写最多 1 MiB，读取限额不依赖单次 stat，超大缓存按 miss 恢复；超大写入保留旧文件。
+- HTTP JSON 使用严格 UTF-8 解码，非法字节不再静默替换成字符；现有分片 UTF-8、限额及取消语义不变。
+
+本轮验证：`./scripts/check.sh` 全部通过，Swift 209 项、account-usage 45 项、PiCompatibility 5 项、Server 80 项；Fast 与真实 Pi RPC/codemode sandbox 检查通过。DevWatcher 20 项通过。新增 UI 尚未进行真实窗口人工验收。
+
 ## 验证与边界
 
 运行 `./scripts/check.sh`：Swift lint/test、extension typecheck/lint/format/test、Fast extension 与真实 Pi RPC/codemode 兼容性测试、Server check/test。测试使用临时数据、synthetic OAuth 凭据和 fixture Pi，不调用付费模型。

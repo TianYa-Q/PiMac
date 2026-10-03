@@ -2,13 +2,35 @@ import Foundation
 
 /// Local presentation rules only; the Server remains authoritative for Git operations.
 enum GitWorkspacePresentation {
-  static func filteredFiles(_ files: [GitWorkspaceStatus.File], query: String)
+  enum FileScope: String, CaseIterable, Identifiable {
+    case all = "全部文件"
+    case selected = "仅看已选"
+    var id: String { rawValue }
+  }
+
+  static func filteredFiles(
+    _ files: [GitWorkspaceStatus.File], query: String,
+    scope: FileScope = .all, selected: Set<String> = []
+  )
     -> [GitWorkspaceStatus.File]
   {
     let terms = query.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-    guard !terms.isEmpty else { return files }
     return files.filter { file in
-      terms.allSatisfy { file.path.localizedStandardContains($0) }
+      (scope == .all || selected.contains(file.path))
+        && terms.allSatisfy { file.path.localizedStandardContains($0) }
+    }
+  }
+
+  /// Saturate server counts instead of allowing a malformed/huge snapshot to overflow the UI.
+  static func selectedChanges(_ files: [GitWorkspaceStatus.File], selected: Set<String>)
+    -> (insertions: Int, deletions: Int)
+  {
+    func add(_ total: Int, _ count: Int) -> Int {
+      let (sum, overflow) = total.addingReportingOverflow(max(0, count))
+      return overflow ? Int.max : sum
+    }
+    return files.filter { selected.contains($0.path) }.reduce((0, 0)) {
+      (add($0.0, $1.insertions), add($0.1, $1.deletions))
     }
   }
 

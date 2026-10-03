@@ -17,6 +17,7 @@ import {
   antigravityGUIStatus,
   formatAntigravityStatus,
   queryAntigravityUsage,
+  validAntigravityUsageState,
   type AntigravityUsageState,
 } from "./antigravity.js";
 import { CodexSessionAuth } from "./auth.js";
@@ -25,6 +26,7 @@ import { logQuotaFailure } from "./diagnostics.js";
 import { formatStatusSegment, formatUsageSummary } from "./format.js";
 import { loginCodexAccount } from "./oauth.js";
 import { readThroughSharedCache } from "./shared-cache.js";
+import { validAccountUsages } from "./cache-validation.js";
 import { nextAccount, REBALANCE_COOLDOWN_MS } from "./rotation.js";
 import { createAccountStore } from "./store.js";
 import { accountProvider, type AccountProvider } from "./types.js";
@@ -209,10 +211,12 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
 
     const results = await readThroughSharedCache({
       namespace: providerId === "openai" ? "openai-chatgpt" : "codex",
-      key: visible
-        .map((account) => account.name)
-        .sort()
-        .join("\u0000"),
+      key: JSON.stringify(visible.map((account) => account.name).sort()),
+      validate: (value) =>
+        validAccountUsages(
+          value,
+          visible.map((account) => account.name),
+        ),
       maxAgeMs: queryInterval(ctx),
       force: notify || force,
       signal: controller.signal,
@@ -260,6 +264,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     const next = await readThroughSharedCache({
       namespace: "antigravity",
       key: "default",
+      validate: validAntigravityUsageState,
       maxAgeMs: interval,
       force,
       signal,
