@@ -20,6 +20,7 @@ Pi runtime：原生认证、模型、扩展、skills、上下文和 session 文�
 
 ## 已接入
 
+- 原生 T3 Git/VCS RPC 与进度订阅，保留上游权限校验。桌面 Git 面板支持分支/变更/差异、选定文件提交、推送、创建 PR 与拉取；按当前线程 worktree 定位，不自行绑定 worktree。操作确认、未确认结果不重放及多项目差异预览的真实路径边界见 [Git 集成说明](t3-code-integration.md#git--vcs)。
 - 官方模型发现及 `thinking` 选项（包括模型支持的 xhigh/max）；切换模型和思考等级。
 - 发消息、插入消息、取消、`agent_settled` 终结、原生回执去重和重启恢复。
 - 先通过官方 `assets.persistChatAttachments` 存储图片，再发送附件；图片读取使用官方签名 URL。
@@ -43,7 +44,7 @@ Pi runtime：原生认证、模型、扩展、skills、上下文和 session 文�
 - Pi 的 setStatus/title/widget 等终端装饰上游忽略。账户额度现在由独立的本机只读管理模块查询，不依赖 runtime status：支持 openai/openai-codex 的原生 OAuth 和 account-usage 多账户存储，按 Provider 隔离，缓存一分钟，手动刷新绕过缓存。读取仅接受当前用户的私有普通文件，返回字段白名单，不返回凭据、不写 auth/session、不触发付费 warm-up。过期授权明确报错，刷新授权仍由 Pi/扩展负责。Gemini 额度、reset credits 和线程授权绑定尚未补齐。
 - 原生 auth 与多账户列表按稳定 ChatGPT account ID（含 token 内的身份信息）合并，不因 token 刷新重复显示。匹配后保留用户账户名称，只为本次查询选用更新的授权，不改写存储；未匹配项标为“Pi 已保存授权”，不标为默认或当前线程账户。Telegram 未确认线程绑定时明确显示“未确认”，只读列表不提供切换按钮。
 - 桌面“管理”通过官方 message.dispatch 提交 `/accounts`，需要已安装 account-usage 扩展；命令提交不等于管理已打开。桌面直接账户切换保持禁用，不能把全局授权误认为某个线程的当前账户。额度接口只在独立 supervisor socket 上开放，需要宿主管理凭据，拒绝浏览器 Origin，不开放到 Tunnel。
-- 模型隐藏是桌面展示偏好；服务器共享默认模型仍同步。手机模型可见性由手机客户端管理，不声称桌面隐藏会过滤官方 provider catalog。
+- 模型隐藏是服务端共享的选择器展示规则：桌面保存后，官方 `server.getConfig`、`server.refreshProviders` 和 `subscribeServerConfig` 的 Pi 模型列表均按隐藏 slug 过滤，已连接手机收到实时目录更新，规则重启后保留。所有 Pi 实例应用同一组隐藏 slug；非 Pi provider 不受影响。底层 provider catalog、桌面管理用完整目录、线程模型选择与运行不被过滤，历史线程仍可使用隐藏模型。手机自身收藏/展示偏好仍由手机管理。
 - 独立压缩模型选择、旧 Fast 选项不再由桌面覆盖 Pi。
 - 真实模型/账号、旧真实数据升级、App Store iOS protocol 2、Apple 登录和 APNs 尚需实机验收。
 

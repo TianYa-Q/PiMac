@@ -207,10 +207,15 @@ struct ContentView: View {
   @EnvironmentObject private var workspace: WorkspaceModel
   @EnvironmentObject private var extensionUI: ExtensionUIModel
   @State private var choosingProject = false
+  @State private var renamingProject: WorkspaceProject?
+  @State private var projectNameDraft = ""
+  @State private var showingProjectRename = false
   @State private var choosingSession = false
   @State private var choosingAttachments = false
   @State private var showingSettings = false
   @State private var showingModelSettings = false
+  @State private var showingScheduledTasks = false
+  @State private var gitContext: GitWorkspaceContext?
   @State private var selectedPage: MainPage = .conversation
   @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
@@ -228,11 +233,43 @@ struct ContentView: View {
   @State private var sessionSearchResults: [SessionSearchResult] = []
   @State private var isSearchingSessions = false
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
+  @AppStorage(SidebarWidth.storageKey) private var sidebarWidth = SidebarWidth.defaultValue
+  @GestureState private var sidebarDragTranslation: CGFloat = 0
 
   var body: some View {
     HStack(spacing: 0) {
       redesignedSidebar
-        .frame(width: 292)
+        .frame(width: SidebarWidth.clamped(SidebarWidth.clamped(sidebarWidth) + Double(sidebarDragTranslation)))
+
+      Divider()
+        .frame(width: 1)
+        .overlay {
+          Color.clear
+            .frame(width: 10)
+            .contentShape(Rectangle())
+            .gesture(
+              DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                .updating($sidebarDragTranslation) { value, translation, _ in
+                  translation = value.translation.width
+                }
+                .onEnded { value in
+                  sidebarWidth = SidebarWidth.clamped(SidebarWidth.clamped(sidebarWidth) + Double(value.translation.width))
+                }
+            )
+            .onHover { hovering in
+              (hovering ? NSCursor.resizeLeftRight : NSCursor.arrow).set()
+            }
+            .help("拖动调整侧栏宽度，调整后自动保存")
+            .accessibilityLabel("侧栏宽度")
+            .accessibilityValue("\(Int(SidebarWidth.clamped(sidebarWidth)))")
+            .accessibilityAdjustableAction { direction in
+              switch direction {
+              case .increment: sidebarWidth = SidebarWidth.clamped(sidebarWidth + 10)
+              case .decrement: sidebarWidth = SidebarWidth.clamped(sidebarWidth - 10)
+              @unknown default: break
+              }
+            }
+        }
 
       ZStack {
         VStack(spacing: 0) {
@@ -257,6 +294,19 @@ struct ContentView: View {
       // transient state is reset explicitly in the tabID change handler below instead.
       .frame(minWidth: 680, minHeight: 560)
     }
+    .alert("重命名项目", isPresented: $showingProjectRename) {
+      TextField("项目名称", text: $projectNameDraft)
+      Button("取消", role: .cancel) { renamingProject = nil }
+      Button("保存") {
+        if let project = renamingProject {
+          workspace.renameProject(project, to: projectNameDraft)
+        }
+        renamingProject = nil
+      }
+      .disabled(projectNameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    } message: {
+      Text("仅修改显示名称，不会更改项目目录或会话。")
+    }
     .fileImporter(isPresented: $choosingProject, allowedContentTypes: [.folder]) { result in
       if case .success(let url) = result { workspace.replaceProject(with: url) }
     }
@@ -278,6 +328,12 @@ struct ContentView: View {
       ) {
         app.piPath = $0
       }
+    }
+    .sheet(isPresented: $showingScheduledTasks) {
+      ScheduledTasksView(workspace: workspace)
+    }
+    .sheet(item: $gitContext) { context in
+      GitWorkspaceView(store: workspace.git, server: workspace.server, context: context)
     }
     .sheet(isPresented: $showingModelSettings) {
       ModelSettingsView()
@@ -358,7 +414,20 @@ struct ContentView: View {
             .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 8))
           Text("Pi Mac")
             .font(.system(size: 16, weight: .bold, design: .rounded))
+          ServerConnectionBadge(server: workspace.server)
           Spacer(minLength: 0)
+          Button {
+            showingScheduledTasks = true
+          } label: {
+            Image(systemName: "calendar.badge.clock")
+              .font(.system(size: 15, weight: .medium))
+              .frame(width: 28, height: 28)
+              .contentShape(Rectangle())
+          }
+          .buttonStyle(.plain)
+          .foregroundStyle(.secondary)
+          .help("定时任务")
+          .accessibilityLabel("定时任务")
           Button {
             showingSettings = true
           } label: {
@@ -601,6 +670,20 @@ struct ContentView: View {
     .buttonStyle(.plain)
   }
 
+  @ViewBuilder
+  private func projectNameMenu(_ project: WorkspaceProject) -> some View {
+    Button("重命名…", systemImage: "pencil") {
+      renamingProject = project
+      projectNameDraft = project.name
+      showingProjectRename = true
+    }
+    if project.name != project.url.lastPathComponent {
+      Button("恢复目录名") {
+        workspace.renameProject(project, to: project.url.lastPathComponent)
+      }
+    }
+  }
+
   private func compactProjectButton(_ project: WorkspaceProject) -> some View {
     let selected = workspace.selectedProject?.id == project.id
     return Button {
@@ -620,6 +703,8 @@ struct ContentView: View {
     .buttonStyle(.plain)
     .help(project.name)
     .contextMenu {
+      projectNameMenu(project)
+      Divider()
       Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([project.url]) }
       Divider()
       Button("从列表移除", role: .destructive) { workspace.removeProject(project) }
@@ -672,6 +757,8 @@ struct ContentView: View {
     }
     .buttonStyle(.plain)
     .contextMenu {
+      projectNameMenu(project)
+      Divider()
       Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([project.url]) }
       Divider()
       Button("从列表移除", role: .destructive) { workspace.removeProject(project) }
@@ -900,12 +987,8 @@ struct ContentView: View {
         ScrollView {
           VStack(alignment: .leading, spacing: 14) {
             if app.messages.isEmpty {
-              ContentUnavailableView(
-                "开始和 Pi 对话",
-                systemImage: "bubble.left.and.bubble.right",
-                description: Text("Pi 可以读取、编辑文件并执行项目命令。")
-              )
-              .frame(maxWidth: .infinity, minHeight: 360)
+              ConversationWelcomeView(project: workspace.selectedProject?.name,
+                chooseProject: { choosingProject = true })
             }
 
             VirtualConversationStack(
@@ -1179,6 +1262,11 @@ struct ContentView: View {
         .modifier(ComposerControlChrome())
         .disabled(app.isBusy)
         .help("压缩上下文")
+        ComposerGitButton(server: workspace.server, hasProject: app.projectURL != nil) {
+          guard let cwd = workspace.selectedGitDirectory else { return }
+          gitContext = GitWorkspaceContext(cwd: cwd, threadID: app.threadID,
+            projectID: app.projectURL.flatMap { workspace.server.projectID(for: $0) })
+        }
         Spacer(minLength: 8)
         let promptIsEmpty =
           app.composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1538,6 +1626,37 @@ struct ContentView: View {
     .disabled(app.isBusy)
   }
 
+}
+
+/// Connection updates stay local instead of invalidating the transcript.
+private struct ServerConnectionBadge: View {
+  @ObservedObject var server: T3DesktopClient
+
+  var body: some View {
+    Image(systemName: server.isConnected ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+      .font(.system(size: 12))
+      .foregroundStyle(server.isConnected ? Color.green : Color.orange)
+      .help(server.status)
+      .accessibilityLabel("Server 连接状态：\(server.status)")
+  }
+}
+
+private struct ComposerGitButton: View {
+  @ObservedObject var server: T3DesktopClient
+  let hasProject: Bool
+  let openGit: () -> Void
+
+  var body: some View {
+    Button(action: openGit) {
+      Label("Git", systemImage: "arrow.triangle.branch").font(.caption)
+    }
+    .buttonStyle(.plain)
+    .foregroundStyle(.secondary)
+    .modifier(ComposerControlChrome())
+    .disabled(!hasProject || !server.isConnected)
+    .help("查看当前线程工作区的分支与变更")
+    .accessibilityLabel("源代码管理")
+  }
 }
 
 /// Lightweight toolbar affordance without native button bezels or menu accents.

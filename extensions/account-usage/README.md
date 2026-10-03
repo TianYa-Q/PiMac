@@ -31,9 +31,45 @@ Select an **openai** model before logging in to a new OpenAI ChatGPT account; se
 
 All files remain under Pi's agent directory (`~/.pi/agent` by default), with owner-only permissions. **No credentials belong in this repository.** Names, defaults, refresh tokens, quota caches, and session bindings are isolated by provider. Existing legacy files and old session bindings remain compatible. Legacy tokens are never copied into the new OpenAI store: log in again to obtain the required OAuth grant.
 
-An OpenAI API key (stored or environment/runtime) is not automatically replaced by managed subscription accounts. Explicit `/accounts switch` opts that session into managed ChatGPT auth; automatic rotation is enabled only when the extension reports managed auth. Account changes are rejected during active tasks. Old sessions retain their own provider-specific account binding.
+An OpenAI API key (stored or environment/runtime) is not automatically replaced by managed subscription accounts. Explicit `/accounts switch` opts that session into managed ChatGPT auth; automatic rotation is enabled only when the extension reports managed auth. Manual account changes are rejected during active tasks. Automatic changes use Pi's awaited safe boundaries (see below). Old sessions retain their own provider-specific account binding.
 
 Quota requests use the ChatGPT usage/reset-credit endpoints. A direct-token credential must include a usable ChatGPT account ID (credential metadata or token claims) and be authorized by those endpoints. Missing IDs, unsupported grants, or HTTP failures produce an account error, not invented quota or a fallback to another provider's credentials. **Live browser login and direct-token endpoint permissions require manual validation; mocked tests do not establish upstream authorization.**
+
+## Automatic rotation and weekly balancing
+
+Both policies run **inside this Pi extension**, in TUI/RPC/headless sessions;
+Pi Mac only displays status and submits manual commands. No desktop UI is required.
+They apply only to extension-managed `openai` / `openai-codex` OAuth bindings,
+never unmanaged API keys, other providers or virtual models.
+
+- **Low quota:** a 5-hour window below 5% (or a weekly window at/below 5%)
+  selects an eligible account with more than 5% short-window quota and, when
+  reported, more than 5% weekly quota. Hidden, failed, stale and unknown
+  short-window quotas are excluded. With no eligible account nothing changes.
+- **Weekly balance:** rank accounts by sustainable remaining percent/day until
+  weekly reset, reserving 5 points and using a six-hour minimum divisor.
+  Prefer accounts not more than 15 points ahead of linear weekly consumption.
+  Rebalance only when the active account is ahead of that consumption pace or
+  the best paced account's daily budget exceeds the active budget by 1.5x.
+  Unknown weekly quota retains a deterministic name-order fallback for urgency
+  only; it does not trigger balancing. Successful rotation and explicit manual
+  selection suppress balancing for ten minutes; low-quota switching bypasses
+  this cooldown.
+
+Timer refreshes can rotate only while idle. Before a user run, both policies
+can select an account; between completed turns (after tools finish), only
+low-quota rotation applies. No live request/tool is aborted and no prompt is
+replayed. At final pre-settlement, a recognized quota/rate-limit failure forces
+fresh telemetry and may request **one** continuation after a successful urgent
+switch. Cancellation, unrelated failures and failed switching do not auto-retry.
+Automatic selection persists only the current session binding, not the global
+future-session default or other live sessions. Manual `/accounts switch` still
+updates the default. Failed activation restores the prior account when possible;
+if restoration fails, the existing auth-failure guard prevents the next turn.
+
+The policy is in `rotation.ts`; lifecycle and credential application are in
+`index.ts` / `auth.ts`. Tests use synthetic credentials and mocked quota endpoints,
+not live paid requests. Live quota exhaustion/continuation still needs validation.
 
 ## Refresh and warm-up behavior
 

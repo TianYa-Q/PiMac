@@ -20,6 +20,11 @@ export function createConnectionDiagnostics(directory) {
       for (const key of ['route', 'method', 'transport', 'status', 'reason', 'origin']) {
         if (fields[key] !== undefined) safe[key] = fields[key];
       }
+      // RPC metadata must be bounded identifiers/enums, never arbitrary text.
+      for (const key of ['commandId', 'commandType', 'threadId', 'dispatchMode', 'deliveryIntent', 'errorTags']) {
+        const value = fields[key];
+        if (typeof value === 'string' && value.length <= 384 && /^[A-Za-z0-9_.:/%\-]+$/.test(value)) safe[key] = value;
+      }
       const line = `${new Date().toISOString()} ${event} ${JSON.stringify(safe)}`;
       entries.push(line); if (entries.length > 20) entries.shift();
       if (file) {

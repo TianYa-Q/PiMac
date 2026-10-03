@@ -15,10 +15,10 @@ export function call(url, method, input = {}) {
     return yield* client[method](input);
   }));
 }
-export function readStream(url, method, input, { count = 1, onItem = () => {} } = {}) {
+export function readStream(url, method, input, { count = 1, onItem = () => {}, filter = () => true } = {}) {
   return run(url, Effect.gen(function* () {
     const client = yield* RpcClient.make(group);
-    return yield* client[method](input).pipe(Stream.take(count),
+    return yield* client[method](input).pipe(Stream.filter(filter), Stream.take(count),
       Stream.tap(item => Effect.promise(async () => onItem(item))), Stream.runCollect);
   }));
 }

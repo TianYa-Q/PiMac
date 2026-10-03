@@ -169,8 +169,7 @@ final class T3DesktopClient: ObservableObject {
     // The ID is allocated once per user action. Network failure is an unknown
     // outcome, never permission for the UI to replay or create another thread.
     let result = try await rpc(
-      command["type"] as? String == "project.create"
-        ? "projects.mutate" : "orchestration.dispatchCommand", payload: command)
+      Self.mutationMethod(for: command["type"] as? String), payload: command)
     requestRefresh()
     return result
   }
@@ -196,6 +195,11 @@ final class T3DesktopClient: ObservableObject {
       let runID = run["id"] as? String
     else { throw ClientError.rejected }
     try await dispatch(["type": "run.interrupt", "threadId": threadID, "runId": runID])
+  }
+
+  static func mutationMethod(for type: String?) -> String {
+    ["project.create", "project.update", "project.delete"].contains(type ?? "")
+      ? "projects.mutate" : "orchestration.dispatchCommand"
   }
 
   func ensureProject(_ url: URL) async throws -> String {
@@ -336,7 +340,38 @@ final class T3DesktopClient: ObservableObject {
       return nativeProvider
     }
   }
-  private func rpc(_ method: String, payload: JSON = [:]) async throws -> JSON {
+  func scheduledTasksRPC(_ method: String, payload: JSON = [:]) async throws -> JSON {
+    guard ["scheduledTasks.list", "scheduledTasks.upsert", "scheduledTasks.setEnabled",
+      "scheduledTasks.delete", "scheduledTasks.runNow"].contains(method)
+    else { throw ClientError.rejected }
+    guard isConnected else { throw ClientError.unavailable }
+    return try await rpc(method, payload: payload)
+  }
+
+  func gitRPC(_ method: String, payload: JSON) async throws -> JSON {
+    guard ["vcs.refreshStatus", "vcs.listRefs", "vcs.pull", "vcs.createRef", "vcs.switchRef", "review.getDiffPreview"].contains(method)
+    else { throw ClientError.rejected }
+    guard isConnected else { throw ClientError.unavailable }
+    return try await rpc(method, payload: payload, timeoutSeconds: 120)
+  }
+
+  func gitAction(payload: JSON, progress: @escaping (JSON) -> Void) async throws -> JSON {
+    guard isConnected else { throw ClientError.unavailable }
+    var result: JSON?
+    var failed = false
+    _ = try await rpc("git.runStackedAction", payload: payload, timeoutSeconds: 300) { event in
+      progress(event)
+      if event["kind"] as? String == "action_finished" { result = event["result"] as? JSON }
+      if event["kind"] as? String == "action_failed" { failed = true }
+    }
+    guard !failed, let result else { throw ClientError.rejected }
+    return result
+  }
+
+  private func rpc(
+    _ method: String, payload: JSON = [:], timeoutSeconds: Int = 15,
+    receive: ((JSON) -> Void)? = nil
+  ) async throws -> JSON {
     let current = generation
     let ticket = try await request("/api/auth/websocket-ticket", method: "POST", body: [:])
     guard let secret = ticket["ticket"] as? String, let base = service?.serverURL else {
@@ -352,7 +387,7 @@ final class T3DesktopClient: ObservableObject {
     socket.maximumMessageSize = 16 * 1024 * 1024
     socket.resume()
     let timeout = Task {
-      try? await Task.sleep(for: .seconds(15))
+      try? await Task.sleep(for: .seconds(timeoutSeconds))
       if !Task.isCancelled { socket.cancel(with: .goingAway, reason: nil) }
     }
     defer {
@@ -367,7 +402,11 @@ final class T3DesktopClient: ObservableObject {
             "_tag": "Request", "id": id, "tag": method, "payload": payload, "headers": [],
           ]), as: UTF8.self)))
     while true {
-      let frame = try await socket.receive()
+      let frame = try await withTaskCancellationHandler {
+        try await socket.receive()
+      } onCancel: {
+        socket.cancel(with: .goingAway, reason: nil)
+      }
       guard generation == current, !Task.isCancelled else { throw CancellationError() }
       let data: Data
       switch frame {
@@ -381,13 +420,17 @@ final class T3DesktopClient: ObservableObject {
           try await socket.send(.string(#"{"_tag":"Pong"}"#))
           continue
         }
-        guard response["_tag"] as? String == "Exit", response["requestId"] as? String == id,
-          let exit = response["exit"] as? JSON
-        else { continue }
-        guard exit["_tag"] as? String == "Success", let value = exit["value"] as? JSON else {
-          throw ClientError.rejected
+        guard response["requestId"] as? String == id else { continue }
+        if response["_tag"] as? String == "Chunk" {
+          for event in response["values"] as? [JSON] ?? [] { receive?(event) }
+          let ack: JSON = ["_tag": "Ack", "requestId": id]
+          try await socket.send(.string(String(decoding: try JSONSerialization.data(withJSONObject: ack), as: UTF8.self)))
+          continue
         }
-        return value
+        guard response["_tag"] as? String == "Exit", let exit = response["exit"] as? JSON
+        else { continue }
+        guard exit["_tag"] as? String == "Success" else { throw ClientError.rejected }
+        return exit["value"] as? JSON ?? [:]
       }
     }
   }

@@ -25,6 +25,7 @@ import { logQuotaFailure } from "./diagnostics.js";
 import { formatStatusSegment, formatUsageSummary } from "./format.js";
 import { loginCodexAccount } from "./oauth.js";
 import { readThroughSharedCache } from "./shared-cache.js";
+import { nextAccount, REBALANCE_COOLDOWN_MS } from "./rotation.js";
 import { createAccountStore } from "./store.js";
 import { accountProvider, type AccountProvider } from "./types.js";
 import type {
@@ -76,6 +77,10 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   let accountStore = createAccountStore(providerId);
   let sessionAuth = new CodexSessionAuth(providerId);
   let managesSelectedAuth = false;
+  let rotationInFlight: Promise<boolean> | undefined;
+  let lastRebalanceAt = 0;
+  let lastFailedRotationAt = 0;
+  let automaticRetryUsed = false;
   const requireCurrentStore = (store: typeof accountStore) => {
     if (!sessionActive || store !== accountStore) {
       throw new Error("账户管理会话或模型 provider 已变更，请重新执行命令。");
@@ -182,7 +187,11 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   };
 
   // 多账户查询需要限制并发、隔离单个账户失败，并防止旧会话结果覆盖新会话状态。
-  const refreshCodexUsage = async (ctx: ExtensionContext, notify: boolean) => {
+  const refreshCodexUsage = async (
+    ctx: ExtensionContext,
+    notify: boolean,
+    force = false,
+  ) => {
     const state = safeReadAccountState(ctx);
     if (!state) return;
     const queriedProvider = providerId;
@@ -205,7 +214,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         .sort()
         .join("\u0000"),
       maxAgeMs: queryInterval(ctx),
-      force: notify,
+      force: notify || force,
       signal: controller.signal,
       query: () =>
         mapWithConcurrency(visible, QUERY_CONCURRENCY, (account) =>
@@ -267,14 +276,29 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   };
 
   // 两类额度并行刷新，完成后只发布一次完整快照。
-  const refreshAll = async (ctx: ExtensionContext, notify: boolean) => {
+  const refreshAll = async (
+    ctx: ExtensionContext,
+    notify: boolean,
+    forceCodex = false,
+    rotateIdle = true,
+  ) => {
     const startedAt = Date.now();
+    const owner = sessionController;
+    const store = accountStore;
+    const isCurrent = () =>
+      sessionActive &&
+      owner === sessionController &&
+      !owner?.signal.aborted &&
+      store === accountStore;
     try {
       await Promise.all([
-        refreshCodexUsage(ctx, notify),
+        refreshCodexUsage(ctx, notify, forceCodex),
         refreshAntigravityUsage(ctx, notify),
       ]);
-      if (sessionActive) publishStatus(ctx);
+      if (isCurrent()) {
+        if (rotateIdle) await rotateAccounts(ctx);
+        publishStatus(ctx);
+      }
     } catch (error) {
       // A newer refresh or session shutdown deliberately aborts the previous one.
       // Treat that as normal control flow instead of leaking an unhandled rejection.
@@ -290,7 +314,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         throw error;
       }
     } finally {
-      if (sessionActive) scheduleRefresh(ctx);
+      if (isCurrent()) scheduleRefresh(ctx);
     }
   };
 
@@ -435,11 +459,94 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     }
   };
 
+  // Automatic changes are session-local. Manual /accounts switch still changes
+  // the future default. Never abort tools or inject/replay a user's prompt.
+  const rotateAccounts = async (
+    ctx: ExtensionContext,
+    boundary = false,
+    allowRebalance = true,
+  ): Promise<boolean> => {
+    if (rotationInFlight) await rotationInFlight;
+    const signal = sessionController?.signal;
+    const store = accountStore;
+    const auth = sessionAuth;
+    const previous = sessionAccount;
+    const canCommit = () =>
+      sessionActive &&
+      !!signal &&
+      !signal.aborted &&
+      store === accountStore &&
+      auth === sessionAuth &&
+      managesSelectedAuth &&
+      sessionAccount === previous &&
+      ctx.model?.provider === providerId &&
+      ctx.model.api !== "pi-virtual";
+    const safeBoundary = () =>
+      canCommit() && (ctx.isIdle() || (boundary && !ctx.signal?.aborted));
+    if (
+      !previous ||
+      !safeBoundary() ||
+      Date.now() - lastFailedRotationAt < 60_000
+    )
+      return false;
+    const state = safeReadAccountState(ctx);
+    if (!state) return false;
+    const decision = nextAccount({
+      activeAccount: previous,
+      usages: [...usages.values()].filter((usage) =>
+        state.accounts.some((account) => account.name === usage.accountName),
+      ),
+      hiddenAccounts: settings.hiddenAccounts,
+      allowRebalance:
+        allowRebalance && Date.now() - lastRebalanceAt >= REBALANCE_COOLDOWN_MS,
+    });
+    if (!decision) return false;
+    const task = (async () => {
+      try {
+        await auth.activate(ctx, decision.accountName, signal!, safeBoundary);
+        if (!canCommit()) return false;
+        persistSessionSelection(pi, ctx, decision.accountName, providerId);
+        sessionAccount = decision.accountName;
+        authFailed = false;
+        lastRebalanceAt = Date.now();
+        publishStatus(ctx);
+        ctx.ui.notify(
+          `已自动切换到 ${decision.accountName}（${decision.reason === "low-quota" ? "账户额度不足" : "周额度负载平衡"}）；仅影响当前会话。`,
+          "info",
+        );
+        return true;
+      } catch (error) {
+        if (!canCommit()) return false; // Shutdown/provider replacement owns cleanup.
+        lastFailedRotationAt = Date.now();
+        try {
+          await auth.activate(ctx, previous, signal!);
+          persistSessionSelection(pi, ctx, previous, providerId);
+          authFailed = false;
+        } catch {
+          authFailed = true;
+        }
+        ctx.ui.notify(
+          `自动切换账户失败，未自动续跑：${errorMessage(error)}`,
+          "warning",
+        );
+        return false;
+      }
+    })();
+    rotationInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (rotationInFlight === task) rotationInFlight = undefined;
+    }
+  };
+
   const switchAccount = async (
     ctx: ExtensionCommandContext,
     accountName: string,
   ) => {
+    if (rotationInFlight) await rotationInFlight;
     if (!ctx.isIdle()) throw new Error("请先停止当前任务再切换账户。");
+    lastRebalanceAt = Date.now(); // Respect an explicit choice; urgency can override it.
     const store = accountStore;
     await activateForSession(ctx, accountName);
     requireCurrentStore(store);
@@ -776,6 +883,9 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     authFailed = false;
     sessionAccount = undefined;
     usages.clear();
+    lastRebalanceAt = 0;
+    lastFailedRotationAt = 0;
+    automaticRetryUsed = false;
     try {
       settings = accountStore.readSettings();
     } catch (error) {
@@ -790,8 +900,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         // Keep API keys unless this session explicitly chose a managed subscription.
         const model = ctx.model;
         const protectedAPIKey =
-          providerId === "openai" &&
-          model?.provider === "openai" &&
+          model?.provider === providerId &&
           ctx.modelRegistry.hasConfiguredAuth(model) &&
           !ctx.modelRegistry.isUsingOAuth(model);
         sessionAccount =
@@ -801,7 +910,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
           await activateForSession(ctx, sessionAccount);
           managesSelectedAuth = true;
         } else {
-          authFailed = providerId === "openai-codex";
+          authFailed = providerId === "openai-codex" && !protectedAPIKey;
           if (authFailed)
             ctx.ui.notify(
               "尚未配置 Codex 账户，请运行 /accounts 登录。",
@@ -843,6 +952,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       queryController?.abort();
       sessionController?.abort();
       sessionController = new AbortController();
+      if (rotationInFlight) await rotationInFlight;
       await sessionAuth.clear(ctx);
       await initializeAccounts(ctx);
       await refreshAll(ctx, false);
@@ -851,9 +961,11 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
+    automaticRetryUsed = false;
+    await rotateAccounts(ctx, true);
     if (ctx.model?.provider !== providerId || ctx.model.api === "pi-virtual")
       return;
-    if (providerId === "openai" && !managesSelectedAuth) return;
+    if (!managesSelectedAuth) return;
     if (!sessionAccount) {
       authFailed = true;
       ctx.ui.notify("没有可用的 Codex 账户，请运行 /accounts。", "error");
@@ -881,6 +993,42 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       ctx.abort();
   });
 
+  pi.on("turn_end", async (event, ctx) => {
+    // Tools have finished and the next model request has not started yet.
+    // Weekly balancing waits for idle/pre-run boundaries; urgency need not.
+    if (event.outcome === "completed") {
+      await refreshAll(ctx, false, false, false);
+      await rotateAccounts(ctx, true, false);
+    }
+  });
+
+  pi.on("agent_before_settle", async (event, ctx) => {
+    if (event.outcome !== "error" || automaticRetryUsed || ctx.signal?.aborted)
+      return;
+    const entries = ctx.sessionManager.getEntries();
+    const last = [...entries]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.type === "message" && entry.message.role === "assistant",
+      );
+    if (
+      last?.type !== "message" ||
+      last.message.role !== "assistant" ||
+      !/rate.?limit|usage.?limit|quota|429|额度|限额/iu.test(
+        last.message.errorMessage ?? "",
+      )
+    )
+      return;
+    // Retry only a confirmed quota failure, at most once for this user run.
+    // No retries for cancellation, network/auth errors or ordinary completion.
+    await refreshAll(ctx, false, true, false);
+    if (event.context.canContinue && (await rotateAccounts(ctx, true, false))) {
+      automaticRetryUsed = true;
+      return { continue: true };
+    }
+  });
+
   pi.on("agent_settled", async (_event, ctx) => {
     await refreshAll(ctx, false);
   });
@@ -893,6 +1041,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     lastAntigravityQueryAt = 0;
     sessionController?.abort();
     sessionController = undefined;
+    if (rotationInFlight) await rotationInFlight;
     queryController?.abort();
     queryController = undefined;
     if (refreshTimer) clearTimeout(refreshTimer);

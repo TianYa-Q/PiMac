@@ -324,12 +324,7 @@ final class ExtensionUIModel: ObservableObject {
 
     if selectedSource == nil { selectedSource = source }
     applyUsageForSelectedSource()
-    if selectionIsCurrent && usageIsCurrent {
-      source.scheduleCodexAccountRotation()
-      if let selectedSource, selectedSource !== source {
-        selectedSource.scheduleCodexAccountRotation()
-      }
-    }
+    // Account rotation belongs to account-usage inside Pi, not UI publications.
   }
 
   func usage(for source: AppModel?) -> (

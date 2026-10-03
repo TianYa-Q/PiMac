@@ -123,6 +123,29 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
     } catch { /* No provider error bodies cross IPC. */ }
     return { ...status, error: 'Antigravity 额度查询失败，请检查网络和账户授权。' };
   }
+  async function queryResetCredits(credential, id, signal) {
+    // Supplementary, read-only metadata: unsupported plans or failures must not
+    // discard valid usage windows. Only allowlisted fields cross IPC.
+    try {
+      const response = await fetchImpl('https://chatgpt.com/backend-api/wham/rate-limit-reset-credits', {
+        headers: { authorization: `Bearer ${credential.access}`, 'chatgpt-account-id': id },
+        redirect: 'error', signal,
+      });
+      if (!response.ok) { await response.body?.cancel(); return undefined; }
+      const body = await boundedJSON(response);
+      const rawCount = body?.available_count;
+      const count = typeof rawCount === 'number' ? rawCount
+        : typeof rawCount === 'string' && rawCount.trim() ? Number(rawCount) : NaN;
+      if (!Number.isFinite(count) || count < 0) return undefined;
+      const credits = (Array.isArray(body.credits) ? body.credits : []).flatMap(credit => {
+        if (credit?.status !== 'available') return [];
+        const expiry = typeof credit.expires_at === 'string' ? Date.parse(credit.expires_at) : NaN;
+        // Codex timestamps use seconds (unlike the Gemini quota payload).
+        return [Number.isFinite(expiry) ? { expiresAt: expiry / 1000 } : {}];
+      });
+      return { availableCount: Math.floor(count), credits };
+    } catch { return undefined; }
+  }
   async function query(provider) {
     const prefix = provider === 'openai' ? 'openai-chatgpt' : 'codex';
     const auth = privateJSON(path.join(agentDirectory, 'auth.json'));
@@ -166,6 +189,8 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
           row.primary = window(body.rate_limit?.primary_window);
           row.secondary = window(body.rate_limit?.secondary_window);
           if (!row.primary && !row.secondary) throw new Error('shape');
+          const resetCredits = await queryResetCredits(credential, id, signal);
+          if (resetCredits) row.resetCredits = resetCredits;
         } catch {
           // No response bodies, tokens, URLs or arbitrary error strings cross IPC.
           row.error = '额度查询失败，请检查网络和账户授权。';

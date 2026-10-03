@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
-import { call } from '../generated/client.mjs';
+import { call, readStream } from '../generated/client.mjs';
 const token = 'ab'.repeat(32);
 const delay = ms => new Promise(r => setTimeout(r, ms));
 async function eventually(fn) {
@@ -58,6 +58,32 @@ test('official Pi discovery, model preferences, and protocol authorization', asy
   await f.gateway.official.management.modelPreferences({ hiddenModels: ['test/model'], defaultModel: 'test/model' });
   const updated = await f.rpc('server.getConfig');
   assert.equal(updated.settings.defaultModelSelection, null);
+  assert(!updated.providers[0].models.some(m => m.slug === 'test/model'));
+  assert(!(await f.rpc('server.refreshProviders', {})).providers[0].models.some(m => m.slug === 'test/model'));
+  const events = await readStream(await f.ws(), 'subscribeServerConfig', {}, { count: 2,
+    filter: event => event.type === 'snapshot' || event.type === 'providerStatuses',
+    onItem: async event => {
+      if (event.type === 'snapshot') {
+        assert(!event.config.providers[0].models.some(m => m.slug === 'test/model'));
+        await f.gateway.official.management.modelPreferences({ hiddenModels: [], defaultModel: null });
+      }
+    } });
+  const visible = events.find(event => event.type === 'providerStatuses');
+  assert(visible.payload.providers[0].models.some(m => m.slug === 'test/model'));
+  const hiddenEvents = await readStream(await f.ws(), 'subscribeServerConfig', {}, { count: 2,
+    filter: event => event.type === 'snapshot' || event.type === 'providerStatuses',
+    onItem: async event => {
+      if (event.type === 'snapshot') {
+        assert(event.config.providers[0].models.some(m => m.slug === 'test/model'));
+        await f.gateway.official.management.modelPreferences({ hiddenModels: ['test/model'], defaultModel: null });
+      }
+    } });
+  assert(!hiddenEvents.find(event => event.type === 'providerStatuses').payload.providers[0].models.some(m => m.slug === 'test/model'));
+  // Hiding is presentation only: a thread can still run the hidden model.
+  const threadId = await f.create();
+  await f.dispatch(f.message(threadId, 'hidden model'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+  assert.equal((await f.snapshot(threadId)).thread.modelSelection.model, 'test/model');
   const supervisor = `http://127.0.0.1:${f.gateway.server.address().port}/internal/auth/account-status`;
   const body = JSON.stringify({ provider: 'unsupported' });
   assert.equal((await fetch(supervisor, { method: 'POST', headers: { 'content-type': 'application/json' }, body })).status, 401);
@@ -92,6 +118,35 @@ test('official V2 owns receipts, settlement, transcript, restart and native Pi r
   records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(records.filter(r => r.command === 'prompt').length, 2);
   assert(records.some(r => r.command === 'switch_session'));
+});
+
+test('official scheduler dispatches into Pi and persists across server restart', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-official-schedule-'));
+  let f;
+  t.after(async () => { await f?.close(); await rm(directory, { recursive: true, force: true }); });
+  f = await open(directory);
+  const threadId = await f.create();
+  const projectId = (await f.get('/api/orchestration/shell')).threads.find(row => row.id === threadId).projectId;
+  const { task } = await f.rpc('scheduledTasks.upsert', {
+    title: 'Scheduled Pi', prompt: 'scheduled fixture', enabled: false,
+    schedule: { type: 'interval', everyMs: 3600000 }, projectId, threadId,
+    workspaceStrategy: { type: 'root' }, modelSelection: { instanceId: 'pi', model: 'test/model' },
+    runtimeMode: 'full-access', interactionMode: 'default',
+  });
+  const run = await f.rpc('scheduledTasks.runNow', { id: task.id });
+  assert.equal(run.task.lastRunStatus, 'succeeded', run.task.lastRunError);
+  assert.equal(run.task.runCount, 1);
+  assert.equal(run.task.nextRunAt, null);
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(row => row.status === 'completed'));
+  assert((await f.snapshot(threadId)).visibleTurnItems.some(row => row.item.text === 'Reply: scheduled fixture'));
+  await f.close();
+  f = await open(directory);
+  const saved = (await f.rpc('scheduledTasks.list', {})).tasks.find(row => row.id === task.id);
+  assert.equal(saved.threadId, threadId);
+  assert.equal(saved.runCount, 1);
+  assert.equal(saved.enabled, false);
+  await f.rpc('scheduledTasks.delete', { id: task.id });
+  await assert.rejects(f.rpc('scheduledTasks.runNow', { id: task.id }), error => error._tag === 'ScheduledTaskError');
 });
 
 test('official Pi tools, model selection, steering and cancellation', async t => {
@@ -161,4 +216,39 @@ test('official attachment persistence, signed asset access and Pi image delivery
   await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
   const records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert(records.some(r => r.command === 'prompt' && r.imageCount === 1));
+});
+
+test('mobile signed HTTP uploads reach Pi and pending attachments can be deleted', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-mobile-images-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const threadId = await f.create();
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1cAAAAASUVORK5CYII=', 'base64');
+  const metadata = { type: 'image', name: 'phone.png', mimeType: 'image/png', sizeBytes: bytes.length };
+  const upload = async signed => fetch(f.gateway.serverURL + signed.relativeUrl, {
+    method: 'POST', headers: { 'content-type': metadata.mimeType }, body: bytes,
+  });
+  const signed = await f.rpc('attachments.createUploadUrl', metadata);
+  const response = await upload(signed);
+  assert.equal(response.status, 204, await response.text());
+  const attachment = { ...metadata, id: signed.attachmentId };
+  await f.dispatch(f.message(threadId, 'phone image', { attachments: [attachment] }));
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+  const records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert(records.some(r => r.command === 'prompt' && r.imageCount === 1));
+
+  const pending = await f.rpc('attachments.createUploadUrl', metadata);
+  assert.equal((await upload(pending)).status, 204);
+  await f.rpc('attachments.delete', { attachmentId: pending.attachmentId });
+  // Deletion is idempotent for a removed draft attachment.
+  await f.rpc('attachments.delete', { attachmentId: pending.attachmentId });
+  await assert.rejects(f.rpc('assets.createUrl', { resource: { _tag: 'attachment', attachmentId: pending.attachmentId } }),
+    error => error._tag === 'AssetAttachmentNotFoundError');
+
+  assert.equal((await upload({ relativeUrl: '/api/attachments/upload/invalid-token' })).status, 404);
+  const wrongSize = await f.rpc('attachments.createUploadUrl', metadata);
+  assert.equal((await fetch(f.gateway.serverURL + wrongSize.relativeUrl, { method: 'POST', body: bytes.subarray(1) })).status, 400);
+  assert.equal((await fetch(f.gateway.serverURL + signed.relativeUrl, {
+    method: 'POST', headers: { origin: 'https://attacker.invalid' }, body: bytes,
+  })).status, 403);
 });

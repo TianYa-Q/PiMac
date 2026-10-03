@@ -16,6 +16,7 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 ## Features
 
 - Add and switch between multiple projects in one window, with separate sessions and background tasks
+- Current source adds native T3 Git controls: branches, changes/diffs, selected-file commits, push, PR creation and pull; a resizable sidebar with remembered width, a compact Server badge beside Pi Mac, and Git beside the composer’s compact control without a conversation header. See [Git integration](docs/t3-code-integration.md#git--vcs).
 - Stream responses, reasoning, and tool calls
 - Support Pi 1.0 Code Mode: show JavaScript, nested calls and image tool results; retain existing Pi tool/MCP settings
 - Send messages, re-edit previous prompts, steer after tool calls, follow up after completion, and remove queued messages that have not been consumed
@@ -29,7 +30,7 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 - View compaction, token, cost, and context usage statistics, plus task output speed in tokens/s using actual provider usage (includes reasoning and request latency, excludes tool time; updates at response completion when streaming usage is unavailable)
 - Toggle OpenAI Responses / Codex Fast mode for priority processing (may consume more quota; does not change reasoning level). Preferences survive restarts and are shared by desktop and Telegram without modifying global Pi settings
 - Support select, confirm, input, and editor dialogs provided by Pi extensions
-- Manage OpenAI ChatGPT / Codex accounts and Gemini quotas with the companion [account-usage](extensions/account-usage/README.md), maintained in this repository. Credentials, defaults and quotas stay provider-isolated; API keys are never automatically replaced
+- Manage OpenAI ChatGPT / Codex accounts and Gemini quotas with the companion [account-usage](extensions/account-usage/README.md), maintained in this repository. Credentials, defaults and quotas stay provider-isolated; API keys are never automatically replaced. Low-quota rotation and weekly-budget balancing run inside the extension at safe Pi boundaries, independent of the desktop UI; automatic changes affect only the current session
 - Reuse existing authentication, models, skills, extensions, and settings from `~/.pi/agent`
 
 ## Download and Installation

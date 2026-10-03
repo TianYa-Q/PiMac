@@ -27,6 +27,8 @@ const credential = (access, modern = false) => ({
 });
 const requests = [];
 const originalFetch = globalThis.fetch;
+let usageFixture;
+
 globalThis.fetch = async (url, options = {}) => {
   requests.push({
     url: String(url),
@@ -40,6 +42,26 @@ globalThis.fetch = async (url, options = {}) => {
       expires_in: 3600,
       scope: "openid chatgpt.tokens.use.direct",
     });
+  if (String(url).endsWith("/usage") && usageFixture) {
+    const token =
+      options.headers.Authorization ?? options.headers.authorization;
+    const value = usageFixture.get(token.replace(/^Bearer /u, ""));
+    if (!value) throw new Error("Missing synthetic usage fixture");
+    return Response.json({
+      rate_limit: {
+        primary_window: {
+          used_percent: 100 - value.short,
+          reset_at: Math.floor(Date.now() / 1000) + 18000,
+          limit_window_seconds: 18000,
+        },
+        secondary_window: {
+          used_percent: 100 - value.weekly,
+          reset_at: Math.floor(Date.now() / 1000) + value.days * 86400,
+          limit_window_seconds: 604800,
+        },
+      },
+    });
+  }
   if (String(url).endsWith("/usage"))
     return Response.json({
       rate_limit: {
@@ -90,7 +112,7 @@ function instance(provider = "openai", apiKey = true, entries = []) {
       setStatus: (key, text) => statuses.push([key, text]),
     },
     modelRegistry: {
-      hasConfiguredAuth: () => apiKey,
+      hasConfiguredAuth: (model) => apiKey && model.provider === provider,
       isUsingOAuth: () => false,
       getRegisteredProviderConfig: (id) => overlays.get(id),
       registerProvider: (id, config) => {
@@ -375,6 +397,209 @@ try {
     } finally {
       await app.events.get("session_shutdown")({}, app.ctx);
     }
+  });
+  async function rotationFixture(run) {
+    await modern.saveAccount("spare", credential("spare-token", true));
+    await modern.setActiveAccount("same");
+    usageFixture = new Map([
+      ["modern", { short: 80, weekly: 70, days: 6 }],
+      ["spare-token", { short: 80, weekly: 75, days: 6 }],
+    ]);
+    const app = instance("openai", false);
+    app.ctx.isIdle = () => false;
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      await app.commands.get("usage").handler("refresh", app.ctx);
+      await run(app);
+    } finally {
+      await app.events.get("session_shutdown")({}, app.ctx);
+      await modern.removeAccount("spare");
+      await modern.setActiveAccount("same");
+      usageFixture = undefined;
+    }
+  }
+
+  await test("extension defers low-quota switching while busy, then switches at turn boundary without changing defaults", async () => {
+    await rotationFixture(async (app) => {
+      usageFixture.get("modern").short = 1;
+      await app.commands.get("usage").handler("refresh", app.ctx);
+      assert.equal(app.status().activeAccount, "same");
+      assert.equal(app.tokens.get("openai"), "modern");
+      const result = await app.events.get("turn_end")(
+        { outcome: "completed" },
+        app.ctx,
+      );
+      assert.equal(result, undefined);
+      assert.equal(app.tokens.get("openai"), "spare-token");
+      assert.equal(app.status().activeAccount, "spare");
+      assert.equal(app.entries.at(-1).data.accountName, "spare");
+      assert.equal(modern.readCodexAccountState().activeAccount, "same");
+    });
+  });
+
+  await test("extension balances weekly quota pre-run and respects manual-selection cooldown", async () => {
+    await rotationFixture(async (app) => {
+      Object.assign(usageFixture.get("modern"), { weekly: 50, days: 6 });
+      Object.assign(usageFixture.get("spare-token"), { weekly: 40, days: 1 });
+      await app.commands.get("usage").handler("refresh", app.ctx);
+      await app.events.get("before_agent_start")({}, app.ctx);
+      assert.equal(app.status().activeAccount, "spare");
+      app.ctx.isIdle = () => true;
+      await app.commands.get("accounts").handler("switch same", app.ctx);
+      await app.commands.get("usage").handler("refresh", app.ctx);
+      assert.equal(app.status().activeAccount, "same");
+      usageFixture.get("modern").short = 1;
+      await app.commands.get("usage").handler("refresh", app.ctx);
+      assert.equal(app.status().activeAccount, "spare"); // Urgency ignores cooldown.
+    });
+  });
+
+  await test("extension retries a confirmed quota error only once, never retries cancellation or network failure", async () => {
+    await rotationFixture(async (app) => {
+      app.entries.push({
+        type: "message",
+        message: { role: "assistant", errorMessage: "429 usage limit reached" },
+      });
+      usageFixture.get("modern").short = 1;
+      const event = { outcome: "error", context: { canContinue: true } };
+      assert.deepEqual(
+        await app.events.get("agent_before_settle")(event, app.ctx),
+        { continue: true },
+      );
+      assert.equal(app.status().activeAccount, "spare");
+      usageFixture.get("spare-token").short = 1;
+      usageFixture.get("modern").short = 80;
+      assert.equal(
+        await app.events.get("agent_before_settle")(event, app.ctx),
+        undefined,
+      );
+      assert.equal(app.status().activeAccount, "spare");
+      assert.equal(
+        await app.events.get("agent_before_settle")(
+          { ...event, outcome: "aborted" },
+          app.ctx,
+        ),
+        undefined,
+      );
+      await app.events.get("before_agent_start")({}, app.ctx);
+      app.entries.push({
+        type: "message",
+        message: { role: "assistant", errorMessage: "network unavailable" },
+      });
+      assert.equal(
+        await app.events.get("agent_before_settle")(event, app.ctx),
+        undefined,
+      );
+    });
+  });
+
+  await test("failed automatic activation rolls back runtime auth and leaves the session binding intact", async () => {
+    await rotationFixture(async (app) => {
+      usageFixture.get("modern").short = 1;
+      await app.commands.get("usage").handler("refresh", app.ctx);
+      const resolve = app.ctx.modelRegistry.getApiKeyForProvider;
+      app.ctx.modelRegistry.getApiKeyForProvider = async (id) => {
+        const token = await resolve(id);
+        return token === "spare-token" ? "not-applied" : token;
+      };
+      await app.events.get("turn_end")({ outcome: "completed" }, app.ctx);
+      assert.equal(app.tokens.get("openai"), "modern");
+      assert.equal(app.status().activeAccount, "same");
+      assert.equal(app.entries.at(-1).data.accountName, "same");
+    });
+  });
+
+  await test("automatic rotation is session-local and does not opt an API-key session into managed auth", async () => {
+    await rotationFixture(async (app) => {
+      const other = instance("openai", false);
+      const apiKey = instance("openai", true);
+      other.ctx.isIdle = () => false;
+      other.ctx.sessionManager.getSessionId = () => "other-session";
+      apiKey.tokens.set("openai", "sk-untouched");
+      try {
+        await other.events.get("session_start")(
+          { reason: "startup" },
+          other.ctx,
+        );
+        await apiKey.events.get("session_start")(
+          { reason: "startup" },
+          apiKey.ctx,
+        );
+        usageFixture.get("modern").short = 1;
+        await app.commands.get("usage").handler("refresh", app.ctx);
+        await app.events.get("turn_end")({ outcome: "completed" }, app.ctx);
+        await apiKey.commands.get("usage").handler("refresh", apiKey.ctx);
+        await apiKey.events.get("before_agent_start")({}, apiKey.ctx);
+        assert.equal(app.tokens.get("openai"), "spare-token");
+        assert.equal(other.tokens.get("openai"), "modern");
+        assert.equal(apiKey.tokens.get("openai"), "sk-untouched");
+        assert.equal(apiKey.status().managesSelectedAuth, false);
+      } finally {
+        await other.events.get("session_shutdown")({}, other.ctx);
+        await apiKey.events.get("session_shutdown")({}, apiKey.ctx);
+      }
+    });
+  });
+
+  await test("provider changes await and cancel an in-flight automatic activation before clearing auth", async () => {
+    await rotationFixture(async (app) => {
+      usageFixture.get("modern").short = 1;
+      await app.commands.get("usage").handler("refresh", app.ctx);
+      let resume, started;
+      const applying = new Promise((resolve) => {
+        started = resolve;
+      });
+      const install = app.ctx.modelRegistry.setRuntimeApiKey;
+      app.ctx.modelRegistry.setRuntimeApiKey = async (id, token) => {
+        if (token === "spare-token") {
+          started();
+          await new Promise((resolve) => {
+            resume = resolve;
+          });
+        }
+        await install(id, token);
+      };
+      const rotation = app.events.get("turn_end")(
+        { outcome: "completed" },
+        app.ctx,
+      );
+      await applying;
+      app.ctx.model = {
+        provider: "openai-codex",
+        id: "gpt-test",
+        api: "openai-codex-responses",
+      };
+      const changed = app.events.get("model_select")({}, app.ctx);
+      resume();
+      await Promise.all([rotation, changed]);
+      assert.equal(app.tokens.has("openai"), false);
+      assert.equal(app.tokens.get("openai-codex"), "legacy");
+      assert.equal(app.status().provider, "openai-codex");
+      assert.equal(
+        app.entries
+          .filter((entry) => entry.type === "custom")
+          .some(
+            (entry) =>
+              entry.data.provider === "openai" &&
+              entry.data.accountName === "spare",
+          ),
+        false,
+      );
+    });
+  });
+
+  await test("automatic switching preserves unmanaged legacy API keys too", async () => {
+    const app = instance("openai-codex", true);
+    app.tokens.set("openai-codex", "sk-legacy-key");
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      await app.events.get("before_agent_start")({}, app.ctx);
+      assert.equal(app.status().managesSelectedAuth, false);
+      assert.equal(app.tokens.get("openai-codex"), "sk-legacy-key");
+    } finally {
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+    assert.equal(app.tokens.get("openai-codex"), "sk-legacy-key");
   });
 } finally {
   globalThis.fetch = originalFetch;

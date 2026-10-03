@@ -79,6 +79,15 @@ final class DevelopmentReloader: ObservableObject {
       // Drain services while the main actor is alive so the child finalizers
       // and termination handler finish before launching a replacement.
       workspace.developmentReloadStatus = "正在停止旧版服务，等待安全重启…"
+      do {
+        // Must precede disconnectAll(): upstream otherwise treats this as quit
+        // and deletes the tunnel instead of handing it to the replacement.
+        try workspace.t3Bridge.prepareForUpdateRestart()
+      } catch {
+        workspace.developmentReloadStatus = "自动重启已取消：无法准备隧道交接，请检查服务目录权限。"
+        reloading = false
+        return
+      }
       workspace.disconnectAll()
       guard await workspace.t3Bridge.stopAndWait() else {
         workspace.developmentReloadStatus = "自动重启已取消：旧 T3 服务或服务锁未释放，请停止监听器后检查。"

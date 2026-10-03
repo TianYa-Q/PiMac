@@ -680,7 +680,6 @@ final class AppModel: ObservableObject {
       }
     }
   }
-  func scheduleCodexAccountRotation() {}
   func switchCodexAccount(to accountName: String) {
     guard canRestartSafely, supportsAccountSwitch else { return }
     performSessionControl("switch-account", accountName: accountName)

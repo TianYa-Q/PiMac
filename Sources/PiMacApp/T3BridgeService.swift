@@ -117,6 +117,12 @@ final class T3BridgeService: ObservableObject {
     }
   }
 
+  /// Call before disconnectAll(), which already sends EOF to the Server.
+  func prepareForUpdateRestart() throws {
+    guard process?.isRunning == true, let childLockFile else { return }
+    try T3UpdateRestart.prepare(in: childLockFile.deletingLastPathComponent())
+  }
+
   func stop() {
     generation = UUID()
     adminToken = ""

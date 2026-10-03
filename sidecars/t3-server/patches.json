@@ -1,4 +1,57 @@
 {
+  "apps/server/src/cloud/ManagedEndpointRuntime.ts": [
+    {
+      "oldText": "import * as Clock from \"effect/Clock\";",
+      "newText": "import * as Clock from \"effect/Clock\";\nimport { cloudflaredEnvironment } from \"pimac:cloudflared-transport.mjs\";"
+    },
+    {
+      "oldText": "            env: {\n              ...process.env,\n              TUNNEL_TOKEN: config.connectorToken,\n            },",
+      "newText": "            env: cloudflaredEnvironment(process.env, config.connectorToken),"
+    }
+  ],
+  "apps/server/src/review/ReviewService.ts": [
+    {
+      "oldText": "import * as ServerConfig from \"../config.ts\";",
+      "newText": "import * as ServerConfig from \"../config.ts\";\nimport * as ProjectStore from \"../orchestration-v2/ProjectStore.ts\";\nimport * as ProjectionStore from \"../orchestration-v2/ProjectionStore.ts\";"
+    },
+    {
+      "oldText": "  const config = yield* ServerConfig.ServerConfig;",
+      "newText": "  const config = yield* ServerConfig.ServerConfig;\n  const projects = yield* ProjectStore.ProjectStoreV2;\n  const projections = yield* ProjectionStore.ProjectionStoreV2;"
+    },
+    {
+      "oldText": "    return yield* new VcsRepositoryDetectionError({\n      operation,\n      cwd,",
+      "newText": "    // Pi Mac is a multi-project host: its config.cwd is the private state directory.\n    // Extend the original canonical-path bound only to official active project/thread roots.\n    const registered = yield* Effect.all([projects.list(), projections.getShellSnapshot({ location: \"active\" })]).pipe(\n      Effect.mapError((cause) => new VcsRepositoryDetectionError({ operation, cwd, detail: \"Failed to validate registered review roots.\", cause })),\n    );\n    const roots = [...registered[0].map((project) => project.workspaceRoot),\n      ...registered[1].threads.flatMap((thread) => thread.worktreePath ? [thread.worktreePath] : [])];\n    for (const root of roots) {\n      if (isWithinRoot(candidate, yield* canonicalizePath(root))) return;\n    }\n\n    return yield* new VcsRepositoryDetectionError({\n      operation,\n      cwd,"
+    }
+  ],
+  "apps/server/src/usage/UsageService.ts": [
+    {
+      "oldText": "import * as Schema from \"effect/Schema\";",
+      "newText": "import { collectPiUsage } from \"pimac:pi-mobile-usage.mjs\";\nimport * as Schema from \"effect/Schema\";",
+      "count": 1
+    },
+    {
+      "oldText": "    // The home resolvers ask for `Path` themselves; satisfy them from the",
+      "newText": "    // Pi Mac reports Pi history only, never unrelated native CLI transcripts.\n    return yield* Effect.promise(() => collectPiUsage());\n    // The home resolvers ask for `Path` themselves; satisfy them from the",
+      "count": 1
+    },
+    {
+      "oldText": "if (record.provider === \"codex\" && record.sessionId.length > 0) {",
+      "newText": "if (record.provider === \"codex\" && record.sessionId.length > 0 && !record.dedupeKey?.startsWith(\"pi:\")) {",
+      "count": 1
+    }
+  ],
+  "apps/server/src/usage/UsageLimitSources.ts": [
+    {
+      "oldText": "import * as Context from \"effect/Context\";",
+      "newText": "import { getNative } from \"pimac:native.mjs\";\nimport * as Context from \"effect/Context\";",
+      "count": 1
+    },
+    {
+      "oldText": "    yield* publish(snapshots);",
+      "newText": "    const piSources = yield* Effect.promise(() => getNative().mobileUsage.readLimits());\n    yield* publish([...snapshots, ...piSources]);",
+      "count": 1
+    }
+  ],
   "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts": [
     {
       "oldText": "  readonly toolArgs: Map<string, unknown>;",
@@ -115,6 +168,10 @@
   ],
   "apps/server/src/server.ts": [
     {
+      "oldText": "const ReviewLayerLive = ReviewService.layer.pipe(\n  Layer.provideMerge(GitVcsDriver.layer),",
+      "newText": "const ReviewLayerLive = ReviewService.layer.pipe(\n  Layer.provide(Layer.merge(ProjectStore.layer, ProjectionStoreV2.layer)),\n  Layer.provideMerge(GitVcsDriver.layer),"
+    },
+    {
       "oldText": "import * as NodeHttp from \"node:http\";",
       "newText": "import * as NodeHttp from \"node:http\";\nimport * as PiNative from \"pimac:native.mjs\";\nimport { NativeManagementLayer, NativeHttpPolicy, oauthAwareCommandReadiness } from \"pimac:management.mjs\";",
       "count": 1
@@ -149,13 +206,43 @@
   ],
   "apps/server/src/ws.ts": [
     {
+      "oldText": "              \"rpc.aggregate\": \"orchestrationV2\",\n              \"orchestration_v2.command_id\": command.commandId,",
+      "newText": "              \"rpc.aggregate\": \"orchestrationV2\",\n              \"pimac.dispatch_mode\": command.type === \"message.dispatch\" ? command.dispatchMode.type : undefined,\n              \"pimac.delivery_intent\": command.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n              \"orchestration_v2.command_id\": command.commandId,",
+      "count": 1
+    },
+    {
+      "oldText": "import * as Queue from \"effect/Queue\";",
+      "newText": "import { visibleProviders, subscribeModelPreferences } from \"pimac:model-preferences.mjs\";\nimport * as Queue from \"effect/Queue\";",
+      "count": 1
+    },
+    {
+      "oldText": "            providers,\n            availableEditors,",
+      "newText": "            providers: visibleProviders(providers),\n            availableEditors,",
+      "count": 1
+    },
+    {
+      "oldText": "              return { providers };",
+      "newText": "              return { providers: visibleProviders(providers) };",
+      "count": 1
+    },
+    {
+      "oldText": "                  providerRegistry.streamChanges,",
+      "newText": "                  Stream.merge(providerRegistry.streamChanges,\n                    Stream.callback<void>((queue) => Effect.acquireRelease(\n                      Effect.sync(() => subscribeModelPreferences(() => Queue.offerUnsafe(queue, undefined))),\n                      (unsubscribe) => Effect.sync(unsubscribe),\n                    )).pipe(Stream.mapEffect(() => providerRegistry.getProviders))),",
+      "count": 1
+    },
+    {
+      "oldText": "                // Both sides replay their current value, so the first pairing normally",
+      "newText": "                Stream.map(visibleProviders),\n                // Both sides replay their current value, so the first pairing normally",
+      "count": 1
+    },
+    {
       "oldText": "import {\n  sameUsageLimitCommandCoverage,",
-      "newText": "import * as PiNative from \"pimac:native.mjs\";\nimport {\n  sameUsageLimitCommandCoverage,",
+      "newText": "import * as PiNative from \"pimac:native.mjs\";\nimport { observeNativeRpc } from \"pimac:rpc-diagnostics.mjs\";\nimport {\n  sameUsageLimitCommandCoverage,",
       "count": 1
     },
     {
       "oldText": "authorizeEffect(requiredScopeForRpcMethod(method), effect),",
-      "newText": "PiNative.rpcAllowed(method) ? authorizeEffect(requiredScopeForRpcMethod(method), effect) : Effect.fail(authorizationError(requiredScopeForRpcMethod(method))),",
+      "newText": "observeNativeRpc(method, PiNative.rpcAllowed(method) ? authorizeEffect(requiredScopeForRpcMethod(method), effect) : Effect.fail(authorizationError(requiredScopeForRpcMethod(method))), traceAttributes, { allowed: PiNative.rpcAllowed(method), authorized: currentSession.scopes.includes(requiredScopeForRpcMethod(method)) }),",
       "count": 2
     },
     {

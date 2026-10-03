@@ -4,7 +4,11 @@ import Foundation
 struct WorkspaceProject: Identifiable, Hashable {
   let url: URL
   var id: String { url.standardizedFileURL.path }
-  var name: String { url.lastPathComponent }
+  var customName: String? = nil
+  var name: String {
+    let title = customName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return title.isEmpty ? url.lastPathComponent : title
+  }
 }
 
 /// Desktop workspace is a projection of T3 state plus local selection/drafts.
@@ -26,7 +30,17 @@ final class WorkspaceModel: ObservableObject {
   let telegram: TelegramControl
   let t3Bridge = T3BridgeService()
   let server = T3DesktopClient()
+  let git = GitWorkspaceStore()
+
+  var selectedGitDirectory: String? {
+    if let id = selectedModel?.threadID {
+      guard let thread = server.thread(id) else { return nil }
+      if let path = thread["worktreePath"] as? String, !path.isEmpty { return path }
+    }
+    return selectedModel?.projectURL?.path
+  }
   private var observations: [UUID: AnyCancellable] = [:]
+  private var gitObservation: AnyCancellable?
   private var draftObservations: [UUID: AnyCancellable] = [:]
   private var remoteSubmissionHolds: Set<ObjectIdentifier> = []
   private let persistsState: Bool
@@ -36,6 +50,9 @@ final class WorkspaceModel: ObservableObject {
   init(telegram: TelegramControl? = nil, restoreUserState: Bool = true) {
     self.telegram = telegram ?? TelegramControl()
     persistsState = restoreUserState
+    gitObservation = git.$busy.removeDuplicates().dropFirst().sink { [weak self] _ in
+      self?.objectWillChange.send()
+    }
     addTab(model: AppModel(restoreLastProjectOnLaunch: false), path: nil, draft: false)
     guard restoreUserState else { return }
     server.onShell = { [weak self] snapshot in self?.applyShell(snapshot) }
@@ -68,12 +85,15 @@ final class WorkspaceModel: ObservableObject {
 
   var selectedModel: AppModel? { tabs.first { $0.id == selectedTabID }?.model }
   var selectedProject: WorkspaceProject? {
-    selectedModel?.projectURL.map { WorkspaceProject(url: $0) }
+    selectedModel?.projectURL.map { url in
+      projects.first { $0.id == url.standardizedFileURL.path } ?? WorkspaceProject(url: url)
+    }
   }
   var restartBlockers: [String] {
     var reasons: [String] = []
     if persistsState && !server.isConnected { reasons.append("Server 未连接，无法确认空闲") }
     if server.hasRunningThread { reasons.append("Server 有运行中的线程") }
+    if git.busy { reasons.append("Git 操作进行中") }
     if !remoteSubmissionHolds.isEmpty { reasons.append("远程消息正在提交") }
     if !telegram.canRestartSafely { reasons.append("Telegram 有任务、队列或待发送回复") }
     if tabs.contains(where: { !$0.model.canRestartSafely }) { reasons.append("桌面有任务、排队消息或未确认操作") }
@@ -86,7 +106,7 @@ final class WorkspaceModel: ObservableObject {
   private func applyShell(_ snapshot: [String: Any]) {
     projects = (snapshot["projects"] as? [[String: Any]] ?? []).compactMap { project in
       guard let root = project["workspaceRoot"] as? String else { return nil }
-      return WorkspaceProject(url: URL(fileURLWithPath: root))
+      return WorkspaceProject(url: URL(fileURLWithPath: root), customName: project["title"] as? String)
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     for tab in tabs {
       tab.model.refreshCodexAccounts()
@@ -131,6 +151,17 @@ final class WorkspaceModel: ObservableObject {
       newSession(in: project.url)
     }
   }
+  func renameProject(_ project: WorkspaceProject, to name: String) {
+    let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !title.isEmpty, let id = server.projectID(for: project.url) else { return }
+    Task {
+      do {
+        try await server.dispatch(["type": "project.update", "projectId": id, "title": title])
+        try await server.refresh()
+      } catch { selectedModel?.statusText = "项目重命名未确认，请刷新 Server 状态。" }
+    }
+  }
+
   func removeProject(_ project: WorkspaceProject) {
     guard let id = server.projectID(for: project.url),
       !server.threads.contains(where: {

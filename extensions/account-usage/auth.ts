@@ -34,6 +34,7 @@ export class CodexSessionAuth {
     ctx: ExtensionContext,
     accountName: string,
     signal: AbortSignal,
+    canActivate: () => boolean = () => true,
   ): Promise<void> {
     signal.throwIfAborted();
     const credential = await this.readFreshCredential(accountName, signal);
@@ -46,6 +47,7 @@ export class CodexSessionAuth {
       if (resolved === credential.access) return;
     }
 
+    if (!canActivate()) throw new Error("账户切换已失去安全执行边界。");
     const runtime = getRuntimeAuthStorage(ctx);
     if (!runtime) {
       throw new Error("当前 Pi 版本不支持运行时切换 Codex 凭据。");
@@ -63,6 +65,7 @@ export class CodexSessionAuth {
         );
       }
       signal.throwIfAborted();
+      if (!canActivate()) throw new Error("账户切换已失去安全执行边界。");
       this.previousProviderConfig =
         ctx.modelRegistry.getRegisteredProviderConfig(this.providerId);
       ctx.modelRegistry.registerProvider(this.providerId, {
@@ -71,7 +74,10 @@ export class CodexSessionAuth {
       this.ownsProviderOverlay = true;
     }
 
+    signal.throwIfAborted();
+    if (!canActivate()) throw new Error("账户切换已失去安全执行边界。");
     await runtime.setRuntimeApiKey(this.providerId, credential.access);
+    signal.throwIfAborted();
     const resolved = await ctx.modelRegistry.getApiKeyForProvider(
       this.providerId,
     );
