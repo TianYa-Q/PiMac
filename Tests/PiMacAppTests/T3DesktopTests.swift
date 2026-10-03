@@ -239,7 +239,8 @@ struct T3DesktopTests {
     #expect(model.stats?.cost == nil)  // Upstream V2 does not report Pi cost.
     #expect(defaults.data(forKey: "t3DesktopShellCache") != nil)
     #expect(defaults.data(forKey: "t3DesktopV2Metrics.\(model.threadID!)") != nil)
-    #expect((model.outputTokensPerSecond ?? 0) > 0)  // Actual Pi response usage survives V2 wire decoding.
+    // Actual Pi response usage survives V2 wire decoding.
+    #expect((model.outputTokensPerSecond ?? 0) > 0)
     let beforeCompact = model.lastSettledTurnID
     model.compact()
     for _ in 0..<200 where model.lastSettledTurnID == beforeCompact || model.isBusy {

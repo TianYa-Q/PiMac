@@ -14,7 +14,8 @@ struct T3UpdateRestartTests {
     #expect(!FileManager.default.fileExists(atPath: marker.path))
     try T3UpdateRestart.prepare(in: root)
     #expect(FileManager.default.fileExists(atPath: marker.path))
-    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: marker.path)
+    try FileManager.default.setAttributes(
+      [.modificationDate: Date(timeIntervalSince1970: 0)], ofItemAtPath: marker.path)
     try T3UpdateRestart.prepare(in: root)
     let attributes = try FileManager.default.attributesOfItem(atPath: marker.path)
     #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
@@ -45,7 +46,8 @@ struct T3UpdateRestartTests {
       try FileManager.default.createDirectory(
         at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
-    try FileManager.default.createSymbolicLink(at: server.appendingPathComponent("runtime"), withDestinationURL: target)
+    try FileManager.default.createSymbolicLink(
+      at: server.appendingPathComponent("runtime"), withDestinationURL: target)
     #expect(throws: (any Error).self) { try T3UpdateRestart.prepare(in: root) }
     #expect(try FileManager.default.contentsOfDirectory(atPath: target.path).isEmpty)
   }

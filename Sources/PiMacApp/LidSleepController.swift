@@ -27,13 +27,16 @@ final class LidSleepController: ObservableObject {
     self.defaults = defaults
     refreshPasswordlessAccess()
     Task { [weak self] in
-      let available = await Task.detached { LidSleepPasswordlessAccess.existingPermissionAvailable() }.value
+      let available = await Task.detached {
+        LidSleepPasswordlessAccess.existingPermissionAvailable()
+      }.value
       self?.passwordlessAvailable = available
     }
   }
 
   private func refreshPasswordlessAccess() {
-    passwordlessConfigured = LidSleepPasswordlessAccess.rulePath(for: NSUserName())
+    passwordlessConfigured =
+      LidSleepPasswordlessAccess.rulePath(for: NSUserName())
       .map { FileManager.default.fileExists(atPath: $0) } ?? false
   }
 
@@ -44,7 +47,8 @@ final class LidSleepController: ObservableObject {
       defaults.set(false, forKey: Self.launchPreferenceKey)
       stop()
     }
-    let script = install
+    let script =
+      install
       ? LidSleepPasswordlessAccess.installationScript(for: NSUserName())
       : LidSleepPasswordlessAccess.removalScript(for: NSUserName(), restoreSleep: needsRestore)
     guard let script else {
@@ -94,8 +98,13 @@ final class LidSleepController: ObservableObject {
     let generation = UUID()
     sessionGeneration = generation
     Task {
-      let available = await Task.detached { LidSleepPasswordlessAccess.existingPermissionAvailable() }.value
-      guard sessionGeneration == generation else { busy = false; return }
+      let available = await Task.detached {
+        LidSleepPasswordlessAccess.existingPermissionAvailable()
+      }.value
+      guard sessionGeneration == generation else {
+        busy = false
+        return
+      }
       passwordlessAvailable = available
       refreshPasswordlessAccess()
       startSession(passwordless: available || passwordlessConfigured)
@@ -109,7 +118,8 @@ final class LidSleepController: ObservableObject {
     let folder = FileManager.default.temporaryDirectory
       .appendingPathComponent("pimac-awake-\(UUID().uuidString)", isDirectory: true)
     do {
-      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
+      try FileManager.default.createDirectory(
+        at: folder, withIntermediateDirectories: false,
         attributes: [.posixPermissions: 0o700])
       try Data().write(to: folder.appendingPathComponent("heartbeat"))
     } catch {
@@ -119,19 +129,26 @@ final class LidSleepController: ObservableObject {
     }
     directory = folder
     startHeartbeat()
-    let script = Self.watchdogScript(directory: folder.path,
+    let script = Self.watchdogScript(
+      directory: folder.path,
       pid: ProcessInfo.processInfo.processIdentifier, passwordless: passwordless)
     let command = "/bin/sh -c \(Self.shellQuote(script)) </dev/null >/dev/null 2>&1 & echo $!"
-    let appleScript = "do shell script \(Self.appleScriptQuote(command)) with administrator privileges"
+    let appleScript =
+      "do shell script \(Self.appleScriptQuote(command)) with administrator privileges"
     Task {
       let result = await Task.detached { () -> String? in
         if passwordless {
           // Check permission without changing power settings or prompting. A broken
           // installation must fail visibly, never silently fall back to a prompt.
           for value in ["0", "1"] {
-            if let error = Self.run(executable: "/usr/bin/sudo", arguments: [
-              "-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", value,
-            ]) { return error }
+            if let error = Self.run(
+              executable: "/usr/bin/sudo",
+              arguments: [
+                "-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", value,
+              ])
+            {
+              return error
+            }
           }
           return Self.run(executable: "/bin/sh", arguments: ["-c", command])
         }
@@ -146,7 +163,8 @@ final class LidSleepController: ObservableObject {
           if let state = readState() {
             if state == "conflict" || state == "error" {
               stop()
-              status = state == "conflict"
+              status =
+                state == "conflict"
                 ? "系统已由其他工具禁用休眠，请先恢复后再启用。"
                 : "系统拒绝修改休眠设置，未启用。"
             } else {
@@ -215,8 +233,11 @@ final class LidSleepController: ObservableObject {
 
   private func readState() -> String? {
     guard let directory else { return nil }
-    let stateDirectory = sessionPasswordless ? directory : URL(fileURLWithPath: "/private/var/run")
-      .appendingPathComponent(directory.lastPathComponent)
+    let stateDirectory =
+      sessionPasswordless
+      ? directory
+      : URL(fileURLWithPath: "/private/var/run")
+        .appendingPathComponent(directory.lastPathComponent)
     let stateURL = stateDirectory.appendingPathComponent("state")
     guard let attributes = try? FileManager.default.attributesOfItem(atPath: stateURL.path),
       let modified = attributes[.modificationDate] as? Date,
@@ -240,7 +261,8 @@ final class LidSleepController: ObservableObject {
   }
 
   nonisolated static func appleScriptQuote(_ value: String) -> String {
-    "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
+    "\""
+      + value.replacingOccurrences(of: "\\", with: "\\\\")
       .replacingOccurrences(of: "\"", with: "\\\"")
       .replacingOccurrences(of: "\n", with: "\\n") + "\""
   }
@@ -261,7 +283,8 @@ final class LidSleepController: ObservableObject {
       let data = errors.fileHandleForReading.readDataToEndOfFile()
       process.waitUntilExit()
       guard process.terminationStatus != 0 else { return nil }
-      let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+      let message = String(data: data, encoding: .utf8)?.trimmingCharacters(
+        in: .whitespacesAndNewlines)
       let error = message.flatMap { $0.isEmpty ? nil : $0 } ?? "命令失败、授权失败或已取消"
       LidSleepDiagnostics.record("\(executable) 退出码 \(process.terminationStatus)：\(error)")
       return error
@@ -288,52 +311,56 @@ final class LidSleepController: ObservableObject {
     fi
     """
 
-  nonisolated static func watchdogScript(directory: String, pid: Int32, passwordless: Bool = false) -> String {
+  nonisolated static func watchdogScript(directory: String, pid: Int32, passwordless: Bool = false)
+    -> String
+  {
     // The passwordless watchdog is NOT root: only the exact pmset commands use sudo.
     // Legacy authorized mode passes code inline, never reads a user-writable script.
-    let stateDirectory = passwordless ? directory
+    let stateDirectory =
+      passwordless
+      ? directory
       : "/private/var/run/" + URL(fileURLWithPath: directory).lastPathComponent
     let powerCommand = passwordless ? "/usr/bin/sudo -n /usr/bin/pmset" : "/usr/bin/pmset"
     let cleanup = passwordless ? ":" : "/bin/rm -rf \"$stateDir\""
     return """
-    dir=\(shellQuote(directory))
-    stateDir=\(shellQuote(stateDirectory))
-    umask 022
-    # Root mode must never write into the user's lease directory.
-    \(passwordless ? ":" : "/bin/mkdir -m 755 \"$stateDir\" || exit 1")
-    trap '\(cleanup)' EXIT
-    original=$(/usr/bin/pmset -g | /usr/bin/awk '$1 == "SleepDisabled" {print $2; exit}')
-    if [ "$original" != 0 ]; then
-      echo conflict > "$stateDir/state"
-      /bin/sleep 3
-      exit 1
-    fi
-    trap '\(powerCommand) -a disablesleep 0; \(cleanup)' EXIT
-    trap 'exit' HUP INT TERM
-    current=0
-    while /bin/kill -0 \(pid) 2>/dev/null; do
-      stamp=$(/usr/bin/stat -f %m "$dir/heartbeat" 2>/dev/null) || break
-      now=$(/bin/date +%s)
-      [ "$((now - stamp))" -le 10 ] || break
-      desired=0
-      state=battery
-      if /usr/bin/pmset -g batt | /usr/bin/grep -q "Now drawing from 'AC Power'"; then
-        desired=1
-        state=ac
+      dir=\(shellQuote(directory))
+      stateDir=\(shellQuote(stateDirectory))
+      umask 022
+      # Root mode must never write into the user's lease directory.
+      \(passwordless ? ":" : "/bin/mkdir -m 755 \"$stateDir\" || exit 1")
+      trap '\(cleanup)' EXIT
+      original=$(/usr/bin/pmset -g | /usr/bin/awk '$1 == "SleepDisabled" {print $2; exit}')
+      if [ "$original" != 0 ]; then
+        echo conflict > "$stateDir/state"
+        /bin/sleep 3
+        exit 1
       fi
-      if [ "$desired" != "$current" ]; then
-        if ! \(powerCommand) -a disablesleep "$desired"; then
-          echo error > "$stateDir/state"
-          /bin/sleep 3
-          exit 1
+      trap '\(powerCommand) -a disablesleep 0; \(cleanup)' EXIT
+      trap 'exit' HUP INT TERM
+      current=0
+      while /bin/kill -0 \(pid) 2>/dev/null; do
+        stamp=$(/usr/bin/stat -f %m "$dir/heartbeat" 2>/dev/null) || break
+        now=$(/bin/date +%s)
+        [ "$((now - stamp))" -le 10 ] || break
+        desired=0
+        state=battery
+        if /usr/bin/pmset -g batt | /usr/bin/grep -q "Now drawing from 'AC Power'"; then
+          desired=1
+          state=ac
         fi
-        current=$desired
-      fi
-      \(displaySleepScript)
-      echo "$state" > "$stateDir/state" || break
-      /bin/sleep 2
-    done
-    """
+        if [ "$desired" != "$current" ]; then
+          if ! \(powerCommand) -a disablesleep "$desired"; then
+            echo error > "$stateDir/state"
+            /bin/sleep 3
+            exit 1
+          fi
+          current=$desired
+        fi
+        \(displaySleepScript)
+        echo "$state" > "$stateDir/state" || break
+        /bin/sleep 2
+      done
+      """
   }
 }
 
@@ -347,25 +374,34 @@ struct LidSleepSettingsView: View {
   var body: some View {
     GroupBox("插电合盖运行") {
       VStack(alignment: .leading, spacing: 10) {
-        Toggle("合盖不休眠", isOn: Binding(
-          get: { controller.enabled },
-          set: { value in
-            if value { confirming = true } else { controller.setEnabled(false) }
-          }))
-          .disabled(controller.busy)
+        Toggle(
+          "合盖不休眠",
+          isOn: Binding(
+            get: { controller.enabled },
+            set: { value in
+              if value { confirming = true } else { controller.setEnabled(false) }
+            })
+        )
+        .disabled(controller.busy)
         Toggle("启动时开启", isOn: $enableOnLaunch)
           .disabled(controller.busy)
         HStack {
-          Text(controller.passwordlessConfigured ? "免密码已配置"
-            : (controller.passwordlessAvailable ? "已有免密码权限" : "未配置免密码"))
-            .font(.caption).foregroundStyle(.secondary)
+          Text(
+            controller.passwordlessConfigured
+              ? "免密码已配置"
+              : (controller.passwordlessAvailable ? "已有免密码权限" : "未配置免密码")
+          )
+          .font(.caption).foregroundStyle(.secondary)
           Spacer()
           Button(controller.passwordlessConfigured ? "移除权限" : "配置免密码") {
             installingAccess = !controller.passwordlessConfigured
             confirmingAccess = true
           }
-          .disabled(controller.busy || (!controller.passwordlessConfigured
-            && (controller.enabled || controller.passwordlessAvailable)))
+          .disabled(
+            controller.busy
+              || (!controller.passwordlessConfigured
+                && (controller.enabled || controller.passwordlessAvailable))
+          )
           .help("配置前请先关闭合盖运行；移除权限需要管理员授权。")
         }
         Text(controller.status).font(.caption).foregroundStyle(.secondary)
@@ -386,21 +422,25 @@ struct LidSleepSettingsView: View {
       .padding(.vertical, 4)
     }
     .confirmationDialog("允许插电合盖运行？", isPresented: $confirming, titleVisibility: .visible) {
-      Button(controller.passwordlessAvailable || controller.passwordlessConfigured ? "开启" : "授权并开启") { controller.setEnabled(true) }
+      Button(controller.passwordlessAvailable || controller.passwordlessConfigured ? "开启" : "授权并开启")
+      { controller.setEnabled(true) }
       Button("取消", role: .cancel) {}
     } message: {
       Text("将修改系统休眠开关。未配置免密码权限时需要管理员授权。成功开启后，下次启动软件也会自动尝试开启；手动关闭即可取消。请确保散热，并避免同时运行其他防休眠工具。")
     }
-    .confirmationDialog(installingAccess ? "配置一次授权免密码开启？" : "移除免密码权限？",
-      isPresented: $confirmingAccess, titleVisibility: .visible) {
+    .confirmationDialog(
+      installingAccess ? "配置一次授权免密码开启？" : "移除免密码权限？",
+      isPresented: $confirmingAccess, titleVisibility: .visible
+    ) {
       Button(installingAccess ? "授权、配置并开启" : "授权并移除") {
         controller.configurePasswordlessAccess(install: installingAccess)
       }
       Button("取消", role: .cancel) {}
     } message: {
-      Text(installingAccess
-        ? "将为当前账户安装一条 sudoers 规则，仅允许免密码执行 pmset -a disablesleep 0 和 1。其他以此账户运行的程序也能切换此开关，但不能借此执行任意管理员命令。不保存密码，不安装系统服务。"
-        : "将关闭合盖运行及自动开启，并删除 Pi Mac 为当前账户安装的规则。移除需要管理员授权。")
+      Text(
+        installingAccess
+          ? "将为当前账户安装一条 sudoers 规则，仅允许免密码执行 pmset -a disablesleep 0 和 1。其他以此账户运行的程序也能切换此开关，但不能借此执行任意管理员命令。不保存密码，不安装系统服务。"
+          : "将关闭合盖运行及自动开启，并删除 Pi Mac 为当前账户安装的规则。移除需要管理员授权。")
     }
   }
 }

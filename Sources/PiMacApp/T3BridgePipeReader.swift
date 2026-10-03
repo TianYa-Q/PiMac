@@ -20,7 +20,10 @@ enum T3BridgePipeReader {
           Darwin.read(handle.fileDescriptor, $0.baseAddress, $0.count)
         }
         if count < 0 && errno == EINTR { continue }
-        guard count > 0 else { return }
+        guard count > 0 else {
+          if count == 0, let tail = decoder.finish() { onRecord?(tail) }
+          return
+        }
         guard let onRecord else { continue }
         for record in decoder.append(Data(bytes.prefix(count))) { onRecord(record) }
       }

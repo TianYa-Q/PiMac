@@ -182,7 +182,8 @@ final class T3BridgeService: ObservableObject {
       try? await Task.sleep(for: .milliseconds(50))
     }
     let cleared = !isStopping && childLeaseHasCleared
-    NSLog("Pi Mac T3 shutdown barrier: cleared=%d, stopping=%d, childLeaseAvailable=%d",
+    NSLog(
+      "Pi Mac T3 shutdown barrier: cleared=%d, stopping=%d, childLeaseAvailable=%d",
       cleared, isStopping, childLeaseHasCleared)
     return cleared
   }
@@ -258,7 +259,8 @@ final class T3BridgeService: ObservableObject {
     struct Response: Decodable { let payload: String }
     let response: Response = try await admin(
       "account-status", method: "POST", body: ["provider": provider, "force": force])
-    return try JSONSerialization.jsonObject(with: Data(response.payload.utf8)) as? [String: Any] ?? [:]
+    return try JSONSerialization.jsonObject(with: Data(response.payload.utf8)) as? [String: Any]
+      ?? [:]
   }
 
   func desktopCredential() async throws -> String {

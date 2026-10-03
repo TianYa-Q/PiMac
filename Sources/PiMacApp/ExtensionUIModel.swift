@@ -41,6 +41,7 @@ final class ExtensionUIModel: ObservableObject {
   private var displayedUsageProvider = AccountUsageProvider.legacyCodex
   private var sessionAccountSelections: [ObjectIdentifier: SessionAccountSelection] = [:]
   private var awaitingSessionStatus: Set<ObjectIdentifier> = []
+  private var sessionStatuses: [ObjectIdentifier: [String: String]] = [:]
 
   func sessionWillChange(for source: AppModel) {
     awaitingSessionStatus.insert(ObjectIdentifier(source))
@@ -52,6 +53,7 @@ final class ExtensionUIModel: ObservableObject {
 
   func selectSource(_ source: AppModel?) {
     selectedSource = source
+    applyStatusesForSelectedSource()
     // A newly created/resumed process has not reported its session account yet. Keep showing
     // the previous account meanwhile instead of briefly replacing the quota card with
     // “等待扩展提供账户信息…”. Its first status payload will apply the new selection.
@@ -115,7 +117,9 @@ final class ExtensionUIModel: ObservableObject {
   /// Expired or closed server requests must disappear without replaying a reply.
   func reconcileRequests(ids: Set<String>, from source: AppModel) {
     queuedDialogs.removeAll { $0.source === source && !ids.contains($0.dialog.id) }
-    if let presentedDialog, presentedDialog.source === source, !ids.contains(presentedDialog.dialog.id) {
+    if let presentedDialog, presentedDialog.source === source,
+      !ids.contains(presentedDialog.dialog.id)
+    {
       self.presentedDialog = nil
       dialog = nil
       presentNextDialog()
@@ -146,6 +150,7 @@ final class ExtensionUIModel: ObservableObject {
   func removeRequests(from source: AppModel) {
     awaitingSessionStatus.remove(ObjectIdentifier(source))
     sessionAccountSelections.removeValue(forKey: ObjectIdentifier(source))
+    sessionStatuses.removeValue(forKey: ObjectIdentifier(source))
     if selectedSource === source { selectSource(nil) }
 
     cancelDialogs(from: source)
@@ -188,12 +193,20 @@ final class ExtensionUIModel: ObservableObject {
 
     let text = Self.removingANSIEscapes(rawText)
       .trimmingCharacters(in: .whitespacesAndNewlines)
+    let sourceID = ObjectIdentifier(source)
     if !text.isEmpty {
-      if statuses[key] != text { statuses[key] = text }
-    } else if key != "account-usage", statuses[key] != nil {
-      // Keep the latest multi-account quota summary; transient statuses may clear themselves.
-      statuses.removeValue(forKey: key)
+      sessionStatuses[sourceID, default: [:]][key] = text
+    } else if key != "account-usage" {
+      // Keep the latest quota summary within this session, never another session's status.
+      sessionStatuses[sourceID]?.removeValue(forKey: key)
     }
+    if selectedSource == nil { selectedSource = source }
+    applyStatusesForSelectedSource()
+  }
+
+  private func applyStatusesForSelectedSource() {
+    let next = selectedSource.flatMap { sessionStatuses[ObjectIdentifier($0)] } ?? [:]
+    if statuses != next { statuses = next }
   }
 
   private func dismissCompletedLoginDialogs(from source: AppModel) {

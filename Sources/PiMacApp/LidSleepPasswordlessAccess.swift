@@ -11,11 +11,13 @@ enum LidSleepPasswordlessAccess {
     var allowed = Set<String>()
     for line in listing.components(separatedBy: .newlines) {
       guard line.contains("(ALL)") || line.contains("(root)"),
-        let marker = line.range(of: "NOPASSWD:"), line.range(of: "PASSWD:", range: marker.upperBound..<line.endIndex) == nil
+        let marker = line.range(of: "NOPASSWD:"),
+        line.range(of: "PASSWD:", range: marker.upperBound..<line.endIndex) == nil
       else { continue }
-      allowed.formUnion(line[marker.upperBound...].split(separator: ",").map {
-        $0.trimmingCharacters(in: .whitespacesAndNewlines)
-      })
+      allowed.formUnion(
+        line[marker.upperBound...].split(separator: ",").map {
+          $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        })
     }
     return required.isSubset(of: allowed)
   }
@@ -25,7 +27,9 @@ enum LidSleepPasswordlessAccess {
     let output = Pipe()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
     process.arguments = ["-n", "-l"]
-    process.environment = ProcessInfo.processInfo.environment.merging(["LC_ALL": "C"]) { _, new in new }
+    process.environment = ProcessInfo.processInfo.environment.merging(["LC_ALL": "C"]) { _, new in
+      new
+    }
     process.standardOutput = output
     process.standardError = FileHandle.nullDevice
     process.standardInput = FileHandle.nullDevice
@@ -54,7 +58,9 @@ enum LidSleepPasswordlessAccess {
   }
 
   static func installationScript(for username: String) -> String? {
-    guard let path = rulePath(for: username), let content = ruleContent(for: username) else { return nil }
+    guard let path = rulePath(for: username), let content = ruleContent(for: username) else {
+      return nil
+    }
     return """
       set -eu
       /usr/sbin/visudo -c >/dev/null

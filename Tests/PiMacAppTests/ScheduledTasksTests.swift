@@ -225,6 +225,89 @@ struct ScheduledTasksTests {
     #expect(mutations == 1)
   }
 
+  @Test func validationErrorDoesNotBlockCorrectedDraft() async throws {
+    var calls = 0
+    let store = ScheduledTasksStore { _, _ in
+      calls += 1
+      return ["tasks": [row()]]
+    }
+    var draft = ScheduledTaskDraft(projectID: "project", modelID: "test/model")
+    #expect(await store.save(draft) == false)
+    #expect(store.errorMessage != nil)
+    #expect(!store.requiresRefresh)
+    #expect(calls == 0)
+    draft.title = "Valid"
+    draft.prompt = "Review"
+    #expect(await store.save(draft))
+    #expect(store.errorMessage == nil)
+    #expect(store.lastRefreshedAt != nil)
+    #expect(calls == 2)
+  }
+
+  @Test func duplicateAndEmptyIDsDoNotReplaceAuthoritativeRows() async throws {
+    var rows = [row()]
+    let store = ScheduledTasksStore { _, _ in ["tasks": rows] }
+    await store.refresh()
+    let refreshedAt = store.lastRefreshedAt
+    rows = [row(), row()]
+    await store.refresh()
+    #expect(store.tasks.count == 1)
+    #expect(store.requiresRefresh)
+    #expect(store.lastRefreshedAt == refreshedAt)
+    rows = [row(id: "")]
+    await store.refresh()
+    #expect(store.tasks.first?.id == "task")
+    #expect(store.requiresRefresh)
+    rows = [row(id: "recovered")]
+    await store.refresh()
+    #expect(!store.requiresRefresh)
+    #expect(store.tasks.first?.id == "recovered")
+  }
+
+  @Test func copiedTaskIsPausedAndDoesNotReuseExecutionIdentityOrBinding() throws {
+    let task = try DesktopScheduledTask(row())
+    let first = ScheduledTaskDraft(copying: task)
+    let second = ScheduledTaskDraft(copying: task)
+    #expect(first.id != task.id)
+    #expect(first.id != second.id)
+    #expect(first.original == nil)
+    #expect(!first.enabled)
+    #expect(first.prompt == task.prompt)
+    #expect(first.weekdays == [1, 3, 5])
+    let payload = try first.payload()
+    #expect(payload["requireExisting"] == nil)
+    #expect(payload["threadId"] is NSNull)
+    #expect((payload["workspaceStrategy"] as? [String: Any])?["type"] as? String == "root")
+    #expect(payload["runtimeMode"] as? String == "approval-required")
+    #expect(payload["createdBy"] as? String == "user")
+    #expect((payload["modelSelection"] as? [String: Any])?["options"] == nil)
+  }
+
+  @Test func searchMatchesAllTermsAndCombinesWithStateFilters() throws {
+    let first = try DesktopScheduledTask(row(id: "one"))
+    var other = row(id: "two", enabled: false)
+    other["title"] = "Nightly"
+    other["lastRunStatus"] = "failed"
+    other["lastRunError"] = "Connection lost"
+    let second = try DesktopScheduledTask(other)
+    let tasks = [first, second]
+    #expect(
+      ScheduledTaskPresentation.visibleTasks(tasks, query: "DAILY review", filter: .all).map(\.id)
+        == ["one"])
+    #expect(
+      ScheduledTaskPresentation.visibleTasks(tasks, query: "", filter: .paused).map(\.id) == ["two"]
+    )
+    #expect(
+      ScheduledTaskPresentation.visibleTasks(tasks, query: "connection", filter: .failed).map(\.id)
+        == ["two"])
+    #expect(
+      ScheduledTaskPresentation.visibleTasks(tasks, query: "Nightly", filter: .enabled).isEmpty)
+    #expect(
+      ScheduledTaskPresentation.visibleTasks(
+        tasks, query: "PiMac test/model", filter: .all, projectTitles: ["project": "PiMac"]
+      ).count == 2)
+  }
+
   @Test(.timeLimit(.minutes(1)))
   func desktopSchedulerRPCsReachTheOfficialServerAndPi() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

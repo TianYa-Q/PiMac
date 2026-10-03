@@ -20,6 +20,44 @@ struct JSONLineDecoderTests {
     #expect(decoder.finish() == nil)
   }
 
+  @Test func oversizedRecordsAreDroppedWithoutLeakingFragmentsIntoFollowingRecords() {
+    let decoder = JSONLineDecoder(maxRecordBytes: 8)
+    #expect(decoder.append(Data("12345678".utf8)).isEmpty)
+    #expect(decoder.append(Data("9tail".utf8)).isEmpty)
+    #expect(decoder.droppedRecordCount == 1)
+    #expect(
+      decoder.append(Data("\nvalid\n123456789\nok\n".utf8)) == [
+        Data("valid".utf8), Data("ok".utf8),
+      ])
+    #expect(decoder.droppedRecordCount == 2)
+    #expect(decoder.finish() == nil)
+  }
+
+  @Test func finishFlushesTailAndResetsDiscardState() {
+    let decoder = JSONLineDecoder(maxRecordBytes: 8)
+    #expect(decoder.append(Data("tail\r".utf8)).isEmpty)
+    #expect(decoder.finish() == Data("tail".utf8))
+    #expect(decoder.finish() == nil)
+    #expect(decoder.append(Data("123456789".utf8)).isEmpty)
+    #expect(decoder.finish() == nil)
+    #expect(decoder.append(Data("ok\n".utf8)) == [Data("ok".utf8)])
+    #expect(decoder.append(Data("12345678\n".utf8)) == [Data("12345678".utf8)])
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func bridgePipeDeliversUnterminatedTailAtEOF() async throws {
+    let pipe = Pipe()
+    let payload = Data("{\"ready\":true}".utf8)
+    try pipe.fileHandleForWriting.write(contentsOf: payload)
+    try pipe.fileHandleForWriting.close()
+    let record: Data = await withCheckedContinuation { continuation in
+      T3BridgePipeReader.start(pipe.fileHandleForReading) { record in
+        continuation.resume(returning: record)
+      }
+    }
+    #expect(record == payload)
+  }
+
   @Test
   func decodesLargeRecordAcrossSmallPipeReads() {
     let decoder = JSONLineDecoder()

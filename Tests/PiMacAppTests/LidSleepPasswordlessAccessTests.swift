@@ -1,9 +1,12 @@
 import Foundation
 import Testing
+
 @testable import PiMacApp
 
 struct LidSleepPasswordlessAccessTests {
-  @Test(arguments: ["user\n", "user;id", "../root", "user name", "user:ALL", "", "root\nALL=(ALL) ALL"])
+  @Test(arguments: [
+    "user\n", "user;id", "../root", "user name", "user:ALL", "", "root\nALL=(ALL) ALL",
+  ])
   func unsafeUsernamesAreRejected(username: String) {
     #expect(LidSleepPasswordlessAccess.rulePath(for: username) == nil)
     #expect(LidSleepPasswordlessAccess.ruleContent(for: username) == nil)
@@ -18,8 +21,11 @@ struct LidSleepPasswordlessAccessTests {
           (ALL) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0
       """
     #expect(LidSleepPasswordlessAccess.hasExistingPermission(in: listing))
-    #expect(LidSleepPasswordlessAccess.hasExistingPermission(in:
-      "(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0\n(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1"))
+    #expect(
+      LidSleepPasswordlessAccess.hasExistingPermission(
+        in:
+          "(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0\n(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1"
+      ))
   }
 
   @Test(arguments: [
@@ -54,12 +60,13 @@ struct LidSleepPasswordlessAccessTests {
 
   @Test func setupScriptsHaveValidSyntaxAndDoNotOverwriteExistingFiles() throws {
     let install = try #require(LidSleepPasswordlessAccess.installationScript(for: "pimac_test"))
-    let remove = try #require(LidSleepPasswordlessAccess.removalScript(for: "pimac_test", restoreSleep: false))
+    let remove = try #require(
+      LidSleepPasswordlessAccess.removalScript(for: "pimac_test", restoreSleep: false))
     #expect(install.contains("/usr/sbin/visudo -cf"))
     #expect(install.contains("/bin/chmod 440"))
     #expect(install.contains("[ ! -L \"$target\" ]"))
     #expect(install.contains("/bin/ln \"$tmp\" \"$target\""))
-    #expect(!remove.contains("pmset")) // Do not undo another tool's switch when not active.
+    #expect(!remove.contains("pmset"))  // Do not undo another tool's switch when not active.
     #expect(remove.contains("/private/etc/sudoers.d/pimac-lid-sleep-pimac_test"))
     for script in [install, remove] {
       let process = Process()
@@ -72,7 +79,8 @@ struct LidSleepPasswordlessAccessTests {
   }
 
   @Test func passwordlessWatchdogUsesSudoOnlyForSleepSwitch() throws {
-    let script = LidSleepController.watchdogScript(directory: "/tmp/pimac-test", pid: 123, passwordless: true)
+    let script = LidSleepController.watchdogScript(
+      directory: "/tmp/pimac-test", pid: 123, passwordless: true)
     #expect(script.contains("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep \"$desired\""))
     #expect(script.contains("trap '/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0; :"))
     #expect(script.contains("stateDir='/tmp/pimac-test'"))

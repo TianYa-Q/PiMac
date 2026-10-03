@@ -8,7 +8,10 @@ struct DevelopmentReloadState {
 
   mutating func observeIdle(_ idle: Bool, now: Date) -> Bool {
     guard phase == .watching else { return false }
-    if !idle { idleSince = nil; return false }
+    if !idle {
+      idleSince = nil
+      return false
+    }
     if idleSince == nil { idleSince = now }
     return now.timeIntervalSince(idleSince!) >= 2
   }

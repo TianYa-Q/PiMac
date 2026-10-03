@@ -1,5 +1,6 @@
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { logQuotaFailure } from "./diagnostics.js";
+import { readBoundedJson } from "./http.js";
 import { getCodexOAuth } from "./oauth.js";
 import { createAccountStore } from "./store.js";
 import type {
@@ -106,10 +107,14 @@ async function requestUsage(
   if (!accountId) throw new Error("OAuth 凭据缺少 ChatGPT account ID。");
 
   const controller = new AbortController();
-  const abort = () => controller.abort();
-  if (ownerSignal.aborted) controller.abort();
+  const abort = () => controller.abort(ownerSignal.reason);
+  if (ownerSignal.aborted) abort();
   else ownerSignal.addEventListener("abort", abort, { once: true });
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(
+    () =>
+      controller.abort(new DOMException("额度接口请求超时。", "TimeoutError")),
+    REQUEST_TIMEOUT_MS,
+  );
 
   try {
     const response = await fetch(USAGE_URL, {
@@ -122,12 +127,17 @@ async function requestUsage(
       signal: controller.signal,
     });
     if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
       throw new HttpStatusError(
         response.status,
         `额度接口返回 HTTP ${response.status}。`,
       );
     }
-    const body = await readBoundedJson(response);
+    const body = await readBoundedJson(
+      response,
+      MAX_BODY_BYTES,
+      controller.signal,
+    );
     const rateLimit = asRecord(body.rate_limit);
     if (!rateLimit) throw new Error("额度接口缺少 rate_limit 数据。");
     const primary = parseWindow(rateLimit.primary_window);
@@ -173,8 +183,11 @@ async function requestResetCredits(
     });
     // Reset credits are supplementary. Unsupported plans/endpoints must not hide
     // otherwise valid usage windows.
-    if (!response.ok) return undefined;
-    const body = await readBoundedJson(response);
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      return undefined;
+    }
+    const body = await readBoundedJson(response, MAX_BODY_BYTES, signal);
     const rawCount = finiteNumber(body.available_count);
     if (rawCount === undefined || rawCount < 0) return undefined;
     const credits = Array.isArray(body.credits)
@@ -211,26 +224,6 @@ async function requestResetCredits(
     }
     return undefined;
   }
-}
-
-async function readBoundedJson(
-  response: Response,
-): Promise<Record<string, unknown>> {
-  const length = Number(response.headers.get("content-length"));
-  if (Number.isFinite(length) && length > MAX_BODY_BYTES)
-    throw new Error("额度响应过大。");
-  const text = await response.text();
-  if (Buffer.byteLength(text, "utf8") > MAX_BODY_BYTES)
-    throw new Error("额度响应过大。");
-  let value: unknown;
-  try {
-    value = JSON.parse(text) as unknown;
-  } catch {
-    throw new Error("额度接口返回了无效 JSON。");
-  }
-  const record = asRecord(value);
-  if (!record) throw new Error("额度接口返回结构无效。");
-  return record;
 }
 
 function parseWindow(value: unknown): UsageWindow | undefined {

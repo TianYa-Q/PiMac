@@ -290,7 +290,9 @@ final class T3DesktopClient: ObservableObject {
     case "compact": return "/compact"
     case "manage-accounts": return "/accounts"
     case "switch-account":
-      guard let accountName, isSwitchableAccountName(accountName) else { throw ClientError.rejected }
+      guard let accountName, isSwitchableAccountName(accountName) else {
+        throw ClientError.rejected
+      }
       return "/accounts switch \(accountName)"
     default: throw ClientError.rejected
     }
@@ -318,8 +320,11 @@ final class T3DesktopClient: ObservableObject {
     try await dispatch(command)
   }
 
-  func accountStatus(threadID: String, provider: String? = nil, force: Bool = false) async throws -> JSON? {
-    guard let service, let provider, ["openai", "openai-codex", "antigravity"].contains(provider) else { return nil }
+  func accountStatus(threadID: String, provider: String? = nil, force: Bool = false) async throws
+    -> JSON?
+  {
+    guard let service, let provider, ["openai", "openai-codex", "antigravity"].contains(provider)
+    else { return nil }
     return try await service.accountStatus(provider: provider, force: force)
   }
 
@@ -357,15 +362,22 @@ final class T3DesktopClient: ObservableObject {
     }
   }
   func scheduledTasksRPC(_ method: String, payload: JSON = [:]) async throws -> JSON {
-    guard ["scheduledTasks.list", "scheduledTasks.upsert", "scheduledTasks.setEnabled",
-      "scheduledTasks.delete", "scheduledTasks.runNow"].contains(method)
+    guard
+      [
+        "scheduledTasks.list", "scheduledTasks.upsert", "scheduledTasks.setEnabled",
+        "scheduledTasks.delete", "scheduledTasks.runNow",
+      ].contains(method)
     else { throw ClientError.rejected }
     guard isConnected else { throw ClientError.unavailable }
     return try await rpc(method, payload: payload)
   }
 
   func gitRPC(_ method: String, payload: JSON) async throws -> JSON {
-    guard ["vcs.refreshStatus", "vcs.listRefs", "vcs.pull", "vcs.createRef", "vcs.switchRef", "review.getDiffPreview"].contains(method)
+    guard
+      [
+        "vcs.refreshStatus", "vcs.listRefs", "vcs.pull", "vcs.createRef", "vcs.switchRef",
+        "review.getDiffPreview",
+      ].contains(method)
     else { throw ClientError.rejected }
     guard isConnected else { throw ClientError.unavailable }
     return try await rpc(method, payload: payload, timeoutSeconds: 120)
@@ -440,7 +452,9 @@ final class T3DesktopClient: ObservableObject {
         if response["_tag"] as? String == "Chunk" {
           for event in response["values"] as? [JSON] ?? [] { receive?(event) }
           let ack: JSON = ["_tag": "Ack", "requestId": id]
-          try await socket.send(.string(String(decoding: try JSONSerialization.data(withJSONObject: ack), as: UTF8.self)))
+          try await socket.send(
+            .string(
+              String(decoding: try JSONSerialization.data(withJSONObject: ack), as: UTF8.self)))
           continue
         }
         guard response["_tag"] as? String == "Exit", let exit = response["exit"] as? JSON

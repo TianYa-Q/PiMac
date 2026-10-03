@@ -12,7 +12,10 @@ struct T3LifecycleTests {
     defer { try? FileManager.default.removeItem(at: root) }
     let workspace = WorkspaceModel(restoreUserState: false)
     let service = T3BridgeService(stateDirectory: root)
-    defer { service.stop(); workspace.disconnectAll() }
+    defer {
+      service.stop()
+      workspace.disconnectAll()
+    }
     let marker = root.appendingPathComponent("child-owner.json")
     func ownerPID() throws -> Int32 {
       let data = try Data(contentsOf: marker)

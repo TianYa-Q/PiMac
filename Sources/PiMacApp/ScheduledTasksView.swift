@@ -9,6 +9,8 @@ struct ScheduledTasksView: View {
   @State private var editor: ScheduledTaskDraft?
   @State private var deleting: DesktopScheduledTask?
   @State private var running: DesktopScheduledTask?
+  @State private var searchText = ""
+  @State private var filter = ScheduledTaskFilter.all
 
   init(workspace: WorkspaceModel) {
     self.workspace = workspace
@@ -20,7 +22,14 @@ struct ScheduledTasksView: View {
   }
 
   private var busy: Bool { store.isLoading || store.isMutating }
-  private var canAct: Bool { server.isConnected && !busy && store.errorMessage == nil }
+  private var canAct: Bool { server.isConnected && !busy && !store.requiresRefresh }
+  private var visibleTasks: [DesktopScheduledTask] {
+    let projects = server.projects.reduce(into: [String: String]()) { result, row in
+      if let id = row["id"] as? String { result[id] = row["title"] as? String ?? id }
+    }
+    return ScheduledTaskPresentation.visibleTasks(
+      store.tasks, query: searchText, filter: filter, projectTitles: projects)
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
@@ -44,14 +53,44 @@ struct ScheduledTasksView: View {
       if !server.isConnected {
         Label(server.status, systemImage: "wifi.slash").foregroundStyle(.orange)
       }
-      if let error = store.errorMessage { Text(error).foregroundStyle(.red).font(.callout) }
+      if let error = store.errorMessage {
+        HStack {
+          Text(error).foregroundStyle(.red).font(.callout)
+          Spacer()
+          if store.requiresRefresh {
+            Button("重试刷新") { Task { await store.refresh() } }
+              .disabled(busy || !server.isConnected)
+          }
+        }
+      }
+      HStack {
+        TextField("搜索标题、提示词、项目或模型", text: $searchText)
+          .textFieldStyle(.roundedBorder)
+        Picker("筛选", selection: $filter) {
+          ForEach(ScheduledTaskFilter.allCases) { Text($0.title).tag($0) }
+        }
+        .frame(width: 160)
+        Text("\(visibleTasks.count) / \(store.tasks.count)").font(.caption).foregroundStyle(
+          .secondary)
+      }
+      if let refreshed = store.lastRefreshedAt {
+        Text("最近刷新：\(refreshed.formatted(date: .omitted, time: .standard))")
+          .font(.caption).foregroundStyle(.secondary)
+      }
       if store.hasLoaded && store.tasks.isEmpty {
         ContentUnavailableView(
           "暂无定时任务", systemImage: "calendar", description: Text("点击“新建”设置周期和提示词。"))
+      } else if store.hasLoaded && visibleTasks.isEmpty {
+        ContentUnavailableView(
+          "无匹配任务", systemImage: "magnifyingglass", description: Text("尝试其他关键词或筛选条件。"))
+        Button("清除筛选") {
+          searchText = ""
+          filter = .all
+        }
       } else {
         ScrollView {
           LazyVStack(alignment: .leading, spacing: 12) {
-            ForEach(store.tasks) { task in taskRow(task) }
+            ForEach(visibleTasks) { task in taskRow(task) }
           }
         }
       }
@@ -61,7 +100,7 @@ struct ScheduledTasksView: View {
     .interactiveDismissDisabled(store.isMutating)
     .task {
       while !Task.isCancelled {
-        if server.isConnected && editor == nil && store.errorMessage == nil {
+        if server.isConnected && editor == nil && !store.requiresRefresh {
           await store.refresh()
         }
         do { try await Task.sleep(for: .seconds(3)) } catch { break }
@@ -103,6 +142,8 @@ struct ScheduledTasksView: View {
         Spacer()
         Button(task.enabled ? "暂停" : "启用") { Task { await store.setEnabled(task) } }
         Button("编辑") { editor = ScheduledTaskDraft(task: task) }
+        Button("复制") { editor = ScheduledTaskDraft(copying: task) }
+          .help("创建暂停的副本，不复制会话绑定或工作区策略")
         Button("立即执行") { running = task }.disabled(
           task.raw["lastRunStatus"] as? String == "running")
         Button(role: .destructive) {
@@ -268,7 +309,7 @@ private struct ScheduledTaskEditor: View {
         }
         .keyboardShortcut(.defaultAction)
         .disabled(
-          busy || !server.isConnected || draft.validationMessage != nil || store.errorMessage != nil
+          busy || !server.isConnected || draft.validationMessage != nil || store.requiresRefresh
         )
       }
     }

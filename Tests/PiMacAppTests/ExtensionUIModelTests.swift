@@ -149,6 +149,32 @@ struct ExtensionUIModelTests {
     #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 20)
   }
 
+  @Test func ordinaryStatusesAreIsolatedAndRemovedWithTheirSource() {
+    let ui = ExtensionUIModel()
+    let first = AppModel(restoreLastProjectOnLaunch: false)
+    let second = AppModel(restoreLastProjectOnLaunch: false)
+    func status(_ text: String, key: String = "progress") -> PiRPCClient.JSON {
+      ["method": "setStatus", "id": UUID().uuidString, "statusKey": key, "statusText": text]
+    }
+    ui.selectSource(first)
+    ui.handle(status("\u{001B}[31mFirst\u{001B}[0m"), from: first)
+    ui.handle(status("Second"), from: second)
+    #expect(ui.statuses["progress"] == "First")
+    ui.selectSource(second)
+    #expect(ui.statuses["progress"] == "Second")
+    ui.handle(status(""), from: first)
+    #expect(ui.statuses["progress"] == "Second")
+    ui.handle(status("Quota", key: "account-usage"), from: second)
+    ui.handle(status("", key: "account-usage"), from: second)
+    #expect(ui.statuses["account-usage"] == "Quota")
+    ui.removeRequests(from: second)
+    #expect(ui.statuses.isEmpty)
+    ui.selectSource(first)
+    #expect(ui.statuses.isEmpty)
+    ui.selectSource(second)
+    #expect(ui.statuses.isEmpty)
+  }
+
   private func statusEvent(
     activeAccount: String,
     updatedAt: Double,

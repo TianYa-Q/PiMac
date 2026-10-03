@@ -22,19 +22,23 @@ struct VersionManagerTests {
   }
 
   @Test func buildsInstallCommandsWithoutShellInterpolation() {
-    #expect(VersionManagerModel.installArguments(source: " npm:@scope/tools@1.0.0 ", local: false)
-      == ["install", "npm:@scope/tools@1.0.0"])
-    #expect(VersionManagerModel.installArguments(source: "git:github.com/example/tools", local: true)
-      == ["install", "git:github.com/example/tools", "--local"])
-    #expect(VersionManagerModel.installArguments(source: "/tmp/local tools", local: false)
-      == ["install", "/tmp/local tools"])
+    #expect(
+      VersionManagerModel.installArguments(source: " npm:@scope/tools@1.0.0 ", local: false)
+        == ["install", "npm:@scope/tools@1.0.0"])
+    #expect(
+      VersionManagerModel.installArguments(source: "git:github.com/example/tools", local: true)
+        == ["install", "git:github.com/example/tools", "--local"])
+    #expect(
+      VersionManagerModel.installArguments(source: "/tmp/local tools", local: false)
+        == ["install", "/tmp/local tools"])
     #expect(VersionManagerModel.installArguments(source: "   ", local: false) == nil)
     #expect(VersionManagerModel.installArguments(source: "--help", local: false) == nil)
     #expect(VersionManagerModel.installArguments(source: "npm:tools\nother", local: false) == nil)
   }
 
   @Test func removesOnlyTheSelectedScope() {
-    let packages = VersionManagerModel.parsePackageList("""
+    let packages = VersionManagerModel.parsePackageList(
+      """
       User packages:
         npm:tools
           /tmp/user/tools
@@ -44,8 +48,9 @@ struct VersionManagerTests {
       """)
     #expect(packages.count == 2)
     #expect(VersionManagerModel.removeArguments(for: packages[0]) == ["remove", "npm:tools"])
-    #expect(VersionManagerModel.removeArguments(for: packages[1])
-      == ["remove", "npm:tools", "--local"])
+    #expect(
+      VersionManagerModel.removeArguments(for: packages[1])
+        == ["remove", "npm:tools", "--local"])
   }
 
   @Test func comparesSemanticVersions() {

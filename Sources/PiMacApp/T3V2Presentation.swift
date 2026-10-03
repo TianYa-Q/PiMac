@@ -64,7 +64,8 @@ enum T3V2Presentation {
         "system_notice", "compaction":
         let status = item["status"] as? String ?? "completed"
         let tool = !["error", "system_notice", "compaction"].contains(type)
-        let name = item["toolName"] as? String ?? item["title"] as? String
+        let name =
+          item["toolName"] as? String ?? item["title"] as? String
           ?? (type == "file_change" ? "edit" : type == "command_execution" ? "bash" : type)
         var data: JSON = ["toolName": name, "input": item["input"] ?? [:]]
         if let parent = item["parentItemId"] as? String {
@@ -133,12 +134,16 @@ enum T3V2Presentation {
     let runs = projection["runs"] as? [JSON] ?? []
     let run = runs.last(where: { active.contains($0["status"] as? String ?? "") }) ?? runs.last
     let attempts = projection["attempts"] as? [JSON] ?? []
-    let attemptIDs = Set(attempts.filter { $0["runId"] as? String == run?["id"] as? String }
-      .compactMap { $0["id"] as? String })
-    let latest = run == nil ? turns.last : turns.last(where: {
-      guard let id = $0["runAttemptId"] as? String else { return false }
-      return attemptIDs.contains(id)
-    })
+    let attemptIDs = Set(
+      attempts.filter { $0["runId"] as? String == run?["id"] as? String }
+        .compactMap { $0["id"] as? String })
+    let latest =
+      run == nil
+      ? turns.last
+      : turns.last(where: {
+        guard let id = $0["runAttemptId"] as? String else { return false }
+        return attemptIDs.contains(id)
+      })
     let outputUsage = latest?["turnTokenUsage"] as? JSON
     let output = outputUsage?["outputTokens"] as? Int ?? 0
     var duration = (outputUsage?["assistantDurationMs"] as? Double ?? 0) / 1000

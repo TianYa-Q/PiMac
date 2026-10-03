@@ -2555,9 +2555,10 @@ final class TelegramControl: ObservableObject {
       }
     }
     if page.number > 1, gemini?.isConfigured == true { lines.append("\nGemini 额度在第 1 页") }
-    lines.append(supportsAccountSwitch
-      ? "\n● 当前账户 · 空闲时可切换\n仅本地缓存，不主动刷新额度。"
-      : "\n只读额度列表 · 不支持直接切换线程账户\n仅本地缓存，不主动刷新额度。")
+    lines.append(
+      supportsAccountSwitch
+        ? "\n● 当前账户 · 空闲时可切换\n仅本地缓存，不主动刷新额度。"
+        : "\n只读额度列表 · 不支持直接切换线程账户\n仅本地缓存，不主动刷新额度。")
     return lines.joined(separator: "\n")
   }
 

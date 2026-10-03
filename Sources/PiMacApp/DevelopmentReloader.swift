@@ -48,20 +48,23 @@ final class DevelopmentReloader: ObservableObject {
     // missing/stale heartbeat, and waits for two seconds of continuous idle.
     publishHeartbeat(idle: idle)
     let requested = requestFile.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
-    let status = requested
+    let status =
+      requested
       ? (blockers.isEmpty ? "源码已更新，等待空闲构建…" : "源码待构建：\(blockers.joined(separator: "、"))")
       : ""
     // Do not restart a previously built revision while newer edits are pending.
     guard !requested, let originalModification,
-      let modified = (try? FileManager.default.attributesOfItem(
-        atPath: (revisionFile ?? executable).path)[.modificationDate]) as? Date,
+      let modified =
+        (try? FileManager.default.attributesOfItem(
+          atPath: (revisionFile ?? executable).path)[.modificationDate]) as? Date,
       modified > originalModification
     else {
       setStatus(status, workspace: workspace)
       return
     }
-    setStatus(blockers.isEmpty
-      ? "新版构建就绪，准备空闲重启…" : "新版等待重启：\(blockers.joined(separator: "、"))",
+    setStatus(
+      blockers.isEmpty
+        ? "新版构建就绪，准备空闲重启…" : "新版等待重启：\(blockers.joined(separator: "、"))",
       workspace: workspace)
     guard idle else { return }
     // Old watchers cannot own the replacement. Fail before disconnecting anything.
@@ -126,7 +129,9 @@ final class DevelopmentReloader: ObservableObject {
   private func setStatus(_ status: String, workspace: WorkspaceModel) {
     workspace.developmentReloadStatus = status
     if status != lastStatus {
-      if !status.isEmpty { NSLog("Pi Mac development reload [%@]: %@", reload.phase.rawValue, status) }
+      if !status.isEmpty {
+        NSLog("Pi Mac development reload [%@]: %@", reload.phase.rawValue, status)
+      }
       lastStatus = status
     }
   }
@@ -137,4 +142,3 @@ final class DevelopmentReloader: ObservableObject {
     setStatus("自动重启失败：\(message)", workspace: workspace)
   }
 }
-

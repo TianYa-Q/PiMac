@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+
 @testable import PiMacApp
 
 struct LidSleepControllerTests {
@@ -74,14 +75,14 @@ struct LidSleepControllerTests {
     defer { defaults.removePersistentDomain(forName: suite) }
     let controller = LidSleepController(defaults: defaults)
     #expect(!controller.enableOnLaunch)
-    controller.restoreAtLaunch() // No permission request when disabled.
+    controller.restoreAtLaunch()  // No permission request when disabled.
     #expect(!controller.busy)
     defaults.set(true, forKey: LidSleepController.launchPreferenceKey)
-    controller.stop() // The same cleanup used on quit and errors.
+    controller.stop()  // The same cleanup used on quit and errors.
     #expect(controller.enableOnLaunch)
     let reopened = LidSleepController(defaults: defaults)
     #expect(reopened.enableOnLaunch)
-    reopened.setEnabled(false) // An explicit user action clears the preference.
+    reopened.setEnabled(false)  // An explicit user action clears the preference.
     #expect(!reopened.enableOnLaunch)
     #expect(!controller.enableOnLaunch)
   }
@@ -93,7 +94,7 @@ struct LidSleepControllerTests {
     defaults.set(true, forKey: LidSleepController.launchPreferenceKey)
     let controller = LidSleepController(defaults: defaults)
     controller.restoreAtLaunch()
-    controller.restoreAtLaunch() // Must not schedule a second activation.
+    controller.restoreAtLaunch()  // Must not schedule a second activation.
     controller.stop()
     await Task.yield()
     #expect(!controller.busy)

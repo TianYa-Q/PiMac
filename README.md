@@ -17,6 +17,7 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 
 - Add and switch between multiple projects in one window, with separate sessions and background tasks
 - Current source adds native T3 Git controls: branches, changes/diffs, selected-file commits, push, PR creation and pull; a resizable sidebar with remembered width, a compact Server badge beside Pi Mac, and Git beside the composer’s compact control without a conversation header. See [Git integration](docs/t3-code-integration.md#git--vcs).
+- Manage Server-owned scheduled tasks with multi-keyword search, state filters, refresh timestamps and paused copies. Unknown mutation outcomes require an explicit successful refresh; copies never reuse a thread binding or worktree. See [reliability improvements](docs/reliability-improvements.md).
 - Stream responses, reasoning, and tool calls
 - Support Pi 1.0 Code Mode: show JavaScript, nested calls and image tool results; retain existing Pi tool/MCP settings
 - Send messages, re-edit previous prompts, steer after tool calls, follow up after completion, and remove queued messages that have not been consumed

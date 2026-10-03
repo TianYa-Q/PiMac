@@ -356,7 +356,8 @@ enum MarkdownInlineCache {
     if let cached = cache.object(forKey: key) { return cached.value }
     let options = AttributedString.MarkdownParsingOptions(
       interpretedSyntax: .inlineOnlyPreservingWhitespace)
-    let value = (try? AttributedString(markdown: source, options: options))
+    let value =
+      (try? AttributedString(markdown: source, options: options))
       ?? AttributedString(source)
     // Account for the source key and attributed storage, not just UTF-8 input.
     cache.setObject(MarkdownInlineBox(value), forKey: key, cost: max(1, source.utf8.count * 4))

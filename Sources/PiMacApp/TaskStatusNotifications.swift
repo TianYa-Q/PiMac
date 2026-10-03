@@ -27,12 +27,16 @@ struct TaskStatusTracker {
       guard let id = thread["id"] as? String,
         let turn = thread["latestTurn"] as? [String: Any],
         let turnID = turn["turnId"] as? String,
-        let state = turn["state"] as? String else { continue }
+        let state = turn["state"] as? String
+      else { continue }
       let previous = turns[id]
       if initialized, ["completed", "error", "interrupted"].contains(state),
-        previous?.id != turnID || previous?.state != state {
-        events.append(Event(threadID: id, turnID: turnID,
-          title: thread["title"] as? String ?? "Pi Mac 会话", state: state))
+        previous?.id != turnID || previous?.state != state
+      {
+        events.append(
+          Event(
+            threadID: id, turnID: turnID,
+            title: thread["title"] as? String ?? "Pi Mac 会话", state: state))
       }
       turns[id] = (turnID, state)
     }
@@ -88,7 +92,8 @@ final class TaskStatusNotifications: NSObject, UNUserNotificationCenterDelegate 
         // Respect the application's system notification sound preference.
         if settings.soundSetting == .enabled,
           settings.authorizationStatus == .authorized
-            || settings.authorizationStatus == .provisional {
+            || settings.authorizationStatus == .provisional
+        {
           NSSound.beep()
         }
       } catch {

@@ -48,13 +48,19 @@ struct T3V2PresentationTests {
   @Test func commandStringsBecomeVisibleBashInputs() throws {
     for status in ["running", "completed"] {
       for title in ["bash", "Run command"] {
-        let native: [String: Any] = ["projection": [
-          "thread": ["id": "thread"],
-          "visibleTurnItems": [["item": [
-            "id": "cmd", "type": "command_execution", "title": title,
-            "status": status, "input": "printf hello", "output": "hello",
-          ]]],
-        ]]
+        let native: [String: Any] = [
+          "projection": [
+            "thread": ["id": "thread"],
+            "visibleTurnItems": [
+              [
+                "item": [
+                  "id": "cmd", "type": "command_execution", "title": title,
+                  "status": status, "input": "printf hello", "output": "hello",
+                ]
+              ]
+            ],
+          ]
+        ]
         let thread = try #require(T3V2Presentation.detail(native)["thread"] as? [String: Any])
         let activities = try #require(thread["activities"] as? [[String: Any]])
         let payload = try #require(activities.first?["payload"] as? [String: Any])
@@ -70,16 +76,25 @@ struct T3V2PresentationTests {
   @Test func toolParentLinksSurviveLiveAndSavedProjection() throws {
     for status in ["running", "completed"] {
       for type in ["dynamic_tool", "command_execution", "file_change"] {
-        let native: [String: Any] = ["projection": [
-          "thread": ["id": "thread"],
-          "visibleTurnItems": [["item": [
-            "id": "child", "runId": "run", "type": type,
-            "status": status, "parentItemId": "code", "toolName": "read",
-          ]], ["item": [
-            "id": "independent", "runId": "run", "type": "dynamic_tool",
-            "toolName": "read", "parentItemId": NSNull(),
-          ]]],
-        ]]
+        let native: [String: Any] = [
+          "projection": [
+            "thread": ["id": "thread"],
+            "visibleTurnItems": [
+              [
+                "item": [
+                  "id": "child", "runId": "run", "type": type,
+                  "status": status, "parentItemId": "code", "toolName": "read",
+                ]
+              ],
+              [
+                "item": [
+                  "id": "independent", "runId": "run", "type": "dynamic_tool",
+                  "toolName": "read", "parentItemId": NSNull(),
+                ]
+              ],
+            ],
+          ]
+        ]
         let thread = try #require(T3V2Presentation.detail(native)["thread"] as? [String: Any])
         let activities = try #require(thread["activities"] as? [[String: Any]])
         let payload = try #require(activities[0]["payload"] as? [String: Any])
@@ -145,25 +160,31 @@ struct T3V2PresentationTests {
 
   @Test func outputSpeedUsesRequestTimingWithoutRequiringContextUsage() {
     let usage: [String: Any] = ["outputTokens": 150, "assistantDurationMs": 3000.0]
-    let native: [String: Any] = ["projection": [
-      "thread": ["id": "thread"],
-      "providerTurns": [["turnTokenUsage": usage]]
-    ]]
+    let native: [String: Any] = [
+      "projection": [
+        "thread": ["id": "thread"],
+        "providerTurns": [["turnTokenUsage": usage]],
+      ]
+    ]
     #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == 50)
     #expect(T3V2Presentation.detail(native)["sessionStats"] != nil)
   }
 
   @Test func newRunDoesNotReusePreviousOutputSpeed() {
     let usage: [String: Any] = ["outputTokens": 150, "assistantDurationMs": 3000.0]
-    let native: [String: Any] = ["projection": [
-      "runs": [["id": "new", "status": "running"]],
-      "attempts": [["id": "a1", "runId": "old"], ["id": "a2", "runId": "new"]],
-      "providerTurns": [
-        ["runAttemptId": "a1", "tokenUsage": ["usedTokens": 200],
-          "turnTokenUsage": usage],
-        ["runAttemptId": "a2", "status": "running"],
-      ],
-    ]]
+    let native: [String: Any] = [
+      "projection": [
+        "runs": [["id": "new", "status": "running"]],
+        "attempts": [["id": "a1", "runId": "old"], ["id": "a2", "runId": "new"]],
+        "providerTurns": [
+          [
+            "runAttemptId": "a1", "tokenUsage": ["usedTokens": 200],
+            "turnTokenUsage": usage,
+          ],
+          ["runAttemptId": "a2", "status": "running"],
+        ],
+      ]
+    ]
     #expect(T3V2Presentation.stats(native)?.totalTokens == 200)
     #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == nil)
   }

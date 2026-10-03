@@ -1,9 +1,12 @@
 import Foundation
 import Testing
+
 @testable import PiMacApp
 
 struct TaskStatusNotificationTests {
-  private func thread(_ id: String = "thread", turn: String = "turn", state: String) -> [String: Any] {
+  private func thread(_ id: String = "thread", turn: String = "turn", state: String) -> [String:
+    Any]
+  {
     ["id": id, "title": "Test", "latestTurn": ["turnId": turn, "state": state]]
   }
 
@@ -22,7 +25,8 @@ struct TaskStatusNotificationTests {
     #expect(events.map(\.state) == ["completed", "error"])
     #expect(events.first?.title == "Test")
     #expect(tracker.consume([thread(state: "completed"), thread("other", state: "error")]).isEmpty)
-    #expect(tracker.consume([thread(turn: "next", state: "interrupted")]).first?.message == "任务已取消。")
+    #expect(
+      tracker.consume([thread(turn: "next", state: "interrupted")]).first?.message == "任务已取消。")
   }
 
   @Test func fastTurnBetweenPollsStillNotifies() {

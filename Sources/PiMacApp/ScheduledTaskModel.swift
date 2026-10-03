@@ -9,7 +9,7 @@ struct DesktopScheduledTask: Identifiable {
 
   init(_ raw: [String: Any]) throws {
     guard let id = raw["id"] as? String, let title = raw["title"] as? String,
-      let enabled = raw["enabled"] as? Bool,
+      let enabled = raw["enabled"] as? Bool, !id.isEmpty,
       raw["schedule"] is [String: Any], raw["modelSelection"] is [String: Any]
     else { throw T3DesktopClient.ClientError.rejected }
     self.raw = raw
@@ -83,6 +83,22 @@ struct ScheduledTaskDraft: Identifiable {
     intervalMinutes = String(Double(schedule["everyMs"] as? Int ?? 3_600_000) / 60000)
     timeOfDay = schedule["timeOfDay"] as? String ?? "09:00"
     weekdays = Set(schedule["weekdays"] as? [Int] ?? Array(0...6))
+  }
+
+  /// Copy configuration only: new identity, paused, root workspace and no existing thread binding.
+  init(copying task: DesktopScheduledTask) {
+    let source = ScheduledTaskDraft(task: task)
+    self.init(projectID: source.projectID, modelID: source.modelID)
+    title = "\(source.title)（副本）"
+    prompt = source.prompt
+    enabled = false
+    modelInstanceID = source.modelInstanceID
+    scheduleType = source.scheduleType
+    intervalMinutes = source.intervalMinutes
+    timeOfDay = source.timeOfDay
+    weekdays = source.weekdays
+    runtimeMode = source.runtimeMode
+    interactionMode = source.interactionMode
   }
 
   var validationMessage: String? {

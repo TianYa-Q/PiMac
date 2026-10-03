@@ -10,7 +10,8 @@ let package = Package(
   targets: [
     .executableTarget(
       name: "PiMacApp",
-      exclude: ["Resources/AppIcon.icns"],
+      // Legacy Fast extension is retained for compatibility tests, not loaded by the Server adapter.
+      exclude: ["Resources/AppIcon.icns", "Resources/pimac-fast.ts"],
       resources: [
         .process("Resources/AppIcon.png"),
         .copy("Resources/t3-bridge"),

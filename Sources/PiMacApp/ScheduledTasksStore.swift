@@ -9,6 +9,8 @@ final class ScheduledTasksStore: ObservableObject {
   @Published private(set) var isMutating = false
   @Published private(set) var errorMessage: String?
   @Published private(set) var hasLoaded = false
+  @Published private(set) var requiresRefresh = false
+  @Published private(set) var lastRefreshedAt: Date?
   private let rpc: RPC
 
   init(rpc: @escaping RPC) { self.rpc = rpc }
@@ -20,8 +22,10 @@ final class ScheduledTasksStore: ObservableObject {
     do {
       try await load()
       errorMessage = nil
+      requiresRefresh = false
     } catch is CancellationError {
     } catch {
+      requiresRefresh = true
       errorMessage = "定时任务刷新失败，列表可能已过期。请检查 Server 连接后刷新。"
     }
   }
@@ -31,12 +35,18 @@ final class ScheduledTasksStore: ObservableObject {
     guard let rows = result["tasks"] as? [[String: Any]] else {
       throw T3DesktopClient.ClientError.rejected
     }
+    try Task.checkCancellation()
     let next = try rows.map(DesktopScheduledTask.init)
+    guard Set(next.map(\.id)).count == next.count else {
+      throw T3DesktopClient.ClientError.rejected
+    }
     tasks = next.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     hasLoaded = true
+    lastRefreshedAt = Date()
   }
 
   func save(_ draft: ScheduledTaskDraft) async -> Bool {
+    guard !isMutating, !isLoading, !requiresRefresh else { return false }
     guard let payload = try? draft.payload() else {
       errorMessage = draft.validationMessage ?? "任务配置无效。"
       return false
@@ -56,7 +66,7 @@ final class ScheduledTasksStore: ObservableObject {
   private func mutate(_ method: String, _ payload: [String: Any]) async -> Bool {
     // Enforce the refresh barrier here too, not only in the view: queued actions
     // must not dispatch against stale state after an unknown mutation outcome.
-    guard !isMutating, !isLoading, errorMessage == nil else { return false }
+    guard !isMutating, !isLoading, !requiresRefresh else { return false }
     isMutating = true
     errorMessage = nil
     defer { isMutating = false }
@@ -64,10 +74,12 @@ final class ScheduledTasksStore: ObservableObject {
       _ = try await rpc(method, payload)
     } catch {
       // An interrupted transport does not prove rejection. Never retry a mutation automatically.
+      requiresRefresh = true
       errorMessage = "操作未确认，可能已生效。请刷新并检查任务／会话后再操作；不会自动重试。"
       return false
     }
     do { try await load() } catch {
+      requiresRefresh = true
       errorMessage = "操作已被 Server 接受，但列表刷新失败。请手动刷新。"
     }
     return true

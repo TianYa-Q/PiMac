@@ -104,7 +104,8 @@ final class VersionManagerModel: ObservableObject {
 
   func install(source: String, local: Bool) {
     guard let arguments = Self.installArguments(source: source, local: local),
-      !local || projectURL != nil else { return }
+      !local || projectURL != nil
+    else { return }
     runUpdate(id: "install", arguments: arguments, action: "安装")
   }
 
@@ -116,7 +117,8 @@ final class VersionManagerModel: ObservableObject {
   nonisolated static func installArguments(source: String, local: Bool) -> [String]? {
     let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !source.isEmpty, !source.hasPrefix("-"),
-      !source.contains("\n"), !source.contains("\r") else { return nil }
+      !source.contains("\n"), !source.contains("\r")
+    else { return nil }
     return ["install", source] + (local ? ["--local"] : [])
   }
 

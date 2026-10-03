@@ -239,7 +239,9 @@ struct ContentView: View {
   var body: some View {
     HStack(spacing: 0) {
       redesignedSidebar
-        .frame(width: SidebarWidth.clamped(SidebarWidth.clamped(sidebarWidth) + Double(sidebarDragTranslation)))
+        .frame(
+          width: SidebarWidth.clamped(
+            SidebarWidth.clamped(sidebarWidth) + Double(sidebarDragTranslation)))
 
       Divider()
         .frame(width: 1)
@@ -253,7 +255,8 @@ struct ContentView: View {
                   translation = value.translation.width
                 }
                 .onEnded { value in
-                  sidebarWidth = SidebarWidth.clamped(SidebarWidth.clamped(sidebarWidth) + Double(value.translation.width))
+                  sidebarWidth = SidebarWidth.clamped(
+                    SidebarWidth.clamped(sidebarWidth) + Double(value.translation.width))
                 }
             )
             .onHover { hovering in
@@ -1283,7 +1286,8 @@ struct ContentView: View {
         .help("压缩上下文")
         ComposerGitButton(server: workspace.server, hasProject: app.projectURL != nil) {
           guard let cwd = workspace.selectedGitDirectory else { return }
-          gitContext = GitWorkspaceContext(cwd: cwd, threadID: app.threadID,
+          gitContext = GitWorkspaceContext(
+            cwd: cwd, threadID: app.threadID,
             projectID: app.projectURL.flatMap { workspace.server.projectID(for: $0) })
         }
         Spacer(minLength: 8)
@@ -1588,9 +1592,10 @@ struct ContentView: View {
         HStack(spacing: 12) {
           Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文 --")
             .foregroundStyle(contextUsageColor(stats.contextPercent))
-          Text(stats.contextWindow.map {
-            "\(stats.totalTokens.formatted()) / \($0.formatted()) tokens"
-          } ?? "\(stats.totalTokens.formatted()) tokens")
+          Text(
+            stats.contextWindow.map {
+              "\(stats.totalTokens.formatted()) / \($0.formatted()) tokens"
+            } ?? "\(stats.totalTokens.formatted()) tokens")
           Text(stats.cacheHitPercent.map { "缓存命中 \(Int($0.rounded()))%" } ?? "缓存命中 --")
           if let cost = stats.cost { Text(cost, format: .currency(code: "USD")) }
         }
@@ -2663,7 +2668,8 @@ private struct CodexAccountsView: View {
   var body: some View {
     CodexAccountsCard(
       snapshot: .init(
-        sourceID: ObjectIdentifier(app), accounts: extensionUI.codexAccounts, gemini: extensionUI.geminiUsage,
+        sourceID: ObjectIdentifier(app), accounts: extensionUI.codexAccounts,
+        gemini: extensionUI.geminiUsage,
         emptyStatus: extensionUI.statuses["account-usage"], message: app.accountQuotaMessage,
         canRefresh: app.isProcessRunning && !app.isRefreshingAccountQuota,
         canManage: app.canManageAccounts,
@@ -2849,9 +2855,10 @@ private struct CodexAccountsCard: View, Equatable {
             Text(geminiWindowLabel(quota.window))
               .frame(width: 20, alignment: .leading)
             QuotaUsageBar(
-              remainingPercent: quota.remainingPercent, color: usageColor(quota.remainingPercent))
-              .frame(minWidth: 24)
-              .layoutPriority(1)
+              remainingPercent: quota.remainingPercent, color: usageColor(quota.remainingPercent)
+            )
+            .frame(minWidth: 24)
+            .layoutPriority(1)
             Text("\(Int(quota.remainingPercent.rounded()))%")
               .monospacedDigit()
               .frame(width: 30, alignment: .trailing)
@@ -2877,9 +2884,10 @@ private struct CodexAccountsCard: View, Equatable {
     HStack(spacing: 4) {
       Text(label).frame(width: 20, alignment: .leading)
       QuotaUsageBar(
-        remainingPercent: window.remainingPercent, color: usageColor(window.remainingPercent))
-        .frame(minWidth: 24)
-        .layoutPriority(1)
+        remainingPercent: window.remainingPercent, color: usageColor(window.remainingPercent)
+      )
+      .frame(minWidth: 24)
+      .layoutPriority(1)
       Text("\(Int(window.remainingPercent.rounded()))%")
         .monospacedDigit()
         .frame(width: 30, alignment: .trailing)
@@ -3080,7 +3088,9 @@ private struct ModelSettingsView: View {
                 .labelsHidden()
               }
             }
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .background(
+              Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12)
+            )
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
           }
 
@@ -3124,7 +3134,9 @@ private struct ModelSettingsView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .background(
+              Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8)
+            )
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary, lineWidth: 1))
             HStack {
               Toggle("仅已显示", isOn: $onlyVisible)
@@ -3149,7 +3161,9 @@ private struct ModelSettingsView: View {
                 }
               }
             }
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            .background(
+              Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12)
+            )
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
           }
         }
@@ -3496,8 +3510,10 @@ private struct SettingsView: View {
             }
             .foregroundStyle(selectedTab == tab ? Color.accentColor : Color.primary)
             .padding(.horizontal, 12).padding(.vertical, 11)
-            .background(selectedTab == tab ? Color.accentColor.opacity(0.10) : Color.clear,
-              in: RoundedRectangle(cornerRadius: 9))
+            .background(
+              selectedTab == tab ? Color.accentColor.opacity(0.10) : Color.clear,
+              in: RoundedRectangle(cornerRadius: 9)
+            )
             .contentShape(RoundedRectangle(cornerRadius: 9))
           }
           .buttonStyle(.plain)
@@ -3531,21 +3547,27 @@ private struct SettingsView: View {
   }
 
   private var versionDescription: String {
-    guard let current = versions.piCurrentVersion else { return versions.isChecking ? "正在检查版本…" : "尚未读取版本" }
+    guard let current = versions.piCurrentVersion else {
+      return versions.isChecking ? "正在检查版本…" : "尚未读取版本"
+    }
     if versions.piHasUpdate { return "当前 \(current) · 最新 \(versions.piLatestVersion ?? "未知")" }
     if let latest = versions.piLatestVersion { return "当前 \(current) · 已是最新版本（\(latest)）" }
     return "当前 \(current) · 最新版本未知"
   }
 
   private func versionIcon(hasUpdate: Bool, verified: Bool) -> some View {
-    Image(systemName: hasUpdate ? "arrow.up.circle.fill" : (verified ? "checkmark.circle.fill" : "shippingbox"))
-      .font(.title2)
-      .foregroundStyle(hasUpdate ? Color.orange : (verified ? Color.green : Color.secondary))
+    Image(
+      systemName: hasUpdate
+        ? "arrow.up.circle.fill" : (verified ? "checkmark.circle.fill" : "shippingbox")
+    )
+    .font(.title2)
+    .foregroundStyle(hasUpdate ? Color.orange : (verified ? Color.green : Color.secondary))
   }
 
   private func extensionRow(_ item: ManagedExtension) -> some View {
     HStack(spacing: 11) {
-      versionIcon(hasUpdate: item.hasUpdate,
+      versionIcon(
+        hasUpdate: item.hasUpdate,
         verified: item.error == nil && item.currentVersion != nil && item.latestVersion != nil)
       VStack(alignment: .leading, spacing: 3) {
         HStack(spacing: 6) {

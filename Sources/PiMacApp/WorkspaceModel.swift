@@ -97,7 +97,9 @@ final class WorkspaceModel: ObservableObject {
     if !remoteSubmissionHolds.isEmpty { reasons.append("远程消息正在提交") }
     if !telegram.canRestartSafely { reasons.append("Telegram 有任务、队列或待发送回复") }
     if tabs.contains(where: { !$0.model.canRestartSafely }) { reasons.append("桌面有任务、排队消息或未确认操作") }
-    if t3Bridge.managementBusy || t3Bridge.connectBusy || t3Bridge.connectStatus?.loginPending == true {
+    if t3Bridge.managementBusy || t3Bridge.connectBusy
+      || t3Bridge.connectStatus?.loginPending == true
+    {
       reasons.append("设备管理或账号授权进行中")
     }
     return reasons
@@ -106,7 +108,8 @@ final class WorkspaceModel: ObservableObject {
   private func applyShell(_ snapshot: [String: Any]) {
     projects = (snapshot["projects"] as? [[String: Any]] ?? []).compactMap { project in
       guard let root = project["workspaceRoot"] as? String else { return nil }
-      return WorkspaceProject(url: URL(fileURLWithPath: root), customName: project["title"] as? String)
+      return WorkspaceProject(
+        url: URL(fileURLWithPath: root), customName: project["title"] as? String)
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     for tab in tabs {
       tab.model.refreshCodexAccounts()
@@ -216,12 +219,16 @@ final class WorkspaceModel: ObservableObject {
     // Output and turn updates must not move rows while multiple sessions are active.
     // Break creation-time ties by ID so server snapshot order cannot shuffle them either.
     // Parse each date once, rather than constructing formatters in O(n log n) comparisons.
-    return threads.filter { $0["projectId"] as? String == projectID }.compactMap { thread
-      -> (id: String, createdAt: Date, item: SessionItem)? in
+    return threads.filter { $0["projectId"] as? String == projectID }.compactMap {
+      thread
+        -> (id: String, createdAt: Date, item: SessionItem)? in
       guard let id = thread["id"] as? String else { return nil }
-      return (id, T3DesktopClient.date(thread["createdAt"]), SessionItem(
-        path: "t3:\(id)", title: thread["title"] as? String ?? "未命名线程",
-        modifiedAt: T3DesktopClient.date(thread["updatedAt"])))
+      return (
+        id, T3DesktopClient.date(thread["createdAt"]),
+        SessionItem(
+          path: "t3:\(id)", title: thread["title"] as? String ?? "未命名线程",
+          modifiedAt: T3DesktopClient.date(thread["updatedAt"]))
+      )
     }.sorted {
       if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
       return $0.id < $1.id

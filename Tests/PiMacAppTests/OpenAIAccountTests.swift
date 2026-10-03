@@ -75,7 +75,8 @@ struct OpenAIAccountTests {
     #expect(!app.supportsAccountRotation)
     ui.handle(
       try status(provider: "openai", manages: false, percent: 2, timestamp: 2000), from: app)
-    #expect(!app.supportsAccountSwitch)  // Extension payloads cannot enable an unsupported capability.
+    // Extension payloads cannot enable an unsupported capability.
+    #expect(!app.supportsAccountSwitch)
     #expect(!app.supportsAccountRotation)
     #expect(ui.usage(for: app).accounts.first(where: \.isActive) == nil)
     #expect(ui.codexAccounts.first(where: \.isActive) == nil)

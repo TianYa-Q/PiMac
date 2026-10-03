@@ -18,7 +18,8 @@ enum LidSleepDiagnostics {
       let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size]) as? NSNumber
       if (size?.intValue ?? 0) > 1_000_000 { try Data().write(to: file, options: .atomic) }
       if !FileManager.default.fileExists(atPath: file.path) {
-        FileManager.default.createFile(atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
+        FileManager.default.createFile(
+          atPath: file.path, contents: nil, attributes: [.posixPermissions: 0o600])
       }
       let handle = try FileHandle(forWritingTo: file)
       defer { try? handle.close() }

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+
 @testable import PiMacApp
 
 struct AccountQuotaRefreshPolicyTests {
@@ -25,9 +26,11 @@ struct AccountQuotaRefreshPolicyTests {
     var policy = AccountQuotaRefreshPolicy()
     let generation = UUID()
     let now = ContinuousClock.now
-    func attempt(_ provider: AccountUsageProvider, scope: UUID? = nil, force: Bool = false) -> Bool {
+    func attempt(_ provider: AccountUsageProvider, scope: UUID? = nil, force: Bool = false) -> Bool
+    {
       policy.shouldRefresh(
-        generation: scope ?? generation, provider: provider, isActive: false, force: force, now: now)
+        generation: scope ?? generation, provider: provider, isActive: false, force: force, now: now
+      )
     }
     #expect(attempt(.chatGPT))
     #expect(attempt(.chatGPT, force: true))

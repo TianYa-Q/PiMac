@@ -58,7 +58,6 @@ struct TelegramSettingsView: View {
             .toggleStyle(.switch).controlSize(.small)
         }
 
-
         VStack(alignment: .leading, spacing: 12) {
           HStack {
             Label("连接凭据", systemImage: "key.horizontal")
