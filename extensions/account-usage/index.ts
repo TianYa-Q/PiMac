@@ -21,7 +21,11 @@ import {
   type AntigravityUsageState,
 } from "./antigravity.js";
 import { accountUsageCacheKey } from "./account-identity.js";
-import { buildCachedReport, formatCachedReport } from "./cached-report.js";
+import {
+  buildCachedReport,
+  formatCachedReport,
+  formatCachedCSV,
+} from "./cached-report.js";
 import { buildUsageHealthReport, formatUsageHealth } from "./health.js";
 import { CodexSessionAuth } from "./auth.js";
 import { queryAccountUsage } from "./codex.js";
@@ -984,7 +988,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         await showAutoWarmupRecords(ctx);
         return;
       }
-      if (action === "cached" || action === "cached json") {
+      if (["cached", "cached json", "cached csv"].includes(action)) {
         const state = safeReadAccountState(ctx);
         if (!state) return;
         const visibleNames = new Set(
@@ -1010,7 +1014,9 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         ctx.ui.notify(
           action === "cached json"
             ? JSON.stringify(report, null, 2)
-            : formatCachedReport(report, snapshot, sessionAccount, maxAgeMs),
+            : action === "cached csv"
+              ? formatCachedCSV(report)
+              : formatCachedReport(report, snapshot, sessionAccount, maxAgeMs),
           "info",
         );
         return;
@@ -1030,7 +1036,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       }
       if (action) {
         ctx.ui.notify(
-          "用法：/usage [refresh|settings|history|show|cached [json]|doctor [json]]",
+          "用法：/usage [refresh|settings|history|show|cached [json|csv]|doctor [json]]",
           "warning",
         );
         return;

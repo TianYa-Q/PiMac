@@ -15,6 +15,8 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 
 ## Features
 
+- Generic extension choices now use a keyboard-navigable native list with explicit submission, reset-on-search selection and clearer empty states. Malformed dialogs fail closed and generic statuses are bounded. account-usage adds formula-safe `/usage cached csv` exports. See [dialog navigation and CSV exports](docs/dialog-navigation-csv.md).
+
 - Extension inputs now show byte budgets, support ⌘Return and confirm discarded edits; dialog replies are validated before consuming the queue. account-usage adds `/usage cached json` allowlisted offline exports and explicit missing snapshots. See [reply safety and cache exports](docs/dialog-reply-cache-export.md).
 
 - Textual tool previews add an enlarged reader, all-match highlights and optional tail following; scheduled task cancellation is checked before dispatch. The extension adds `/usage cached` and deadline-aware `Retry-After` backoff. See [output inspector and quota backoff](docs/output-inspector-quota-backoff.md).

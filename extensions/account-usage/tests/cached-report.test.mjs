@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createJiti } from "jiti";
-const { buildCachedReport, formatCachedReport } = await createJiti(
-  import.meta.url,
-).import("../cached-report.ts");
+const { buildCachedReport, formatCachedReport, formatCachedCSV } =
+  await createJiti(import.meta.url).import("../cached-report.ts");
 const usage = (accountName, extra = {}) => ({
   accountName,
   capturedAt: 1000,
@@ -22,6 +21,44 @@ const options = {
   now: 2000,
   maxAgeMs: 10000,
 };
+
+test("CSV preserves numeric telemetry, empty missing rows and private allowlist", () => {
+  const csv = formatCachedCSV(buildCachedReport(options));
+  assert.match(
+    csv,
+    /^provider,generated_at_ms,account,active,status,freshness,/u,
+  );
+  assert.match(
+    csv,
+    /"openai",2000,"work",true,"available","fresh",1000,42,2000,18000,,,\r\n/u,
+  );
+  assert.match(csv, /"missing",false,"missing","unknown",,,,,,,\r\n/u);
+  assert.doesNotMatch(csv, /secret|hidden|credential/u);
+  assert.ok(csv.endsWith("\r\n"));
+});
+
+test("CSV quotes multiline names and neutralizes spreadsheet formulas", () => {
+  const names = [
+    'a,"b"\r\nc',
+    "=SUM(1)",
+    "+cmd",
+    "-cmd",
+    "@cmd",
+    " \t=cmd",
+    "中文 😀",
+  ];
+  const csv = formatCachedCSV(
+    buildCachedReport({ ...options, visibleNames: names, usages: [] }),
+  );
+  assert.ok(csv.includes('"a,""b""\r\nc"'));
+  for (const name of names.slice(1, 6))
+    assert.ok(csv.includes('"' + "'" + name + '"'));
+  assert.ok(csv.includes('"中文 😀"'));
+  const empty = formatCachedCSV(
+    buildCachedReport({ ...options, visibleNames: [], usages: [] }),
+  );
+  assert.equal(empty.split("\r\n").length, 2);
+});
 
 test("cached JSON uses explicit fields, visible identities and missing rows", () => {
   const report = buildCachedReport(options);

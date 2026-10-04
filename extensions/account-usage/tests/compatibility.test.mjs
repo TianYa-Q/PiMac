@@ -208,6 +208,19 @@ try {
         JSON.stringify(exported),
         /credential|access|refresh|accountId/u,
       );
+      await app.commands.get("usage").handler("cached csv", app.ctx);
+      assert.match(app.notices.at(-1).message, /^provider,generated_at_ms,/u);
+      assert.match(
+        app.notices.at(-1).message,
+        new RegExp(
+          `"same",${exported.accounts.find((row) => row.name === "same").active},"available"`,
+          "u",
+        ),
+      );
+      assert.doesNotMatch(
+        app.notices.at(-1).message,
+        /credential|access|refresh|accountId/u,
+      );
       assert.equal(requests.length, beforeRequests);
       assert.equal(app.mutations.length, beforeMutations);
       const replacement = {

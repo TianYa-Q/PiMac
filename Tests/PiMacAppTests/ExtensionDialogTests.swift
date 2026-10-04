@@ -33,7 +33,7 @@ struct ExtensionDialogTests {
     ui.handle(event, from: source)
     #expect(ui.pendingDialogCount == 1)
     for index in 0..<100 {
-      ui.handle(["id": "request-\(index)", "method": "select"], from: source)
+      ui.handle(["id": "request-\(index)", "method": "select", "options": []], from: source)
     }
     #expect(ui.pendingDialogCount == ExtensionUIModel.maximumPendingDialogs)
     ui.removeRequests(from: source)
@@ -127,6 +127,63 @@ struct ExtensionDialogTests {
     #expect(
       ExtensionDialogLimits.acceptsResponse(
         to: confirm, value: nil, confirmed: nil, cancelled: true))
+  }
+
+  @Test func malformedRequestsFailClosedAndDuplicatesStayValid() throws {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    let malformed: [PiRPCClient.JSON] = [
+      ["id": "bad", "method": "select"],
+      ["id": "bad", "method": "select", "options": ["allow", 1]],
+      ["id": "bad", "method": "confirm", "message": 42],
+      ["id": "bad", "method": "input", "prefill": NSNull()],
+      ["id": "", "method": "editor"],
+      ["id": "bad", "method": "confirm", "title": false],
+    ]
+    for event in malformed {
+      #expect(ExtensionDialogRequest.parse(event) == nil)
+      ui.handle(event, from: source)
+      #expect(ui.pendingDialogCount == 0)
+    }
+    ui.handle(["id": "valid", "method": "select", "options": ["deny"]], from: source)
+    let presentationID = try #require(ui.dialog?.presentationID)
+    ui.handle(["id": "valid", "method": "select", "options": false], from: source)
+    #expect(ui.dialog?.presentationID == presentationID)
+    #expect(ui.pendingDialogCount == 1)
+  }
+
+  @Test func selectionRequiresAnExplicitVisibleIndex() {
+    let all = ExtensionOptionSearch.filter(["Allow", "Deny", "Allow"], query: "")
+    #expect(ExtensionOptionSearch.selectedValue(in: all, id: nil) == nil)
+    #expect(ExtensionOptionSearch.selectedValue(in: all, id: 2) == "Allow")
+    let filtered = ExtensionOptionSearch.filter(all.map(\.value), query: "Deny")
+    #expect(ExtensionOptionSearch.selectedValue(in: filtered, id: 0) == nil)
+    #expect(ExtensionOptionSearch.selectedValue(in: filtered, id: nil) == nil)
+    #expect(ExtensionOptionSearch.selectedValue(in: filtered, id: 1) == "Deny")
+  }
+
+  @Test func genericStatusesAreBoundedButExistingEntriesCanUpdateAndClear() {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    func status(_ key: String, _ text: Any?) {
+      var event: PiRPCClient.JSON = ["id": "status", "method": "setStatus", "statusKey": key]
+      event["statusText"] = text
+      ui.handle(event, from: source)
+    }
+    for index in 0..<100 { status("key-\(index)", "value") }
+    #expect(ui.statuses.count == ExtensionStatusLimits.maximumEntries)
+    status("key-0", "updated")
+    #expect(ui.statuses["key-0"] == "updated")
+    status("key-0", 42)
+    #expect(ui.statuses["key-0"] == "updated")
+    status("key-0", String(repeating: "😀", count: ExtensionStatusLimits.maximumTextBytes))
+    #expect(ui.statuses["key-0"] == "updated")
+    status("key-0", nil)
+    status("new", "ok")
+    #expect(ui.statuses["new"] == "ok")
+    #expect(ui.statuses.count == ExtensionStatusLimits.maximumEntries)
+    ui.removeRequests(from: source)
+    #expect(ui.statuses.isEmpty)
   }
 
   @Test func optionSearchPreservesWireValuesOrderAndDuplicates() {

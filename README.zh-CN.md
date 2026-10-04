@@ -15,6 +15,8 @@
 
 ## 功能特性
 
+- 普通扩展选项改为原生列表，支持键盘导航、明确提交、搜索后清除选择和空状态提示；异常弹窗请求拒绝处理，普通状态信息有界。account-usage 新增防公式注入的 `/usage cached csv` 导出。详见[弹窗导航与 CSV 导出](docs/dialog-navigation-csv.md)。
+
 - 扩展输入新增字节计数、⌘Return 提交和放弃修改确认，回复在队列边界校验；account-usage 新增 `/usage cached json` 白名单离线导出，并明确缺失快照账户。详见[弹窗回复与缓存导出](docs/dialog-reply-cache-export.md)。
 
 - 工具文本预览新增放大阅读、全部匹配高亮与可暂停的尾部跟随；定时任务在发送修改前检查取消状态。扩展新增 `/usage cached` 离线查看当前会话快照，并在总超时内遵守服务端 `Retry-After`。详见[输出阅读与额度退避优化](docs/output-inspector-quota-backoff.md)。

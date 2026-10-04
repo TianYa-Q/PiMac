@@ -49,6 +49,64 @@ export function buildCachedReport(options: {
   };
 }
 
+/** RFC 4180 cells plus spreadsheet formula neutralization for untrusted names.
+ * Always quote text, including commas/newlines; numeric telemetry stays numeric.
+ */
+function csvCell(value: string | number | boolean | undefined): string {
+  if (value === undefined) return "";
+  if (typeof value !== "string") return String(value);
+  // Leading control characters are deliberately covered: spreadsheet importers
+  // may strip them before interpreting a formula.
+  // eslint-disable-next-line no-control-regex
+  const safe = /^[\s\u0000-\u001f]*[=+\-@]/u.test(value) ? "'" + value : value;
+  return '"' + safe.replaceAll('"', '""') + '"';
+}
+
+/** Same allowlist and visibility policy as JSON; no file or network side effects. */
+export function formatCachedCSV(
+  report: ReturnType<typeof buildCachedReport>,
+): string {
+  const header = [
+    "provider",
+    "generated_at_ms",
+    "account",
+    "active",
+    "status",
+    "freshness",
+    "captured_at_ms",
+    "primary_remaining_percent",
+    "primary_reset_at_s",
+    "primary_window_seconds",
+    "secondary_remaining_percent",
+    "secondary_reset_at_s",
+    "secondary_window_seconds",
+  ];
+  return (
+    [
+      header.join(","),
+      ...report.accounts.map((account) =>
+        [
+          report.provider,
+          report.generatedAt,
+          account.name,
+          account.active,
+          account.status,
+          account.freshness,
+          account.capturedAt,
+          account.primary?.remainingPercent,
+          account.primary?.resetAt,
+          account.primary?.windowSeconds,
+          account.secondary?.remainingPercent,
+          account.secondary?.resetAt,
+          account.secondary?.windowSeconds,
+        ]
+          .map(csvCell)
+          .join(","),
+      ),
+    ].join("\r\n") + "\r\n"
+  );
+}
+
 export function formatCachedReport(
   report: ReturnType<typeof buildCachedReport>,
   usages: readonly AccountUsage[],

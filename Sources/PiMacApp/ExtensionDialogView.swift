@@ -5,7 +5,6 @@ struct ExtensionDialogView: View {
   @EnvironmentObject private var extensionUI: ExtensionUIModel
   let dialog: ExtensionDialog
   @State private var text = ""
-  @State private var query = ""
   @State private var confirmingDiscard = false
   @FocusState private var inputFocused: Bool
 
@@ -60,48 +59,9 @@ struct ExtensionDialogView: View {
       .frame(maxHeight: 100, alignment: .leading)
       switch dialog.kind {
       case .select(let options):
-        let filtered = ExtensionOptionSearch.filter(options, query: query)
-        if options.count > 8 {
-          HStack {
-            TextField("搜索选项", text: $query)
-              .textFieldStyle(.roundedBorder)
-              .accessibilityLabel("搜索扩展选项")
-              .onSubmit {
-                if filtered.count == 1 { answer(value: filtered[0].value) }
-              }
-            Text("\(filtered.count)/\(options.count)")
-              .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-          }
-        }
-        ScrollView {
-          LazyVStack(spacing: 8) {
-            if filtered.isEmpty {
-              Text(options.isEmpty ? "没有可选项" : "没有匹配的选项")
-                .foregroundStyle(.secondary).padding(24)
-            }
-            ForEach(filtered) { option in
-              Button {
-                answer(value: option.value)
-              } label: {
-                HStack {
-                  Text(option.value).multilineTextAlignment(.leading)
-                  Spacer()
-                  Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
-                .contentShape(Rectangle())
-              }
-              .buttonStyle(.plain)
-            }
-          }
-        }
-        .frame(maxHeight: 320)
-        Divider()
-        HStack {
-          Spacer()
-          Button("取消") { answer(cancelled: true) }.keyboardShortcut(.cancelAction)
-        }
+        ExtensionOptionPicker(
+          options: options, answer: { answer(value: $0) },
+          cancel: { answer(cancelled: true) })
       case .confirm(let message):
         ScrollView {
           Text(message).frame(maxWidth: .infinity, alignment: .leading)

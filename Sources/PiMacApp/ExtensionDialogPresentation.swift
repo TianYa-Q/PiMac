@@ -13,6 +13,11 @@ struct ExtensionOptionSearch {
     let value: String
   }
 
+  static func selectedValue(in options: [Option], id: Int?) -> String? {
+    guard let id else { return nil }
+    return options.first { $0.id == id }?.value
+  }
+
   static func filter(_ options: [String], query: String) -> [Option] {
     let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
     return options.enumerated().compactMap { index, value in

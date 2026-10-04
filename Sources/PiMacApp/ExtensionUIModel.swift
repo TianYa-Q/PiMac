@@ -70,39 +70,17 @@ final class ExtensionUIModel: ObservableObject {
       let requestID = event["id"] as? String
     else { return }
 
-    let title = event["title"] as? String ?? "Pi 扩展"
+    if ["select", "confirm", "input", "editor"].contains(method) {
+      // A malformed retransmission must not cancel an already valid request.
+      guard !containsRequest(id: requestID, from: source) else { return }
+      guard let dialog = ExtensionDialogRequest.parse(event) else {
+        source.sendExtensionResponse(id: requestID, cancelled: true)
+        return
+      }
+      enqueue(dialog, from: source)
+      return
+    }
     switch method {
-    case "select":
-      enqueue(
-        ExtensionDialog(
-          id: requestID,
-          title: title,
-          kind: .select(options: event["options"] as? [String] ?? [])
-        ),
-        from: source
-      )
-    case "confirm":
-      enqueue(
-        ExtensionDialog(
-          id: requestID,
-          title: title,
-          kind: .confirm(message: event["message"] as? String ?? "")
-        ),
-        from: source
-      )
-    case "input", "editor":
-      enqueue(
-        ExtensionDialog(
-          id: requestID,
-          title: title,
-          kind: .input(
-            initialText: event["prefill"] as? String ?? "",
-            placeholder: event["placeholder"] as? String ?? "",
-            multiline: method == "editor"
-          )
-        ),
-        from: source
-      )
     case "notify":
       source.appendExtensionNotification(event["message"] as? String ?? "")
     case "setTitle":
@@ -171,17 +149,13 @@ final class ExtensionUIModel: ObservableObject {
     cancelDialogs(from: source)
   }
 
+  private func containsRequest(id: String, from source: AppModel) -> Bool {
+    (presentedDialog.map { $0.source === source && $0.dialog.id == id } ?? false)
+      || queuedDialogs.contains { $0.source === source && $0.dialog.id == id }
+  }
+
   private func enqueue(_ dialog: ExtensionDialog, from source: AppModel) {
-    // Some extensions resend an unresolved request. Request IDs are scoped to their RPC
-    // process, hence source identity is part of the duplicate check.
-    let isDuplicate =
-      [presentedDialog].compactMap { $0 }.contains {
-        $0.source === source && $0.dialog.id == dialog.id
-      }
-      || queuedDialogs.contains {
-        $0.source === source && $0.dialog.id == dialog.id
-      }
-    guard !isDuplicate else { return }
+    guard !containsRequest(id: dialog.id, from: source) else { return }
 
     // Fail closed rather than retaining unbounded sources and blocking the whole app.
     guard pendingDialogCount < Self.maximumPendingDialogs,
@@ -203,7 +177,10 @@ final class ExtensionUIModel: ObservableObject {
   }
 
   private func updateStatus(_ event: PiRPCClient.JSON, from source: AppModel) {
-    let key = event["statusKey"] as? String ?? "extension"
+    guard let key = event["statusKey"] as? String, !key.isEmpty,
+      key.utf8.count <= ExtensionStatusLimits.maximumKeyBytes,
+      event["statusText"] == nil || event["statusText"] is String
+    else { return }
     let rawText = event["statusText"] as? String ?? ""
     if key == "account-usage-gui" {
       updateCodexAccounts(from: rawText, source: source)
@@ -214,10 +191,15 @@ final class ExtensionUIModel: ObservableObject {
       return
     }
 
+    guard rawText.utf8.count <= ExtensionStatusLimits.maximumTextBytes else { return }
     let text = Self.removingANSIEscapes(rawText)
       .trimmingCharacters(in: .whitespacesAndNewlines)
     let sourceID = ObjectIdentifier(source)
     if !text.isEmpty {
+      guard
+        sessionStatuses[sourceID]?[key] != nil
+          || (sessionStatuses[sourceID]?.count ?? 0) < ExtensionStatusLimits.maximumEntries
+      else { return }
       sessionStatuses[sourceID, default: [:]][key] = text
     } else if key != "account-usage" {
       // Keep the latest quota summary within this session, never another session's status.
