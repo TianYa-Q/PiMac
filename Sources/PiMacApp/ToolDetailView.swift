@@ -54,26 +54,25 @@ struct ToolDetailView: View {
   let title: String
   let text: String
   @State private var isSearching = false
-  @State private var query = ""
-  @State private var matchIndex = 0
+  @State private var search = ToolOutputSearchState(text: "")
   @State private var wrapsLines = false
   @FocusState private var searchFocused: Bool
 
   var body: some View {
-    let preview = ToolOutputPresentation(text: text)
-    let matches = preview.matches(for: query)
-    let selected = matches.isEmpty ? nil : matches[matchIndex % matches.count]
+    let preview = search.preview
     VStack(alignment: .leading, spacing: 0) {
       HStack(spacing: 6) {
         Text(title).font(.caption2.weight(.semibold))
-        Text("\(preview.lineCount) 行\(preview.isTruncated ? " · 预览" : "")")
-          .font(.caption2)
-          .foregroundStyle(.tertiary)
+        Text(
+          "\(preview.lineCount) 行\(preview.isTruncated ? (search.fromEnd ? " · 尾部预览" : " · 开头预览") : "")"
+        )
+        .font(.caption2)
+        .foregroundStyle(.tertiary)
         Spacer()
         Button {
           isSearching.toggle()
           searchFocused = isSearching
-          if !isSearching { query = "" }
+          if !isSearching { search.setQuery("") }
         } label: {
           Image(systemName: "magnifyingglass")
         }
@@ -89,6 +88,15 @@ struct ToolDetailView: View {
         .help(wrapsLines ? "关闭自动换行" : "自动换行")
         .accessibilityLabel("自动换行")
         .accessibilityValue(wrapsLines ? "开启" : "关闭")
+        Button {
+          search.setFromEnd(!search.fromEnd, text: text)
+        } label: {
+          Image(systemName: search.fromEnd ? "arrow.down.to.line" : "arrow.up.to.line")
+        }
+        .buttonStyle(.plain)
+        .help(search.fromEnd ? "切换到开头预览" : "切换到尾部预览（查看最新输出）")
+        .accessibilityLabel("尾部预览")
+        .accessibilityValue(search.fromEnd ? "开启" : "关闭")
         Button {
           exportOutput()
         } label: {
@@ -113,52 +121,54 @@ struct ToolDetailView: View {
       Divider().opacity(0.5)
       if isSearching {
         HStack(spacing: 6) {
-          TextField("搜索预览（不区分大小写）", text: $query)
-            .textFieldStyle(.roundedBorder)
-            .focused($searchFocused)
-            .onChange(of: query) { _, _ in matchIndex = 0 }
-            .onSubmit { moveMatch(by: 1, count: matches.count) }
-            .onExitCommand {
-              isSearching = false
-              query = ""
-              searchFocused = false
-            }
-          Text(
-            query.isEmpty
-              ? ""
-              : matches.isEmpty
-                ? "无匹配"
-                : "\(matchIndex % matches.count + 1)/\(matches.count)\(matches.count == ToolOutputPresentation.maximumMatches ? "+" : "")"
+          TextField(
+            "搜索预览（字面文本）",
+            text: Binding(get: { search.query }, set: { search.setQuery($0) })
           )
-          .font(.caption2)
-          .foregroundStyle(.secondary)
+          .textFieldStyle(.roundedBorder)
+          .focused($searchFocused)
+          .onSubmit { search.move(by: 1) }
+          .onExitCommand {
+            isSearching = false
+            search.setQuery("")
+            searchFocused = false
+          }
+          searchOption("Aa", keyPath: \.caseSensitive, help: "区分大小写")
+          searchOption("ab", keyPath: \.wholeWord, help: "整词匹配（字母、数字、下划线为词内字符）")
+          Text(search.matchLabel)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
           Button {
-            moveMatch(by: -1, count: matches.count)
+            search.move(by: -1)
           } label: {
             Image(systemName: "chevron.up")
           }
           .help("上一个匹配")
           .accessibilityLabel("上一个匹配")
-          .disabled(matches.isEmpty)
+          .disabled(search.matches.ranges.isEmpty)
           Button {
-            moveMatch(by: 1, count: matches.count)
+            search.move(by: 1)
           } label: {
             Image(systemName: "chevron.down")
           }
           .help("下一个匹配")
           .accessibilityLabel("下一个匹配")
-          .disabled(matches.isEmpty)
+          .disabled(search.matches.ranges.isEmpty)
         }
         .padding(6)
       }
-      ToolOutputView(text: preview.text, searchSelection: selected, wrapsLines: wrapsLines)
+      ToolOutputView(
+        text: preview.text, searchSelection: search.selectedRange, wrapsLines: wrapsLines)
       if preview.isTruncated {
-        Text("仅显示前 \(ToolOutputPresentation.maximumLines) 行／128 KiB 以内内容；搜索仅覆盖预览，复制与导出保留完整内容。")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .padding(9)
+        Text(
+          "仅显示\(search.fromEnd ? "尾部" : "开头") \(ToolOutputPresentation.maximumLines) 行／128 KiB 以内内容；搜索仅覆盖预览，复制与导出保留完整内容。"
+        )
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(9)
       }
     }
+    .onChange(of: text, initial: true) { _, next in search.updateText(next) }
     .frame(maxWidth: .infinity, alignment: .leading)
     .background(Color(nsColor: .textBackgroundColor).opacity(0.46))
     .clipShape(RoundedRectangle(cornerRadius: 7))
@@ -168,9 +178,24 @@ struct ToolDetailView: View {
     }
   }
 
-  private func moveMatch(by offset: Int, count: Int) {
-    guard count > 0 else { return }
-    matchIndex = (matchIndex % count + offset + count) % count
+  private func searchOption(
+    _ label: String, keyPath: WritableKeyPath<ToolOutputSearchOptions, Bool>, help: String
+  ) -> some View {
+    Button {
+      var options = search.options
+      options[keyPath: keyPath].toggle()
+      search.setOptions(options)
+    } label: {
+      Text(label).font(.system(.caption, design: .monospaced).weight(.semibold))
+        .padding(.horizontal, 5).padding(.vertical, 3)
+        .background(
+          search.options[keyPath: keyPath] ? Color.accentColor.opacity(0.18) : Color.clear,
+          in: RoundedRectangle(cornerRadius: 4))
+    }
+    .buttonStyle(.plain)
+    .help(help)
+    .accessibilityLabel(help)
+    .accessibilityValue(search.options[keyPath: keyPath] ? "开启" : "关闭")
   }
 
   private func exportOutput() {

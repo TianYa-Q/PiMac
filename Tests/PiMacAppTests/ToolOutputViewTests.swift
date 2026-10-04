@@ -30,6 +30,22 @@ struct ToolOutputViewTests {
     #expect(view.outputTextView.selectedRange() == NSRange(location: 0, length: 1))
   }
 
+  @Test func replacementReappliesSameSearchRangeWithoutStealingManualSelectionOnOtherUpdates() {
+    let view = ToolOutputScrollView()
+    let match = NSRange(location: 4, length: 3)
+    view.setOutput("one cat")
+    view.setSearchSelection(match)
+    view.outputTextView.setSelectedRange(NSRange(location: 0, length: 3))
+    view.setSearchSelection(match)
+    #expect(view.outputTextView.selectedRange().location == 0)
+    view.setOutput("two cat")
+    view.setSearchSelection(match)
+    #expect(view.outputTextView.selectedRange() == match)
+    view.setOutput("x")
+    view.setSearchSelection(match)
+    #expect(view.outputTextView.selectedRange() == NSRange(location: 1, length: 0))
+  }
+
   @Test func longLinesRemainHorizontallyScrollableAfterResize() {
     let view = ToolOutputScrollView()
     view.setFrameSize(CGSize(width: 300, height: 100))

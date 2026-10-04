@@ -78,6 +78,9 @@ final class ToolOutputScrollView: NSScrollView {
     else { return }
     let selection = outputTextView.selectedRange()
     outputTextView.string = text
+    // The same range may now refer to different text. Reapply it after replacement,
+    // but preserve manual selections across unrelated SwiftUI updates.
+    searchSelection = nil
     let length = (text as NSString).length
     let start = min(selection.location, length)
     outputTextView.setSelectedRange(

@@ -11,9 +11,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import lockfile from "proper-lockfile";
+import { acquireCacheLock, releaseCacheLock } from "./cache-lock.js";
 import {
   serializeBoundedCache,
   type CacheDocument,
@@ -119,50 +118,6 @@ async function withDocumentLock<T>(
   } finally {
     await releaseCacheLock(release, () => compromised);
   }
-}
-
-/** Retry outside proper-lockfile so cancellation interrupts contention, not just the query. */
-async function acquireCacheLock(
-  path: string,
-  signal: AbortSignal,
-  options: { onCompromised: (error: Error) => void },
-): Promise<() => Promise<void>> {
-  for (let attempt = 0; ; attempt++) {
-    signal.throwIfAborted();
-    try {
-      // Do not race acquisition against abort: a late successful acquisition would leak its lease.
-      return await lockfile.lock(path, {
-        realpath: false,
-        stale: 5 * 60_000,
-        retries: 0,
-        ...options,
-      });
-    } catch (error) {
-      signal.throwIfAborted();
-      if (
-        (error as NodeJS.ErrnoException).code !== "ELOCKED" ||
-        attempt >= 360
-      ) {
-        throw error;
-      }
-      await delay(500, undefined, { signal });
-    }
-  }
-}
-
-async function releaseCacheLock(
-  release: () => Promise<void>,
-  getCompromised: () => Error | undefined,
-): Promise<void> {
-  // Once compromised, proper-lockfile has already marked this lease released;
-  // invoking release() would only produce ERELEASED and hide the useful error.
-  try {
-    if (!getCompromised()) await release();
-  } catch (error) {
-    if (!getCompromised()) throw error;
-  }
-  const compromised = getCompromised();
-  if (compromised) throw compromised;
 }
 
 function readCache(): CacheDocument {
