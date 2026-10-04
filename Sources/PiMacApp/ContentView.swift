@@ -183,6 +183,7 @@ struct ContentView: View {
   @State private var sessionSearchResults: [SessionSearchResult] = []
   @State private var isSearchingSessions = false
   @State private var sessionSearchError: String?
+  @State private var sessionSearchRetry = UUID()
   @AppStorage("projectsCollapsed") private var projectsCollapsed = false
   @AppStorage(SidebarWidth.storageKey) private var sidebarWidth = SidebarWidth.defaultValue
   @GestureState private var sidebarDragTranslation: CGFloat = 0
@@ -316,14 +317,15 @@ struct ContentView: View {
       if sessionSearchFocused { composerFocused = false }
     }
     .onChange(of: sessionSearchText) {
-      isSearchingSessions = !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        .isEmpty
+      isSearchingSessions = !SessionSearchQuery(sessionSearchText).isEmpty
       sessionSearchResults = []
+      sessionSearchError = nil
     }
     .task(id: sessionSearchKey) {
       let query = sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !query.isEmpty else {
+      guard !SessionSearchQuery(query).isEmpty else {
         sessionSearchResults = []
+        sessionSearchError = nil
         isSearchingSessions = false
         return
       }
@@ -369,7 +371,7 @@ struct ContentView: View {
   private var redesignedSidebar: some View {
     let sessions = allSessions
     let visibleSessions = Array(sessions.prefix(visibleSessionCount))
-    let searching = !sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let searching = !SessionSearchQuery(sessionSearchText).isEmpty
     return VStack(spacing: 0) {
       VStack(alignment: .leading, spacing: 0) {
         HStack(spacing: 9) {
@@ -543,11 +545,19 @@ struct ContentView: View {
                 .controlSize(.small)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 8)
-            } else if let sessionSearchError {
-              Text(sessionSearchError)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 8)
+            } else if let searchError = sessionSearchError {
+              VStack(alignment: .leading, spacing: 8) {
+                Label(searchError, systemImage: "exclamationmark.triangle")
+                  .foregroundStyle(.secondary)
+                Button("重试搜索", systemImage: "arrow.clockwise") {
+                  sessionSearchError = nil
+                  isSearchingSessions = true
+                  sessionSearchRetry = UUID()
+                }
+                .buttonStyle(.bordered)
+              }
+              .font(.caption)
+              .padding(.vertical, 8)
             } else if sessionSearchResults.isEmpty {
               ContentUnavailableView.search(text: sessionSearchText)
                 .controlSize(.small)
@@ -735,7 +745,7 @@ struct ContentView: View {
   private var sessionSearchKey: String {
     let sessions = allSessions
     return
-      "\(app.projectURL?.standardizedFileURL.path ?? "")|\(sessionSearchText)|"
+      "\(app.projectURL?.standardizedFileURL.path ?? "")|\(sessionSearchText)|\(sessionSearchRetry)|"
       + sessions.map { "\($0.path)|\($0.title)|\($0.modifiedAt.timeIntervalSince1970)" }
       .joined(separator: "\n")
   }

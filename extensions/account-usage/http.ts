@@ -138,6 +138,11 @@ export async function readBoundedJson(
     if (typeof value !== "object" || value === null || Array.isArray(value))
       throw new Error("额度接口返回结构无效。");
     return value as Record<string, unknown>;
+  } catch (error) {
+    // Some transports reject pending reads with a generic network error on abort.
+    // Preserve the caller's cancellation/deadline rather than misreporting an outage.
+    signal?.throwIfAborted();
+    throw error;
   } finally {
     signal?.removeEventListener("abort", cancel);
     // Stop oversized/invalid bodies immediately; never mask the original error.

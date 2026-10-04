@@ -136,6 +136,46 @@ struct T3DesktopTests {
     #expect(refreshed.last!.modifiedAt > initial.last!.modifiedAt)
   }
 
+  @Test func sessionOrderUsesServerReactivationNotMessageActivity() {
+    let older: [String: Any] = [
+      "id": "older", "projectId": "project", "createdAt": "2026-10-01T00:00:00Z",
+      "latestUserMessageAt": "2026-10-04T00:00:00Z",
+      "latestRunRequestedAt": "2026-10-04T00:00:00Z",
+    ]
+    let newer: [String: Any] = [
+      "id": "newer", "projectId": "project", "createdAt": "2026-10-02T00:00:00Z",
+    ]
+    #expect(
+      WorkspaceModel.sessionCatalog(threads: [older, newer], projectID: "project")
+        .map(\.path) == ["t3:newer", "t3:older"])
+    var reopened = older
+    reopened["unsettledAt"] = "2026-10-03T00:00:00Z"
+    #expect(
+      WorkspaceModel.sessionCatalog(threads: [newer, reopened], projectID: "project")
+        .map(\.path) == ["t3:older", "t3:newer"])
+  }
+
+  @Test func sessionManualOrderFollowsKeylessThreadsAndUsesIDTies() {
+    let threads: [[String: Any]] = [
+      ["id": "b", "projectId": "project", "activeOrderKey": "n"],
+      ["id": "a", "projectId": "project", "activeOrderKey": "n"],
+      [
+        "id": "first-key", "projectId": "project", "activeOrderKey": "b",
+        "unsettledAt": "2026-10-05T00:00:00Z",
+      ],
+      ["id": "new", "projectId": "project", "createdAt": "2026-10-02T00:00:00Z"],
+      ["id": "missing", "projectId": "project", "unsettledAt": NSNull()],
+      ["id": "invalid", "projectId": "project", "createdAt": "invalid"],
+    ]
+    let expected = ["t3:new", "t3:invalid", "t3:missing", "t3:first-key", "t3:a", "t3:b"]
+    #expect(
+      WorkspaceModel.sessionCatalog(threads: threads, projectID: "project").map(\.path)
+        == expected)
+    #expect(
+      WorkspaceModel.sessionCatalog(threads: threads.reversed(), projectID: "project")
+        .map(\.path) == expected)
+  }
+
   @Test func sessionCreationTiesHaveDeterministicOrder() {
     let threads: [[String: Any]] = [
       ["id": "b", "projectId": "project", "createdAt": "2026-10-02T00:00:00Z"],

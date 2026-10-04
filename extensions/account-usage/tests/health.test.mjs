@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createJiti } from "jiti";
 
-const { formatUsageHealth } = await createJiti(import.meta.url).import(
-  "../health.ts",
-);
+const { formatUsageHealth, buildUsageHealthReport } = await createJiti(
+  import.meta.url,
+).import("../health.ts");
 const options = {
   provider: "openai",
   managed: true,
@@ -48,6 +48,28 @@ test("doctor counts only visible snapshots, treats boundary/future dates as stal
   assert.match(report, /Gemini：查询失败/u);
   for (const value of ["secret", "Bearer", "https://", "hidden-secret"])
     assert.equal(report.includes(value), false);
+});
+
+test("JSON health report is versioned, count-only and read-only", () => {
+  const report = buildUsageHealthReport(options);
+  assert.deepEqual(report, {
+    version: 1,
+    provider: "openai",
+    auth: "managed",
+    accounts: { total: 6, visible: 5, hidden: 1 },
+    snapshots: { fresh: 1, stale: 2, failed: 1, missing: 1 },
+    refreshing: false,
+    gemini: "failed",
+  });
+  const text = JSON.stringify(report);
+  for (const value of [
+    "Bearer",
+    "secret",
+    "https://",
+    "accountName",
+    "capturedAt",
+  ])
+    assert.equal(text.includes(value), false);
 });
 
 test("unmanaged auth, failed activation and missing windows are explicit", () => {

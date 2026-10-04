@@ -99,17 +99,23 @@ else:
                     supervisor.app.terminate()
                 supervisor.app.wait(timeout=5)
 
-    def test_stale_wrong_pid_or_failed_exit_never_relaunches(self):
+    def test_missing_stale_wrong_pid_or_failed_exit_recovers(self):
         dev = self.load_dev()
         with tempfile.TemporaryDirectory() as directory:
-            for pid, stamp, code in [(124, time.time(), 0), (123, time.time() - 20, 0),
-                                      (123, time.time(), 1)]:
+            for pid, stamp, code in [(None, time.time(), 0), (124, time.time(), 0),
+                                      (123, time.time() - 20, 0), (123, time.time(), 1),
+                                      (None, time.time(), -9)]:
                 supervisor = self.supervisor(dev, directory, code)
                 supervisor.restart.write_text(json.dumps({'pid': pid, 'timestamp': stamp}))
-                with patch.object(supervisor, 'launch') as launch:
-                    with self.assertRaises(RuntimeError):
-                        supervisor.tick()
+                with patch.object(supervisor, 'launch') as launch, \
+                        patch.object(dev, 'cleanup') as cleanup:
+                    supervisor.tick()
+                    cleanup.assert_called_once_with(supervisor.app_groups)
                     launch.assert_not_called()
+                    self.assertIsNotNone(supervisor.recovery_deadline)
+                    supervisor.recovery_deadline = time.monotonic() - 1
+                    supervisor.tick()
+                    launch.assert_called_once()
 
     def test_exit_and_startup_waits_are_bounded(self):
         dev = self.load_dev()
@@ -117,13 +123,31 @@ else:
             supervisor = self.supervisor(dev, directory)
             supervisor.restart.write_text(json.dumps({'pid': 123, 'timestamp': time.time()}))
             supervisor.exit_deadline = time.monotonic() - 1
-            with self.assertRaisesRegex(RuntimeError, 'old app did not exit'):
+            with patch.object(dev, 'cleanup') as cleanup:
                 supervisor.tick()
+                cleanup.assert_called_once()
+                self.assertIsNotNone(supervisor.recovery_deadline)
             supervisor.restart.unlink()
             supervisor.exit_deadline = None
+            supervisor.recovery_deadline = None
             supervisor.startup_deadline = time.monotonic() - 1
-            with self.assertRaisesRegex(RuntimeError, 'heartbeat timed out'):
+            with patch.object(dev, 'cleanup') as cleanup:
                 supervisor.tick()
+                cleanup.assert_called_once()
+                self.assertIsNotNone(supervisor.recovery_deadline)
+
+    def test_recovery_backoff_is_capped_and_resets_after_stable_run(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            supervisor = self.supervisor(dev, directory, 1)
+            with patch.object(dev, 'cleanup'), \
+                    patch.object(dev.time, 'monotonic', return_value=100):
+                for delay in [1, 2, 4, 8, 16, 32, 32]:
+                    supervisor.recover('test exit')
+                    self.assertEqual(supervisor.recovery_deadline, 100 + delay)
+                supervisor.launched_at = 30
+                supervisor.recover('stable app exit')
+                self.assertEqual(supervisor.recovery_deadline, 101)
 
     def test_startup_requires_heartbeat_of_replacement_pid(self):
         dev = self.load_dev()

@@ -5,6 +5,25 @@ import Testing
 
 @MainActor
 struct ServerSessionSearchIndexTests {
+  @Test func scopedQueriesSkipRejectedTitlesAndTitleOnlyQueriesNeedNoServer() async throws {
+    let index = ServerSessionSearchIndex()
+    let sessions = [
+      SessionItem(path: "t3:one", title: "库存", modifiedAt: .now),
+      SessionItem(path: "t3:two", title: "其他", modifiedAt: .now),
+    ]
+    var calls: [String] = []
+    func load(_ id: String) async throws -> [String] {
+      calls.append(id)
+      return ["正文"]
+    }
+    #expect(try await index.messages(for: "title:库存", in: sessions, load: load).isEmpty)
+    #expect(try await index.messages(for: "-title:库存", in: sessions, load: load).isEmpty)
+    #expect(calls.isEmpty)
+    let result = try await index.messages(for: "title:库存 text:正文", in: sessions, load: load)
+    #expect(calls == ["one"])
+    #expect(result["t3:one"] == ["正文"])
+  }
+
   @Test func cacheInvalidatesOnUpdatesAndResetAndTitleMatchesAvoidReads() async throws {
     let index = ServerSessionSearchIndex()
     let session = SessionItem(path: "t3:one", title: "项目", modifiedAt: .now)

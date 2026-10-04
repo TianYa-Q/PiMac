@@ -10,16 +10,14 @@ import * as RelayClient from '@t3tools/shared/relayClient';
 import * as ChildProcessSpawner from 'effect/unstable/process/ChildProcessSpawner';
 import { make } from '../../upstream/apps/server/src/cloud/ManagedEndpointRuntime.ts';
 import { configureNative } from '../../native.mjs';
-import { createConnectorRecovery } from '../../connector-recovery.mjs';
 
 export async function exerciseTunnelRuntime() {
   const broker = configureNative({ environmentId: 'test-connector' });
-  broker.connectorRecovery = createConnectorRecovery({ outageMs: 100, cooldownMs: 200, stableMs: 400, pollIntervalMs: 5 });
   const children = [], connectorOutput = [], relayRecoveries = [];
   broker.connectionDiagnostics.recordConnectorOutput = (pid, output) => connectorOutput.push({ pid, output });
   const program = Effect.gen(function* () {
     const runtime = yield* make;
-    const config = { providerKind: 'cloudflare_tunnel', connectorToken: 'private-fixture-token' };
+    const config = { providerKind: 'cloudflare_tunnel', tunnelId: 'fixture-tunnel', connectorToken: 'private-fixture-token' };
     yield* Effect.forkChild(runtime.recoveryRequests.pipe(Stream.runForEach(value => Effect.sync(() => relayRecoveries.push(value)))));
     const wait = predicate => Effect.gen(function* () {
       for (let n = 0; n < 200; n++) {
@@ -45,12 +43,24 @@ export async function exerciseTunnelRuntime() {
     yield* wait(() => broker.tunnelHealth.status === 'connected');
     assert.equal(relayRecoveries.length, 1, 'natural crash still asks upstream for recovery');
     yield* Queue.offer(children[1].output, new TextEncoder().encode('INF Lost connection with the edge connIndex=1\n'));
-    yield* wait(() => children.length === 3);
-    assert.equal(relayRecoveries.length, 1, 'local retry reset must not reprovision the Tunnel');
+    yield* wait(() => broker.tunnelHealth.status === 'reconnecting');
+    yield* Effect.sleep('200 millis');
+    assert.equal(children.length, 2, 'health observations must not restart an alive connector');
+    assert.equal(relayRecoveries.length, 1, 'health observations must not request relay recovery');
+    // Upstream must replace a connector when Relay rotates only its token.
+    const rotated = { ...config, connectorToken: 'rotated-fixture-token' };
+    yield* runtime.applyConfig(rotated);
+    assert.equal(children.length, 3);
+    assert.equal(children[1].running, false);
     assert.equal(broker.tunnelHealth.status, 'connecting');
     yield* Queue.offer(children[2].output, new TextEncoder().encode('INF Registered tunnel connection connIndex=0\n'));
     yield* wait(() => broker.tunnelHealth.status === 'connected');
-    assert.match(broker.connectionDiagnostics.summary, /all-edges-stalled-local-restart/);
+    yield* runtime.applyConfig(rotated);
+    assert.equal(children.length, 3, 'identical recovered config preserves the connector');
+    yield* runtime.applyConfig({ ...rotated, tunnelId: 'replacement-tunnel' });
+    assert.equal(children.length, 4, 'upstream also replaces changed tunnel identity');
+    assert.equal(children[2].running, false);
+    assert(!broker.connectionDiagnostics.summary.includes('all-edges-stalled-local-restart'));
     yield* runtime.applyConfig(null);
     assert.equal(broker.tunnelHealth.status, 'disabled');
     assert(children.every(child => !child.running));

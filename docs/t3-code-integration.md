@@ -236,28 +236,21 @@ rejected rather than silently overwritten. The port availability check cannot
 transfer its socket to upstream: an intervening bind race fails startup safely,
 and a failed startup never commits a new origin.
 
-On this host new
-connectors are pinned to HTTP/2 (TCP/7844), avoiding minutes of QUIC retries when
-UDP is blocked. Inherited `TUNNEL_TRANSPORT_PROTOCOL` cannot enable QUIC.
-This does not bypass a TUN proxy: the TCP connector follows the user's existing
-routing rules. Fake-IP addresses alone do not prove traffic uses a proxy node;
-Clash can still select DIRECT. The app does not edit global proxy configuration.
-Fake-IP DNS can collapse each regional edge pool to one synthetic address; the
-observed consequence is cloudflared reducing four HA connections to two. A
-scoped DNS fake-IP exclusion for `+.argotunnel.com` is a troubleshooting option
-to restore address diversity, not proof that DNS caused a TLS EOF. Do not disable
-TLS verification or post-quantum security to mask unexplained EOFs.
-A local outage watchdog observes actual registered edge connections (including
-`Lost connection with the edge`). After **30 seconds with no edge registered**,
-it may stop only cloudflared to reset its exponential retry wait; upstream's
-supervisor restarts the same connector config. The Server/Pi tasks, tunnel UUID,
-credentials and port are unchanged, and this intentional exit does not request
-relay replacement. Resets are limited to **two** until 60 seconds of stable edge
-health, with at least **two minutes** between resets. A single healthy edge
-prevents a reset; config changes/unlink re-check ownership under the upstream
-semaphore, and shutdown cancels monitoring. Termination escalates after five
-seconds for that connector only. Real network failure can still outlast recovery.
+Protocol selection, edge reconnect/backoff, token/tunnel configuration changes,
+and Relay recovery remain upstream-owned. Pi Mac does not pin HTTP/2, run an
+outage watchdog, kill stalled connectors, or suppress upstream recovery requests.
+Health/output hooks are observational only. Upstream's config identity includes
+both connectorToken and tunnelId, so a recovered token change replaces the child
+even when the tunnel ID stays the same. A local process respawn alone is not a
+Relay credential refresh.
 
+The connector follows the user's existing routing rules; Pi Mac itself does not
+edit global proxy configuration. Fake-IP addresses alone do not prove traffic
+uses a proxy node: Clash can still select DIRECT. Fake-IP DNS can collapse each
+regional edge pool to one synthetic address, reducing four HA connections to two.
+A scoped fake-IP exclusion for `+.argotunnel.com` can restore address diversity,
+but is not proof that DNS caused TLS EOF. Do not disable TLS verification or
+post-quantum security to mask unexplained EOFs.
 Regression tests cover repeated real Server restarts with unchanged origin,
 persistent phone DPoP authorization and WebSocket tickets, occupied-port recovery,
 unsafe port files, and patched official connector output/crash/unlink transitions.

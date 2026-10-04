@@ -775,6 +775,17 @@ try {
       );
       assert.match(app.notices.at(-1).message, /健康检查/u);
       assert.match(app.notices.at(-1).message, /自动轮换不适用/u);
+      await app.commands.get("usage").handler("doctor json", app.ctx);
+      const report = JSON.parse(app.notices.at(-1).message);
+      assert.equal(report.version, 1);
+      assert.equal(report.provider, "openai");
+      assert.equal(report.auth, "unmanaged");
+      assert.equal(typeof report.accounts.total, "number");
+      assert.equal(Object.hasOwn(report, "accountNames"), false);
+      assert.deepEqual(
+        [requests.length, app.mutations.length, app.entries.length],
+        before,
+      );
     } finally {
       await app.events.get("session_shutdown")({}, app.ctx);
     }

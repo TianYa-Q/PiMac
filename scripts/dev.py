@@ -79,6 +79,9 @@ class AppSupervisor:
         self.app = None
         self.exit_deadline = None
         self.startup_deadline = None
+        self.recovery_deadline = None
+        self.recovery_attempts = 0
+        self.launched_at = None
 
     def launch(self):
         self.state.unlink(missing_ok=True)
@@ -92,11 +95,29 @@ class AppSupervisor:
                 stdin=subprocess.DEVNULL, stdout=None if verbose else log,
                 stderr=None if verbose else subprocess.STDOUT)
         self.app_groups.add(self.app.pid)
-        self.startup_deadline = time.monotonic() + 30
+        self.launched_at = time.monotonic()
+        self.startup_deadline = self.launched_at + 30
         self.exit_deadline = None
+        self.recovery_deadline = None
         status(f"Pi Mac started · PID {self.app.pid}")
 
+    def recover(self, reason):
+        # Capture/stop surviving services before launching another owner.
+        status(f"{reason} · cleaning up before automatic restart")
+        cleanup(self.app_groups)
+        self.state.unlink(missing_ok=True)
+        if self.launched_at is not None and time.monotonic() - self.launched_at >= 60:
+            self.recovery_attempts = 0
+        self.recovery_attempts += 1
+        delay = 2 ** min(self.recovery_attempts - 1, 5)
+        self.recovery_deadline = time.monotonic() + delay
+        status(f"Automatic restart in {delay}s · attempt {self.recovery_attempts}")
+
     def tick(self):
+        if self.recovery_deadline is not None:
+            if time.monotonic() >= self.recovery_deadline:
+                self.launch()
+            return
         code = self.app.poll()  # Reap zombies; kill -0 cannot do this.
         intent = read_state(self.restart)
         timestamp = intent.get("timestamp")
@@ -105,7 +126,8 @@ class AppSupervisor:
                  and 0 <= time.time() - timestamp <= 15)
         if code is not None:
             if not valid or code != 0:
-                raise RuntimeError(f"Pi Mac exited ({code}) without a valid restart handoff; see {app_log}")
+                self.recover(f"Pi Mac exited ({code}) without a valid restart handoff; see {app_log}")
+                return
             status(f"Old app reaped · PID {self.app.pid} · starting replacement")
             self.launch()
             return
@@ -114,10 +136,11 @@ class AppSupervisor:
                 self.exit_deadline = time.monotonic() + 12
                 status(f"Restart handoff received · waiting for PID {self.app.pid} to exit")
             if time.monotonic() >= self.exit_deadline:
-                raise RuntimeError("Restart timed out: old app did not exit; no second app was launched")
+                self.recover("Restart timed out: old app did not exit")
             return
         if self.exit_deadline is not None:
-            raise RuntimeError("Restart handoff cancelled or expired; no second app was launched")
+            self.recover("Restart handoff cancelled or expired")
+            return
         if self.startup_deadline is not None:
             heartbeat = read_state(self.state)
             stamp = heartbeat.get("timestamp")
@@ -126,7 +149,7 @@ class AppSupervisor:
                 self.startup_deadline = None
                 status(f"App heartbeat confirmed · PID {self.app.pid}")
             elif time.monotonic() >= self.startup_deadline:
-                raise RuntimeError(f"New app heartbeat timed out; see {app_log}")
+                self.recover(f"New app heartbeat timed out; see {app_log}")
 
 
 def app_is_idle(state):

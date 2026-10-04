@@ -18,6 +18,7 @@ The link points `~/.pi/agent/extensions/account-usage` at this directory. Existi
 - `/accounts`: manage accounts for the current model's provider, including logging in. The Health Check menu action runs the same read-only report as `/usage doctor`; it performs no network requests or account switching.
 - `/accounts switch <name>`: explicitly switch the current session and future default.
 - `/usage`, `/usage refresh`, `/usage settings`, `/usage history`, `/usage show`.
+- `/usage doctor json`: version-1 count-only JSON health report via the notification channel (provider/auth state, account/snapshot counts, refresh and Gemini status). No account names/IDs/errors, network requests or state changes. Headless clients may ignore notifications.
 - `/usage doctor`: read-only health report for auth ownership, visible/hidden account counts, fresh/stale/failed/unknown quota snapshots, refresh activity and Gemini snapshot state. It does not query the network, warm up models or switch accounts, and never prints credentials, account IDs or raw provider errors. Snapshot health is not a live connectivity test.
 
 Select an **openai** model before logging in to a new OpenAI ChatGPT account; select **openai-codex** for legacy Codex. New OpenAI login uses Pi's native OAuth implementation, issued client ID, direct-token scope, and stable installation device ID. TUI uses Pi's native login components; RPC forwards links and prompts to the client.
@@ -82,7 +83,7 @@ The existing warm-up behavior is retained: a full, unused 5-hour or 7-day window
 
 Account queries and warm-ups run with at most two workers. Cancellation or a failed worker stops queued work and drains active workers before releasing shared-cache leases. Refreshes await both providers and publish successful results even when the other provider fails; obsolete refreshes cannot publish or reschedule timers. Overlapping automatic Gemini refreshes await the same in-flight query. Failed Gemini queries do not start a freshness cooldown. Incremental HTTP storage grows geometrically rather than retaining one object per received chunk.
 
-Failures are recorded in the private `account-usage-errors.jsonl` diagnostic log, excluding credentials, headers, URLs, and response bodies.
+Failures are recorded in the private `account-usage-errors.jsonl` diagnostic log, excluding credentials, headers, URLs, and response bodies. Error names, transport codes and syscall metadata use finite allowlists; unknown values are omitted, and recursive/aggregate errors are bounded. Account-name context is retained in this private log, not in the JSON health report. HTTP read failures preserve the caller's cancellation or deadline when a transport returns a generic network error during abort.
 
 ## RPC protocol
 

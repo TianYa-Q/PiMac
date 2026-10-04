@@ -2,14 +2,12 @@
 import { createConnectionDiagnostics } from './connection-diagnostics.mjs';
 import { createPiMobileUsage } from './pi-mobile-usage.mjs';
 import { createTunnelHealth } from './tunnel-health.mjs';
-import { createConnectorRecovery } from './connector-recovery.mjs';
 let host;
 export function configureNative({ environmentId, directory }) {
   if (host && !host.closed) throw new Error('Server host already owned');
   const connectionDiagnostics = createConnectionDiagnostics(directory);
   host = { environmentId, closed: false, mobileUsage: createPiMobileUsage(), connectionDiagnostics,
     tunnelHealth: createTunnelHealth(connectionDiagnostics),
-    connectorRecovery: createConnectorRecovery(),
     diagnostics: { requests: 0, accepted: 0, queuedDeliveries: 0, successfulDeliveries: 0, failedDeliveries: 0 },
     message: '', browserURL: null, close() { this.closed = true; this.mobileUsage.close(); } };
   return host;
@@ -20,6 +18,8 @@ const methods = new Set(['server.probe', 'server.getConfig', 'server.getSettings
   // Mobile refreshes the authoritative projection after submitting a message.
   // The official read scope still applies; do not open the whole namespace.
   'orchestration.getThreadProjection', 'auth.subscribeAccess',
+  // Mobile archive uses its own snapshot and stream; upstream still enforces read scope.
+  'orchestration.getArchivedShellSnapshot', 'orchestration.subscribeArchivedShell',
   // Stock mobile liveness feeds upstream's background subscription policy.
   // Host power state and all other administration remain denied.
   'server.reportClientActivity',

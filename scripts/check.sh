@@ -2,6 +2,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 ./scripts/lint.sh
+python3 -m unittest discover -s Tests/DevWatcher -p 'test_*.py'
 ./scripts/prepare-t3-server.sh
 swift test
 npm --prefix extensions/account-usage run prepublishOnly

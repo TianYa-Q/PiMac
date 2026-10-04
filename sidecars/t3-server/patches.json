@@ -11,36 +11,8 @@
   ],
   "apps/server/src/cloud/ManagedEndpointRuntime.ts": [
     {
-      "oldText": "  const linkStateSemaphore = yield* Semaphore.make(1);",
-      "newText": "  const linkStateSemaphore = yield* Semaphore.make(1);\n  const locallyRestarted = new Set<number>();"
-    },
-    {
-      "oldText": "      const result = yield* Effect.result(connector.child.exitCode);",
-      "newText": "      const result = yield* Effect.result(connector.child.exitCode);\n      const localRestart = locallyRestarted.delete(Number(connector.child.pid));"
-    },
-    {
-      "oldText": "        if (uptimeMillis >= RELAY_RESTART_STABLE_UPTIME_MS) {",
-      "newText": "        if (localRestart || uptimeMillis >= RELAY_RESTART_STABLE_UPTIME_MS) {"
-    },
-    {
-      "oldText": "          yield* Queue.offer(recoveryRequests, connector.config);",
-      "newText": "          if (!localRestart) yield* Queue.offer(recoveryRequests, connector.config);"
-    },
-    {
-      "oldText": "  const observeConnectorOutput = (connector: ActiveConnector) => {",
-      "newText": "  const watchStalledConnector = (connector: ActiveConnector) => Effect.gen(function* () {\n    const broker = getNative(), pid = Number(connector.child.pid);\n    while (true) {\n      const active = yield* Ref.get(activeRef);\n      if (active?.child.pid !== connector.child.pid || active.configKey !== connector.configKey) return;\n      const reset = broker.connectorRecovery.observe(pid, broker.tunnelHealth.isConnected(pid), yield* Clock.currentTimeMillis);\n      if (reset) {\n        yield* reconcileSemaphore.withPermits(1)(Effect.gen(function* () {\n          const current = yield* Ref.get(activeRef), desired = yield* Ref.get(desiredConfigRef);\n          if (current?.child.pid !== connector.child.pid || current.configKey !== connector.configKey ||\n            !desired || runtimeConfigKey(desired) !== connector.configKey || broker.tunnelHealth.isConnected(pid)) return;\n          if (!(yield* connector.child.isRunning.pipe(Effect.orElseSucceed(() => false)))) return;\n          broker.connectionDiagnostics.record(\"tunnel-recovery\", { reason: \"all-edges-stalled-local-restart\" });\n          locallyRestarted.add(pid);\n          yield* connector.child.kill({ forceKillAfter: \"5 seconds\" }).pipe(Effect.catch(() => Effect.sync(() => {\n            locallyRestarted.delete(pid);\n            broker.connectionDiagnostics.record(\"tunnel-recovery\", { reason: \"local-restart-failed\" });\n          })));\n        }));\n        return;\n      }\n      yield* Effect.sleep(Duration.millis(broker.connectorRecovery.pollIntervalMs));\n    }\n  }).pipe(Effect.catchCause((cause) => Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.sync(() =>\n    getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: \"watchdog-failed\" }))));\n\n  const observeConnectorOutput = (connector: ActiveConnector) => {"
-    },
-    {
-      "oldText": "      yield* Effect.forkIn(superviseConnector(connector), connectorScope);",
-      "newText": "      yield* Effect.forkIn(superviseConnector(connector), connectorScope);\n      yield* Effect.forkIn(watchStalledConnector(connector), connectorScope);"
-    },
-    {
       "oldText": "import * as Clock from \"effect/Clock\";",
-      "newText": "import * as Clock from \"effect/Clock\";\nimport * as Cause from \"effect/Cause\";\nimport { cloudflaredEnvironment } from \"pimac:cloudflared-transport.mjs\";\nimport { getNative } from \"pimac:native.mjs\";"
-    },
-    {
-      "oldText": "            env: {\n              ...process.env,\n              TUNNEL_TOKEN: config.connectorToken,\n            },",
-      "newText": "            env: cloudflaredEnvironment(process.env, config.connectorToken),"
+      "newText": "import * as Clock from \"effect/Clock\";\nimport { getNative } from \"pimac:native.mjs\";"
     },
     {
       "oldText": "    yield* stopConnector(active);",

@@ -32,7 +32,7 @@ final class ServerSessionSearchIndex {
     for session in sessions {
       try Task.checkCancellation()
       guard session.path.hasPrefix("t3:") else { continue }
-      if query.excluded.isEmpty && query.matches([session.title]) { continue }
+      guard query.needsMessages(for: session.title) else { continue }
       let key = "\(session.path)|\(session.modifiedAt.timeIntervalSince1970)" as NSString
       if let cached = cache.object(forKey: key) {
         result[session.path] = cached.messages

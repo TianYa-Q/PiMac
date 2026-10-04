@@ -21,7 +21,7 @@ import {
   type AntigravityUsageState,
 } from "./antigravity.js";
 import { accountUsageCacheKey } from "./account-identity.js";
-import { formatUsageHealth } from "./health.js";
+import { buildUsageHealthReport, formatUsageHealth } from "./health.js";
 import { CodexSessionAuth } from "./auth.js";
 import { queryAccountUsage } from "./codex.js";
 import { mapWithConcurrency } from "./concurrency.js";
@@ -768,21 +768,24 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     }
   };
 
-  const showUsageHealth = (ctx: ExtensionContext) => {
+  const showUsageHealth = (ctx: ExtensionContext, json = false) => {
     const state = safeReadAccountState(ctx);
     if (!state) return;
+    const options = {
+      provider: providerId,
+      managed: managesSelectedAuth,
+      authFailed,
+      accountNames: state.accounts.map((account) => account.name),
+      hiddenNames: settings.hiddenAccounts,
+      usages: usagesForState(state),
+      maxAgeMs: queryInterval(ctx),
+      gemini: antigravityUsage.kind,
+      refreshing: activeRefreshes > 0,
+    };
     ctx.ui.notify(
-      formatUsageHealth({
-        provider: providerId,
-        managed: managesSelectedAuth,
-        authFailed,
-        accountNames: state.accounts.map((account) => account.name),
-        hiddenNames: settings.hiddenAccounts,
-        usages: usagesForState(state),
-        maxAgeMs: queryInterval(ctx),
-        gemini: antigravityUsage.kind,
-        refreshing: activeRefreshes > 0,
-      }),
+      json
+        ? JSON.stringify(buildUsageHealthReport(options), null, 2)
+        : formatUsageHealth(options),
       "info",
     );
   };
@@ -951,8 +954,8 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     description: "查看当前 OpenAI ChatGPT / Codex 账户的剩余额度和重置时间",
     handler: async (args, ctx) => {
       const action = args.trim();
-      if (action === "doctor") {
-        showUsageHealth(ctx);
+      if (action === "doctor" || action === "doctor json") {
+        showUsageHealth(ctx, action === "doctor json");
         return;
       }
       if (action === "refresh") {
@@ -980,7 +983,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       }
       if (action) {
         ctx.ui.notify(
-          "用法：/usage [refresh|settings|history|show|doctor]",
+          "用法：/usage [refresh|settings|history|show|doctor [json]]",
           "warning",
         );
         return;

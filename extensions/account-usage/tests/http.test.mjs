@@ -125,6 +125,27 @@ await test("abort cancels a stalled reader and releases its lock", async () => {
   assert.equal(response.body.locked, false);
 });
 
+await test("transport read errors preserve an expired deadline", async () => {
+  const controller = new AbortController();
+  const reason = new DOMException("deadline", "TimeoutError");
+  const response = new Response(
+    new ReadableStream(
+      {
+        pull(stream) {
+          controller.abort(reason);
+          stream.error(new TypeError("transport failed"));
+        },
+      },
+      { highWaterMark: 0 },
+    ),
+  );
+  await assert.rejects(
+    readBoundedJson(response, 64, controller.signal),
+    (error) => error === reason,
+  );
+  assert.equal(response.body.locked, false);
+});
+
 await test("already aborted requests cancel without reading", async () => {
   const controller = new AbortController();
   controller.abort();

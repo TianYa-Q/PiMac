@@ -1,5 +1,4 @@
-// Host health tracking: upstream owns connector restart/recovery; a separate
-// bounded host watchdog can request a local retry reset during total outage.
+// Read-only host health tracking; upstream owns all connector restart/recovery.
 // Raw connector output (which can contain credentials) never leaves this parser.
 export function createTunnelHealth(diagnostics) {
   let pid = null, state = 'disabled';
@@ -11,7 +10,6 @@ export function createTunnelHealth(diagnostics) {
   };
   return {
     get status() { return state; },
-    isConnected(sourcePID) { return sourcePID === pid && connections.size > 0; },
     start(nextPID) {
       pid = nextPID; connections.clear(); transition('connecting');
     },

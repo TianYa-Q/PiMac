@@ -4,6 +4,35 @@ import Testing
 @testable import PiMacApp
 
 struct SessionSearchTests {
+  @Test func scopedTermsMatchOnlyTheirFieldsAndKeepUnknownPrefixesLiteral() {
+    let query = SessionSearchQuery("TITLE:\"Cafe 项目\" text:修复 -text:秘密 -title:废弃")
+    #expect(query.titleRequired == ["Cafe 项目"])
+    #expect(query.textRequired == ["修复"])
+    #expect(query.matches(title: "Café 项目", messages: ["已修复"]))
+    #expect(!query.matches(title: "Cafe 项目 修复", messages: ["无关键词"]))
+    #expect(!query.matches(title: "Cafe 项目", messages: ["修复秘密"]))
+    #expect(!query.acceptsTitle("废弃 Cafe 项目"))
+    #expect(SessionSearchQuery("file:main.swift").required == ["file:main.swift"])
+    #expect(SessionSearchQuery("title: text: -title: -text:").isEmpty)
+    #expect(!SessionSearchQuery("title:项目").needsMessages(for: "项目"))
+    #expect(!SessionSearchQuery("title:项目 text:正文").needsMessages(for: "其他"))
+  }
+
+  @Test func scopedSearchUsesMessageSnippetsAndAvoidsReadingTitleOnlyResults() {
+    let sessions = [
+      SessionItem(path: "t3:one", title: "库存修复", modifiedAt: .now),
+      SessionItem(path: "t3:two", title: "其他项目", modifiedAt: .now),
+    ]
+    let messages = ["t3:one": ["完成库存检查"], "t3:two": ["完成库存检查"]]
+    #expect(SessionSearch.results(for: "title:库存", in: sessions).map(\.id) == ["t3:one"])
+    let results = SessionSearch.results(
+      for: "title:库存 text:检查", in: sessions, messagesByPath: messages)
+    #expect(results.map(\.id) == ["t3:one"])
+    #expect(results.first?.snippet == "完成库存检查")
+    #expect(SessionSearch.results(for: "text:修复", in: sessions, messagesByPath: messages).isEmpty)
+    #expect(SessionSearch.results(for: "-title:库存", in: sessions).map(\.id) == ["t3:two"])
+  }
+
   @Test func queryGrammarSupportsPhrasesExclusionsAndUnicode() {
     let query = SessionSearchQuery("  café \"修复 库存\" -秘密  ")
     #expect(query.required == ["café", "修复 库存"])

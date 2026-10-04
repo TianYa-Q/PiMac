@@ -216,21 +216,35 @@ final class WorkspaceModel: ObservableObject {
   }
 
   static func sessionCatalog(threads: [[String: Any]], projectID: String) -> [SessionItem] {
-    // Output and turn updates must not move rows while multiple sessions are active.
-    // Break creation-time ties by ID so server snapshot order cannot shuffle them either.
-    // Parse each date once, rather than constructing formatters in O(n log n) comparisons.
+    // Match T3 client-runtime's sortActiveThreadsByOrderKey: new/reopened
+    // keyless threads lead, then manually arranged threads in saved key order.
+    // Lifecycle anchors belong to Server; message/output updates never move rows.
     return threads.filter { $0["projectId"] as? String == projectID }.compactMap {
       thread
-        -> (id: String, createdAt: Date, item: SessionItem)? in
+        -> (id: String, anchorAt: Date, orderKey: String?, item: SessionItem)? in
       guard let id = thread["id"] as? String else { return nil }
+      let createdAt = T3DesktopClient.date(thread["createdAt"])
+      // Upstream sinks malformed timestamps to epoch, not distantPast.
+      let epoch = Date(timeIntervalSince1970: 0)
+      let reopenedAt = T3DesktopClient.date(thread["unsettledAt"])
+      let anchorAt = max(
+        createdAt == .distantPast ? epoch : createdAt,
+        reopenedAt == .distantPast ? epoch : reopenedAt)
       return (
-        id, T3DesktopClient.date(thread["createdAt"]),
+        id, anchorAt, thread["activeOrderKey"] as? String,
         SessionItem(
           path: "t3:\(id)", title: thread["title"] as? String ?? "未命名线程",
           modifiedAt: T3DesktopClient.date(thread["updatedAt"]))
       )
     }.sorted {
-      if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+      switch ($0.orderKey, $1.orderKey) {
+      case (nil, .some): return true
+      case (.some, nil): return false
+      case (.some(let left), .some(let right)):
+        if left != right { return left < right }
+      case (nil, nil):
+        if $0.anchorAt != $1.anchorAt { return $0.anchorAt > $1.anchorAt }
+      }
       return $0.id < $1.id
     }.map(\.item)
   }
