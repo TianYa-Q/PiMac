@@ -4,6 +4,18 @@ import Testing
 @testable import PiMacApp
 
 struct ToolOutputSearchStateTests {
+  @Test func matchingLinesAreUniqueAndPreserveUnicode() {
+    var state = ToolOutputSearchState(text: "ignore\r\n😀 cat cat\r\n猫cat\u{2028}last")
+    state.setQuery("cat")
+    #expect(state.matchingLinesText == "😀 cat cat\n猫cat")
+    state.move(by: 1)
+    #expect(state.matchingLinesText == "😀 cat cat\n猫cat")
+    state.setOptions(.init(wholeWord: true))
+    #expect(state.matchingLinesText == "😀 cat cat")
+    state.setQuery("missing")
+    #expect(state.matchingLinesText.isEmpty)
+  }
+
   @Test func caseSensitiveSearchRemainsLiteral() {
     let preview = ToolOutputPresentation(text: "😀 ABC abc [a.*] [A.*]")
     let options = ToolOutputSearchOptions(caseSensitive: true)

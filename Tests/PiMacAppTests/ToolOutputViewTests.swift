@@ -101,6 +101,20 @@ struct ToolOutputViewTests {
     #expect(view.outputTextView.selectedRange() == NSRange(location: 1, length: 0))
   }
 
+  @Test func clearingSearchCollapsesOnlySearchOwnedSelection() {
+    let view = ToolOutputScrollView()
+    view.setOutput("one cat")
+    let match = NSRange(location: 4, length: 3)
+    view.setSearchSelection(match)
+    view.setSearchSelection(nil)
+    #expect(view.outputTextView.selectedRange() == NSRange(location: 4, length: 0))
+    view.setSearchSelection(match)
+    let manual = NSRange(location: 0, length: 3)
+    view.outputTextView.setSelectedRange(manual)
+    view.setSearchSelection(nil)
+    #expect(view.outputTextView.selectedRange() == manual)
+  }
+
   @Test func longLinesRemainHorizontallyScrollableAfterResize() {
     let view = ToolOutputScrollView()
     view.setFrameSize(CGSize(width: 300, height: 100))

@@ -129,6 +129,9 @@ final class ToolOutputScrollView: NSScrollView {
   func setSearchSelection(_ range: NSRange?) {
     guard range != searchSelection else { return }
     guard let range else {
+      if let previous = searchSelection, outputTextView.selectedRange() == previous {
+        outputTextView.setSelectedRange(NSRange(location: previous.location, length: 0))
+      }
       searchSelection = nil
       return
     }

@@ -264,12 +264,12 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       maxAgeMs: queryInterval(ctx),
       force: notify || force,
       signal: controller.signal,
-      query: () =>
+      query: (signal) =>
         mapWithConcurrency(
           visible,
           QUERY_CONCURRENCY,
-          (account) => queryAccountUsage(account, controller.signal),
-          controller.signal,
+          (account) => queryAccountUsage(account, signal),
+          signal,
         ),
     });
     if (
@@ -332,7 +332,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       maxAgeMs: interval,
       force,
       signal,
-      query: () => queryAntigravityUsage(ctx, signal),
+      query: (querySignal) => queryAntigravityUsage(ctx, querySignal),
     });
     if (
       !sessionActive ||

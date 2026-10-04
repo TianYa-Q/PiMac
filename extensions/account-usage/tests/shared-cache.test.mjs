@@ -26,6 +26,79 @@ const options = (overrides = {}) => ({
 });
 
 try {
+  await test("stalled queries release leases and never publish late results", async () => {
+    let resolve;
+    const late = new Promise((done) => {
+      resolve = done;
+    });
+    const request = options({
+      namespace: "stalled",
+      queryTimeoutMs: 20,
+      query: () => late,
+    });
+    await assert.rejects(readThroughSharedCache(request), {
+      name: "TimeoutError",
+    });
+    assert.deepEqual(
+      await readThroughSharedCache({
+        ...request,
+        query: async () => ({ remaining: 17 }),
+      }),
+      { remaining: 17 },
+    );
+    resolve({ remaining: 99 });
+    await delay(10);
+    assert.deepEqual(await readThroughSharedCache(request), { remaining: 17 });
+  });
+
+  await test("query deadlines validate before invoking adapters", async () => {
+    let calls = 0;
+    for (const queryTimeoutMs of [0, -1, 1.5, NaN, Infinity, 2_147_483_648]) {
+      await assert.rejects(
+        readThroughSharedCache(
+          options({
+            namespace: "invalid-timeout",
+            queryTimeoutMs,
+            query: async () => {
+              calls++;
+              return {};
+            },
+          }),
+        ),
+        RangeError,
+      );
+    }
+    assert.equal(calls, 0);
+  });
+
+  await test("query adapters receive caller cancellation through the bounded signal", async () => {
+    const controller = new AbortController();
+    let entered;
+    const started = new Promise((resolve) => {
+      entered = resolve;
+    });
+    let querySignal;
+    const pending = readThroughSharedCache(
+      options({
+        namespace: "abort-adapter",
+        signal: controller.signal,
+        query: (signal) => {
+          querySignal = signal;
+          entered();
+          return new Promise(() => {});
+        },
+      }),
+    );
+    await started;
+    controller.abort();
+    await assert.rejects(pending, { name: "AbortError" });
+    assert.equal(querySignal.aborted, true);
+    assert.deepEqual(
+      await readThroughSharedCache(options({ namespace: "abort-adapter" })),
+      { remaining: 80 },
+    );
+  });
+
   await test("cache hits are cloned, key changes and force query again", async () => {
     let queries = 0;
     const request = options({ query: async () => ({ count: ++queries }) });

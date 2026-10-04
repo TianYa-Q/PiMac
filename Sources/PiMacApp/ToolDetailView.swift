@@ -59,10 +59,13 @@ struct ToolDetailView: View {
   @State private var isSearching = false
   @State private var search = ToolOutputSearchState(text: "")
   @State private var wrapsLines = false
+  @State private var showsMatchingLines = false
   @FocusState private var searchFocused: Bool
 
   var body: some View {
     let preview = search.preview
+    let filtered = isSearching && showsMatchingLines
+    let displayedText = filtered ? search.matchingLinesText : preview.text
     VStack(alignment: .leading, spacing: 0) {
       HStack(spacing: 6) {
         Text(title).font(.caption2.weight(.semibold))
@@ -122,7 +125,7 @@ struct ToolDetailView: View {
         .accessibilityLabel("尾部预览")
         .accessibilityValue(search.fromEnd ? "开启" : "关闭")
         Button {
-          exportOutput()
+          exportOutput(text)
         } label: {
           Image(systemName: "square.and.arrow.down")
         }
@@ -159,6 +162,20 @@ struct ToolDetailView: View {
           }
           searchOption("Aa", keyPath: \.caseSensitive, help: "区分大小写")
           searchOption("ab", keyPath: \.wholeWord, help: "整词匹配（字母、数字、下划线为词内字符）")
+          Toggle("仅匹配行", isOn: $showsMatchingLines)
+            .toggleStyle(.button).font(.caption)
+            .help("仅显示预览中的匹配行；最多覆盖 1000 个匹配")
+          Menu {
+            Button("复制匹配行") {
+              NSPasteboard.general.clearContents()
+              NSPasteboard.general.setString(search.matchingLinesText, forType: .string)
+            }
+            Button("导出匹配行") { exportOutput(search.matchingLinesText) }
+          } label: {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+          }
+          .help("复制或导出匹配行（不包含未预览内容）")
+          .disabled(search.matches.ranges.isEmpty)
           Text(search.matchLabel)
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -169,7 +186,7 @@ struct ToolDetailView: View {
           }
           .help("上一个匹配")
           .accessibilityLabel("上一个匹配")
-          .disabled(search.matches.ranges.isEmpty)
+          .disabled(search.matches.ranges.isEmpty || filtered)
           Button {
             search.move(by: 1)
           } label: {
@@ -177,13 +194,19 @@ struct ToolDetailView: View {
           }
           .help("下一个匹配")
           .accessibilityLabel("下一个匹配")
-          .disabled(search.matches.ranges.isEmpty)
+          .disabled(search.matches.ranges.isEmpty || filtered)
         }
         .padding(6)
       }
+      if filtered {
+        Text(search.matches.ranges.isEmpty ? "没有匹配行" : "匹配行视图 · 复制全文按钮仍保留完整输出")
+          .font(.caption2).foregroundStyle(.secondary).padding(6)
+      }
       ToolOutputView(
-        text: preview.text, searchSelection: search.selectedRange, wrapsLines: wrapsLines,
-        searchMatches: search.matches.ranges, followsTail: followsTail && search.fromEnd,
+        text: displayedText, searchSelection: filtered ? nil : search.selectedRange,
+        wrapsLines: wrapsLines,
+        searchMatches: filtered ? [] : search.matches.ranges,
+        followsTail: followsTail && search.fromEnd && !filtered,
         maximumHeight: isExpanded ? 600 : 300)
       if preview.isTruncated {
         Text(
@@ -227,14 +250,14 @@ struct ToolDetailView: View {
     .accessibilityValue(search.options[keyPath: keyPath] ? "开启" : "关闭")
   }
 
-  private func exportOutput() {
+  private func exportOutput(_ output: String) {
     let panel = NSSavePanel()
     panel.nameFieldStringValue = "tool-output.txt"
     panel.canCreateDirectories = true
     panel.begin { response in
       guard response == .OK, let url = panel.url else { return }
       do {
-        try text.write(to: url, atomically: true, encoding: .utf8)
+        try output.write(to: url, atomically: true, encoding: .utf8)
       } catch {
         NSAlert(error: error).runModal()
       }

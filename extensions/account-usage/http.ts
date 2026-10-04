@@ -124,7 +124,6 @@ export async function readBoundedJson(
       // Never throw from an abort listener or obscure the original read error.
     }
   };
-  signal?.addEventListener("abort", cancel, { once: true });
   try {
     signal?.throwIfAborted();
     const length = Number(response.headers.get("content-length"));
@@ -136,7 +135,29 @@ export async function readBoundedJson(
     let size = 0;
     if (reader) {
       for (;;) {
-        const { done, value } = await reader.read();
+        // Use a fresh abort promise per read: reusing a pending promise retains
+        // a reaction for every tiny chunk until abort, defeating the memory bound.
+        let onAbort: () => void = () => {};
+        const aborted = new Promise<never>((_resolve, reject) => {
+          onAbort = () => {
+            cancel();
+            reject(signal?.reason);
+          };
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        let chunk: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunk = await Promise.race([
+            Promise.resolve().then(() => {
+              signal?.throwIfAborted();
+              return reader.read();
+            }),
+            aborted,
+          ]);
+        } finally {
+          signal?.removeEventListener("abort", onAbort);
+        }
+        const { done, value } = chunk;
         signal?.throwIfAborted();
         if (done) break;
         const nextSize = size + value.byteLength;
@@ -171,7 +192,6 @@ export async function readBoundedJson(
     signal?.throwIfAborted();
     throw error;
   } finally {
-    signal?.removeEventListener("abort", cancel);
     // Stop oversized/invalid bodies immediately; never mask the original error.
     if (reader) {
       // cancel() closes pending reads synchronously, but its underlying source

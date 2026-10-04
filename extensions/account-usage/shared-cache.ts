@@ -13,6 +13,7 @@ import {
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { acquireCacheLock, releaseCacheLock } from "./cache-lock.js";
+import { withDeadline } from "./deadline.js";
 import {
   serializeBoundedCache,
   type CacheDocument,
@@ -32,12 +33,21 @@ export async function readThroughSharedCache<T>(options: {
   maxAgeMs: number;
   force: boolean;
   signal: AbortSignal;
-  query: () => Promise<T>;
+  query: (signal: AbortSignal) => Promise<T>;
+  /** Total network work per publication, excluding lock acquisition. */
+  queryTimeoutMs?: number;
   validate?: (value: unknown) => boolean;
 }): Promise<T> {
   options.signal.throwIfAborted();
   if (!Number.isSafeInteger(options.maxAgeMs) || options.maxAgeMs < 0)
     throw new RangeError("Invalid cache freshness interval");
+  const queryTimeoutMs = options.queryTimeoutMs ?? 120_000;
+  if (
+    !Number.isSafeInteger(queryTimeoutMs) ||
+    queryTimeoutMs < 1 ||
+    queryTimeoutMs > 2_147_483_647
+  )
+    throw new RangeError("Invalid cache query timeout");
   mkdirSync(getAgentDir(), { recursive: true, mode: 0o700 });
   // Atomic replacement makes this unlocked baseline read safe. A forced waiter
   // may reuse a snapshot published AFTER it started, never the preexisting one.
@@ -77,7 +87,13 @@ export async function readThroughSharedCache<T>(options: {
       return structuredClone(cached.value) as T;
     }
 
-    const value = await options.query();
+    // Release the namespace lease even if an adapter ignores cancellation.
+    // Late results must never overwrite a newer publication.
+    const value = await withDeadline(
+      options.query,
+      options.signal,
+      queryTimeoutMs,
+    );
     options.signal.throwIfAborted();
     throwIfCompromised();
     if (options.validate && !options.validate(value))

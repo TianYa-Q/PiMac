@@ -27,6 +27,24 @@ struct ToolOutputSearchState {
     matches.ranges.isEmpty ? nil : matches.ranges[matchIndex]
   }
 
+  /// Unique matching lines in preview order; offsets remain UTF-16 throughout.
+  /// The match cap also bounds this derived view.
+  var matchingLinesText: String {
+    let source = preview.text as NSString
+    var previousEnd = -1
+    var lines: [String] = []
+    for match in matches.ranges {
+      guard match.location >= previousEnd else { continue }
+      var start = 0
+      var end = 0
+      var contentsEnd = 0
+      source.getLineStart(&start, end: &end, contentsEnd: &contentsEnd, for: match)
+      previousEnd = end
+      lines.append(source.substring(with: NSRange(location: start, length: contentsEnd - start)))
+    }
+    return lines.joined(separator: "\n")
+  }
+
   var matchLabel: String {
     guard !query.isEmpty else { return "" }
     guard !matches.ranges.isEmpty else { return "无匹配" }
