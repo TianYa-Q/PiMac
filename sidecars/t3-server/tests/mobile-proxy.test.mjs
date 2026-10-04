@@ -27,11 +27,6 @@ test('Tunnel HTTPS Origin uses the forwarded scheme without relaxing cross-origi
     origin: 'http://192.168.0.110:3773', upgrade: 'websocket' }), true);
 });
 
-test('removed LAN endpoint cannot be opened by gateway callers', async () => {
-  await assert.rejects(createServerGateway({ token: 'ab'.repeat(32), directory: '/unused',
-    publicEndpoint: { host: '192.168.1.2', port: 3773 } }), /LAN access has been removed/);
-});
-
 test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-tunnel-'));
   const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
@@ -66,7 +61,7 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
     req.on('error', reject); req.end(Buffer.isBuffer(options.body) ? options.body : options.body?.toString());
   });
   const descriptor = await (await request('/.well-known/t3/environment')).json();
-  assert.equal(descriptor.label, 'Pi Mac · Tunnel');
+  assert.equal(descriptor.label, 'Pi Mac');
   const { privateKey, publicKey } = await generateKeyPair('ES256', { extractable: true });
   const jwk = await exportJWK(publicKey);
   const proof = (url, accessToken) => new SignJWT({ htu: url, htm: 'POST', jti: randomUUID(),

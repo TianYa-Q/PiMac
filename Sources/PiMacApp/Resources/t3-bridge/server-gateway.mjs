@@ -7,7 +7,8 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { acquireChildLease } from './child-lease.mjs';
 import { isLoopbackPeer } from './network.mjs';
-import { startPiServer } from './vendor/t3-server.mjs';
+import { startPiServer, httpAllowed } from './vendor/t3-server.mjs';
+import { createLANListener } from './lan-listener.mjs';
 import { createPiAccountManagement } from './pi-account-management.mjs';
 
 const json = (res, status, value) => {
@@ -39,8 +40,7 @@ function identity(directory) {
 export async function createServerGateway({ token, directory, publicEndpoint, piConfig, onFailure, signal }) {
   if (!/^[a-f0-9]{64}$/.test(token ?? '')) throw new Error('Invalid supervisor token');
   const expected = Buffer.from('Bearer ' + token);
-  if (publicEndpoint) throw new Error('LAN access has been removed; use managed Tunnel');
-  let official, closed = false;
+  let official, lan, closed = false;
   const piAccounts = createPiAccountManagement();
   const server = http.createServer((req, res) => {
     const supplied = Buffer.from(req.headers.authorization ?? '');
@@ -55,9 +55,18 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
       if (route === 'GET /internal/auth/model-catalog') return json(res, 200, await manager.modelCatalog());
       if (route === 'GET /internal/auth/connect') return json(res, 200, await manager.status());
       if (route === 'GET /internal/auth/clients') return json(res, 200, await manager.clients());
+      if (route === 'GET /internal/auth/lan') return json(res, 200, lan.status());
       if (route === 'GET /internal/auth/pairing-links') return json(res, 200, await manager.pairingLinks());
       if (!req.url.startsWith('/internal/auth/')) { json(res, 404, { error: 'use_t3_orchestration' }); req.resume(); return; }
       const body = await input(req); if (closed) throw new Error('Unavailable');
+      if (route === 'POST /internal/auth/lan' && Object.keys(body).length === 1 && Object.hasOwn(body, 'endpoint') &&
+          (body.endpoint === null || (typeof body.endpoint === 'object' && !Array.isArray(body.endpoint)))) {
+        return json(res, 200, await lan.configure(body.endpoint));
+      }
+      if (route === 'POST /internal/auth/pairing' && Object.keys(body).length === 0) {
+        if (!lan.status().endpoint) throw new Error('LAN not enabled');
+        return json(res, 200, await manager.pairing({ label: 'Pi Mac LAN phone' }));
+      }
       if (route === 'POST /internal/auth/account-status') return json(res, 200, { payload: JSON.stringify(await piAccounts.accountStatus(body)) });
       if (route === 'POST /internal/auth/model-preferences') return json(res, 200, await manager.modelPreferences(body));
       if (route === 'POST /internal/auth/connect' && Object.keys(body).length === 1) return json(res, 200, await manager.control(body.operation));
@@ -68,12 +77,14 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
   });
   server.requestTimeout = 15000; server.headersTimeout = 10000;
   const close = async () => {
-    if (closed) return; closed = true; piAccounts.close(); server.close(); server.closeAllConnections(); await official?.close();
+    if (closed) return; closed = true; piAccounts.close(); server.close(); server.closeAllConnections(); await lan?.close(); await official?.close();
   };
   try {
     official = await startPiServer({ directory: path.join(directory, 'server-owned'), environmentId: identity(directory), piConfig, signal,
       onFailure: () => { void close(); onFailure?.(); } });
-    return { server, serverURL: official.localURL, official, close };
+    lan = createLANListener({ localURL: official.localURL, allowed: httpAllowed });
+    if (publicEndpoint) await lan.configure(publicEndpoint);
+    return { server, serverURL: official.localURL, official, lan, close };
   } catch (error) { await close(); throw error; }
 }
 

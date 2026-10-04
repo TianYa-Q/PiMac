@@ -11,7 +11,11 @@ struct T3LifecycleTests {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let workspace = WorkspaceModel(restoreUserState: false)
-    let service = T3BridgeService(stateDirectory: root)
+    let defaults = try #require(
+      UserDefaults(suiteName: "pimac-lifecycle-\(root.lastPathComponent)"))
+    defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
+    defer { defaults.removePersistentDomain(forName: "pimac-lifecycle-\(root.lastPathComponent)") }
+    let service = T3BridgeService(defaults: defaults, stateDirectory: root)
     defer {
       service.stop()
       workspace.disconnectAll()
@@ -57,7 +61,12 @@ struct T3LifecycleTests {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }
     let workspace = WorkspaceModel(restoreUserState: false)
-    let service = T3BridgeService(stateDirectory: root, startupTimeout: .milliseconds(1))
+    let defaults = try #require(
+      UserDefaults(suiteName: "pimac-lifecycle-\(root.lastPathComponent)"))
+    defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
+    defer { defaults.removePersistentDomain(forName: "pimac-lifecycle-\(root.lastPathComponent)") }
+    let service = T3BridgeService(
+      defaults: defaults, stateDirectory: root, startupTimeout: .milliseconds(1))
     defer {
       service.stop()
       workspace.disconnectAll()
@@ -71,7 +80,7 @@ struct T3LifecycleTests {
     #expect(service.port == nil)
     #expect(await service.stopAndWait())
     #expect(T3BridgeStateLease.isAvailable(root.appendingPathComponent("child-owner.lock")))
-    let retry = T3BridgeService(stateDirectory: root)
+    let retry = T3BridgeService(defaults: defaults, stateDirectory: root)
     defer { retry.stop() }
     try retry.start(workspace: workspace, token: T3NetworkEndpoint.secret())
     for _ in 0..<200 where retry.serverURL == nil {

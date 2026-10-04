@@ -101,7 +101,7 @@
     },
     {
       "oldText": "        ...descriptor,\n        capabilities:",
-      "newText": "        ...descriptor,\n        label: \"Pi Mac · Tunnel\",\n        capabilities:",
+      "newText": "        ...descriptor,\n        label: \"Pi Mac\",\n        capabilities:",
       "count": 1
     }
   ],

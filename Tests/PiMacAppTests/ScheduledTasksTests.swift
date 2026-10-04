@@ -440,6 +440,8 @@ struct ScheduledTasksTests {
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(binary.path, forKey: "piPath")
     let workspace = WorkspaceModel(restoreUserState: false)
+    // Transport fixtures stay loopback-only.
+    defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
     let service = T3BridgeService(defaults: defaults)
     let client = T3DesktopClient(defaults: defaults)
     defer {

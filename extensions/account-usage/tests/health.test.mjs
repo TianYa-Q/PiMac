@@ -53,7 +53,9 @@ test("doctor counts only visible snapshots, treats boundary/future dates as stal
 test("JSON health report is versioned, count-only and read-only", () => {
   const report = buildUsageHealthReport(options);
   assert.deepEqual(report, {
-    version: 1,
+    version: 2,
+    status: "degraded",
+    recommendations: ["refresh_usage"],
     provider: "openai",
     auth: "managed",
     accounts: { total: 6, visible: 5, hidden: 1 },

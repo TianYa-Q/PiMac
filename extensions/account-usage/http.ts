@@ -1,4 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { withDeadline } from "./deadline.js";
 
 function validateSizeLimit(maxBytes: number): void {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
@@ -46,45 +47,49 @@ export async function requestBoundedJson(
       "Quota endpoints require HTTPS without URL credentials",
     );
   options.signal.throwIfAborted();
-  const controller = new AbortController();
-  const signal = AbortSignal.any([options.signal, controller.signal]);
-  const timer = setTimeout(
-    () =>
-      controller.abort(new DOMException("额度接口请求超时。", "TimeoutError")),
+  // A custom fetch/transport can ignore abort. Bound the caller as well as I/O,
+  // and check the signal before applying any late headers or starting a retry.
+  return withDeadline(
+    async (signal) => {
+      for (let attempt = 0; ; attempt++) {
+        signal.throwIfAborted();
+        let response: Response;
+        try {
+          response = await fetch(url, {
+            headers: options.headers,
+            redirect: "error",
+            signal,
+          });
+        } catch (error) {
+          signal.throwIfAborted();
+          if (
+            !(error instanceof TypeError) ||
+            attempt >= (options.retries ?? 1)
+          )
+            throw error;
+          await delay(250, undefined, { signal });
+          continue;
+        }
+        if (signal.aborted) {
+          void response.body?.cancel().catch(() => {});
+          signal.throwIfAborted();
+        }
+        if (response.ok)
+          return await readBoundedJson(response, options.maxBytes, signal);
+        // A transport's cancel hook can hang; cleanup must not consume the deadline.
+        void response.body?.cancel().catch(() => {});
+        signal.throwIfAborted();
+        if (
+          ![502, 503, 504].includes(response.status) ||
+          attempt >= (options.retries ?? 1)
+        )
+          throw new HttpStatusError(response.status);
+        await delay(250, undefined, { signal });
+      }
+    },
+    options.signal,
     timeoutMs,
   );
-  try {
-    for (let attempt = 0; ; attempt++) {
-      signal.throwIfAborted();
-      let response: Response;
-      try {
-        response = await fetch(url, {
-          headers: options.headers,
-          redirect: "error",
-          signal,
-        });
-      } catch (error) {
-        signal.throwIfAborted();
-        if (!(error instanceof TypeError) || attempt >= (options.retries ?? 1))
-          throw error;
-        await delay(250, undefined, { signal });
-        continue;
-      }
-      if (response.ok)
-        return await readBoundedJson(response, options.maxBytes, signal);
-      // A transport's cancel hook can hang; cleanup must not consume the deadline.
-      void response.body?.cancel().catch(() => {});
-      signal.throwIfAborted();
-      if (
-        ![502, 503, 504].includes(response.status) ||
-        attempt >= (options.retries ?? 1)
-      )
-        throw new HttpStatusError(response.status);
-      await delay(250, undefined, { signal });
-    }
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /** Read untrusted quota JSON with a limit on bytes actually received (including chunked bodies). */

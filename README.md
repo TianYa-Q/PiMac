@@ -15,6 +15,8 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 
 ## Features
 
+- LAN transport hardening, live pairing expiry, offline-device revocation and actionable extension health diagnostics: see [connection and quota hardening](docs/connection-quota-hardening.md).
+
 - Scheduler adds remembered sorting, running-state filters and configuration checks before actions; the extension adds sample-age warnings and non-blocking stream cleanup. See [scheduler and stream hardening](docs/scheduler-stream-hardening.md).
 - Add and switch between multiple projects in one window, with separate sessions and background tasks
 - Session search adds `title:` / `text:` scopes, scoped exclusions, quick-insert controls and retry after Server read failures. The extension adds count-only `/usage doctor json`, allowlisted error diagnostics and cancellation-preserving HTTP reads. See [search and diagnostic improvements](docs/search-diagnostics-improvements.md).
@@ -98,7 +100,7 @@ Delivery checkpoints each acknowledged reply chunk locally, so retries and resta
 
 ## T3 Code iOS
 
-**Settings → T3 iOS 连接** supports the unmodified App Store client through official T3 Connect managed Cloudflare Tunnel only. Sign in on Mac and iPhone with the same account, remove any old **Pi Mac · LAN** entry on the phone, then enable **Pi Mac · Tunnel**. LAN listeners, address/port controls and pairing QR/codes have been removed; saved LAN consent is cleared on upgrade. The desktop Server and administration remain loopback-only.
+**Settings → T3 iOS 连接** offers private-IPv4 LAN HTTP/WebSocket access and official T3 Connect managed Cloudflare Tunnel. LAN starts automatically on an eligible physical interface; manually disabling it is remembered. LAN pairing links/codes are temporary, and LAN HTTP is unencrypted: use trusted networks only. For Tunnel, sign in on Mac and iPhone with the same account. Both transports share the same Server and environment identity; phone catalog behavior and pairing require physical-device acceptance. The desktop Server and administration remain loopback-only.
 
 The official Server owns projects, threads and tasks. Remote access has Pi's local execution permissions; transcripts and attachments traverse Cloudflare, not end-to-end encryption. Pausing activity publication does not close the Tunnel; unlink to revoke it. Settings show bounded, credential-free connection diagnostics. Protocol tests cover HTTPS/TLS termination and WebSocket authentication; real App Store/Apple/APNs acceptance remains a physical-device check. See [connection steps, limitations and recovery](docs/t3-code-integration.md). Restart a new build only after existing tasks finish.
 

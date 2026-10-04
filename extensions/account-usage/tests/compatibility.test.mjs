@@ -777,7 +777,9 @@ try {
       assert.match(app.notices.at(-1).message, /自动轮换不适用/u);
       await app.commands.get("usage").handler("doctor json", app.ctx);
       const report = JSON.parse(app.notices.at(-1).message);
-      assert.equal(report.version, 1);
+      assert.equal(report.version, 2);
+      assert.ok(["healthy", "attention", "degraded"].includes(report.status));
+      assert.ok(Array.isArray(report.recommendations));
       assert.equal(report.provider, "openai");
       assert.equal(report.auth, "unmanaged");
       assert.equal(typeof report.accounts.total, "number");

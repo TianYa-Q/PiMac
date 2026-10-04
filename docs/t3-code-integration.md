@@ -14,18 +14,39 @@ Protocol tests are not evidence that the installed App Store version interoperat
 ## Phone connection
 
 1. Build the new app; restart only after existing tasks finish.
-2. Open **Settings → T3 iOS 连接** and authorize official T3 Connect using the
-   same account as the App Store T3 iOS client.
-3. On the phone, delete the old **Pi Mac · LAN** entry (if present), then enable
-   **Pi Mac · Tunnel** under T3 Connect. No custom iOS build or patch is needed.
-4. Keep Pi Mac awake and online. LAN listeners and pairing controls are removed;
-   upgrade clears legacy saved LAN consent. The desktop Server stays on loopback.
-5. Pausing publication only pauses activity updates; unlinking revokes the Tunnel.
+2. LAN opens automatically after Server readiness on an available physical
+   private IPv4 interface (prefer `en0`), port **3773** by default. View/copy the
+   address under **Settings → T3 iOS 连接 → 局域网直连**. The Server and
+   administration remain loopback-only; the separately bound proxy exposes only
+   authenticated upstream client routes. No available interface/occupied port
+   is surfaced as a settings error rather than exposing a wildcard.
+3. On the same trusted network, manually add the displayed address in T3 iOS
+   and use a freshly generated upstream pairing credential. The UI also offers
+   a pairing link/QR for clients supporting that format. LAN does not require a
+   Relay account, managed tunnel, or second Server. App Store pairing/UI behavior
+   still requires physical-device acceptance.
+4. For remote access, authorize official T3 Connect with the same iOS account.
+   LAN and Tunnel share **Pi Mac**, its environment ID, sessions and upstream
+   DPoP/ticket/RPC authentication. Keep Pi Mac awake and online.
+5. Pausing publication only pauses activity updates; unlinking revokes the Tunnel,
+   not LAN. Closing LAN disconnects that transport but does not revoke issued
+   phone grants. Revoke devices separately when required.
 
-The iOS catalog is keyed by `environmentId`. Registering Tunnel for a Server
-already saved as LAN replaces that catalog entry; labels cannot make them two
-independent environments. We intentionally offer only Tunnel rather than fake
-an identity or run a second orchestration engine.
+LAN defaults on. Endpoint preferences store only host/port under
+`t3RememberedLANEndpointV2`, never credentials. Explicit disable persists in
+`t3LANEnabled` and prevents reopening on restart. A saved address is reused if
+still local; after address changes startup selects an eligible physical interface
+and retains the saved port. Automatic selection excludes VPN/virtual interfaces,
+public IPs and wildcard binds. Legacy endpoint data is not reused.
+LAN HTTP is unencrypted: use trusted networks, no public port forwarding. The
+proxy strips forwarding/control headers, checks peer/Host, and closes upgraded
+sockets on disable/shutdown. Failed rebinding leaves the previous listener intact.
+
+The iOS catalog is keyed by `environmentId`: registering Tunnel or adding a LAN
+address can update the same saved environment entry. Labels cannot create two
+independent environments, and Pi Mac does not invent another identity/engine or
+guarantee automatic LAN/Tunnel fallback. Explicit endpoint selection and catalog
+refresh behavior must be verified on the installed phone version.
 
 Cloudflare terminates HTTPS and forwards to the private loopback Server.
 Same-origin WebSocket validation uses the forwarded HTTPS scheme, not a fixed

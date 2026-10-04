@@ -15,6 +15,8 @@
 
 ## 功能特性
 
+- 本轮加入局域网代理加固、配对到期自动隐藏、离线设备授权撤销和扩展健康诊断恢复建议，详见 [连接与额度加固](docs/connection-quota-hardening.md)。
+
 - 在同一窗口添加和切换多个项目，分别保留会话与后台任务
 - 会话搜索新增 `title:` / `text:` 范围、范围排除、快捷插入与 Server 读取失败后的重试；扩展新增只含计数的 `/usage doctor json`、白名单错误诊断与保留取消原因的 HTTP 读取。详见[搜索与诊断优化](docs/search-diagnostics-improvements.md)。
 - 当前源码新增原生 T3 Git 面板：查看分支、搜索及排序工作区变更、筛选已选／未选文件、查看带行号和增删着色的差异、搜索差异（⌘F）、筛选变更行与复制（含大小及渲染行数保护），选定文件提交、推送、创建 PR 与拉取；支持记忆宽度的可调整侧栏；Server 状态位于 Pi Mac 右侧，Git 位于压缩按钮右侧，不额外占用会话顶部空间。详见 [Git 集成说明](docs/t3-code-integration.md#git--vcs)。
@@ -124,7 +126,7 @@ Telegram 局部引用回复会把选中的文字与回复正文一起传给模�
 
 ## T3 Code iOS
 
-**设置 → T3 iOS 连接** 仅提供官方 T3 Connect 托管 Cloudflare Tunnel，直接使用 App Store 版 T3 iOS。Mac 与手机登录同一账号；在手机删除旧的 **Pi Mac · LAN** 条目，再开启 **Pi Mac · Tunnel**。已移除 LAN 监听、IP/端口设置和配对码/二维码；升级会清除旧 LAN 访问偏好。本机 Server 和管理接口仍仅监听 loopback。
+**设置 → T3 iOS 连接** 提供私有 IPv4 局域网 HTTP/WebSocket 直连和官方 T3 Connect 托管 Cloudflare Tunnel。局域网默认在可用物理网卡上自动开启，手动关闭会被记住；临时配对链接/码可在设置生成。局域网 HTTP 不加密，仅在可信网络使用。Tunnel 需要 Mac 与手机登录同一账号。两种入口共享 Server 和环境标识；手机目录与配对行为仍需实机验收。本机 Server 和管理接口仍仅监听 loopback。
 
 桌面、手机与 Telegram 共用官方 Server 的项目、线程和任务。远程操作具有本机 Pi 的执行权限；正文和附件经过 Cloudflare，并非端到端加密。暂停上报不会关闭 Tunnel，退出绑定才撤销隧道。设置提供有界、脱敏的连接诊断。协议测试覆盖 HTTPS/TLS 终止与 WebSocket 授权，App Store、Apple 登录和推送仍须实机验收。详见[连接步骤、限制和恢复说明](docs/t3-code-integration.md)。已有任务结束后再重启新构建。
 

@@ -72,6 +72,8 @@ struct T3DesktopTests {
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(binary.path, forKey: "piPath")
     let workspace = WorkspaceModel(restoreUserState: false)
+    // Transport fixtures stay loopback-only.
+    defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
     let service = T3BridgeService(defaults: defaults)
     let client = T3DesktopClient(defaults: defaults)
     defer {
@@ -202,7 +204,7 @@ struct T3DesktopTests {
   }
 
   @Test(.timeLimit(.minutes(1)))
-  func desktopUsesNativeLoopbackServerWithTunnelOnlyPhoneAccess() async throws {
+  func desktopUsesNativeLoopbackServerWithoutPublicAdministration() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -218,6 +220,8 @@ struct T3DesktopTests {
     defaults.set(binary.path, forKey: "piPath")
     defer { defaults.removePersistentDomain(forName: suite) }
     let workspace = WorkspaceModel(restoreUserState: false)
+    // Transport fixtures stay loopback-only.
+    defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
     let service = T3BridgeService(
       defaults: defaults, stateDirectory: root.appendingPathComponent("state"))
     let client = T3DesktopClient(defaults: defaults)
@@ -334,7 +338,7 @@ struct T3DesktopTests {
     #expect(
       ((detail["projection"] as? [String: Any])?["thread"] as? [String: Any])?["id"] as? String
         == id)
-    // Phone transport is Tunnel-only; the desktop retains its loopback Server.
+    // Optional LAN transport never changes the desktop's loopback Server.
     #expect(service.serverURL?.host == "127.0.0.1")
     let shell = try await client.request("/api/orchestration/shell")
     #expect((shell["threads"] as? [[String: Any]])?.contains { $0["id"] as? String == id } == true)

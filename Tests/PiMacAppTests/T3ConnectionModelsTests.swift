@@ -49,19 +49,70 @@ struct T3ConnectionModelsTests {
     #expect(pairing.expiry != nil)
   }
 
-  @Test func upgradingToTunnelOnlyClearsLegacyLANConsent() throws {
+  @Test func pairingExpiresAtBoundaryAndRejectsInvalidCredentials() throws {
+    let pairing = T3Pairing(id: "id", credential: "fixture", expiresAt: "2026-10-02T10:00:00Z")
+    let expiry = try #require(pairing.expiry)
+    #expect(pairing.isValid(at: expiry.addingTimeInterval(-1)))
+    #expect(!pairing.isValid(at: expiry))
+    #expect(!pairing.isValid(at: expiry.addingTimeInterval(1)))
+    #expect(
+      !T3Pairing(id: "id", credential: "", expiresAt: pairing.expiresAt).isValid(
+        at: expiry.addingTimeInterval(-1)))
+    #expect(!T3Pairing(id: "id", credential: "fixture", expiresAt: "invalid").isValid(at: expiry))
+  }
+
+  @Test func lanDefaultsOnSelectsPhysicalInterfaceAndRemembersDisable() throws {
+    let suite = "pimac-lan-defaults-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let interfaces = [
+      T3NetworkEndpoint.Interface(name: "utun8", address: "10.0.0.2"),
+      T3NetworkEndpoint.Interface(name: "en1", address: "192.168.2.3"),
+      T3NetworkEndpoint.Interface(name: "en0", address: "192.168.1.3"),
+    ]
+    #expect(T3ConnectionPreferences.isEnabled(in: defaults))
+    let automatic = T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: interfaces)
+    #expect(automatic?.host == "192.168.1.3")
+    #expect(automatic?.port == 3773)
+    #expect(
+      T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: [interfaces[0]]) == nil)
+    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: []) == nil)
+    T3ConnectionPreferences.save(
+      try T3NetworkEndpoint(host: "192.168.2.3", port: 4773), to: defaults)
+    #expect(
+      T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: interfaces)?.host
+        == "192.168.2.3")
+    let changedNetwork = T3ConnectionPreferences.startupEndpoint(
+      from: defaults, interfaces: [interfaces[2]])
+    #expect(changedNetwork?.host == "192.168.1.3")
+    #expect(changedNetwork?.port == 4773)
+    defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
+    #expect(!T3ConnectionPreferences.isEnabled(in: defaults))
+    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: interfaces) == nil)
+    defaults.set(true, forKey: T3ConnectionPreferences.enabledKey)
+    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: interfaces) != nil)
+  }
+
+  @Test func lanConsentPersistsButLegacyConsentIsNotReinterpreted() throws {
     let suite = "pimac-t3-preferences-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     T3ConnectionPreferences.save(
       try T3NetworkEndpoint(host: "192.168.1.2", port: 3773), to: defaults)
+    defaults.set(Data("legacy".utf8), forKey: "t3RememberedNetworkEndpoint")
     let service = T3BridgeService(defaults: defaults)
-    #expect(T3ConnectionPreferences.load(from: defaults) == nil)
-    #expect(defaults.object(forKey: T3ConnectionPreferences.key) == nil)
+    #expect(T3ConnectionPreferences.load(from: defaults)?.host == "192.168.1.2")
+    #expect(defaults.object(forKey: "t3RememberedNetworkEndpoint") == nil)
+    #expect(service.lanEndpoint == nil)
     #expect(service.serverURL == nil)
     service.stop()
     #expect(service.clients.isEmpty)
+    #expect(service.lanStateKnown)
+    #expect(!service.lanBusy)
+    #expect(service.lanPairing == nil)
     _ = T3BridgeService(defaults: defaults)
+    #expect(T3ConnectionPreferences.load(from: defaults)?.host == "192.168.1.2")
+    T3ConnectionPreferences.save(nil, to: defaults)
     #expect(T3ConnectionPreferences.load(from: defaults) == nil)
   }
 

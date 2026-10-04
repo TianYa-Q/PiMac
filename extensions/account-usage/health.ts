@@ -34,14 +34,37 @@ export function buildUsageHealthReport(options: UsageHealthOptions) {
       snapshots.stale++;
     else snapshots.fresh++;
   }
+  const auth = options.authFailed
+    ? "failed"
+    : options.managed
+      ? "managed"
+      : "unmanaged";
+  // Stable, allowlisted action codes are safe for clients and bug reports.
+  // A refresh in progress should not encourage redundant network requests.
+  const recommendations: string[] = [];
+  if (auth === "failed") recommendations.push("repair_auth");
+  if (visible.length === 0)
+    recommendations.push(
+      options.accountNames.length ? "review_visibility" : "add_account",
+    );
+  if (
+    !options.refreshing &&
+    (snapshots.stale + snapshots.failed + snapshots.missing > 0 ||
+      options.gemini === "failed")
+  )
+    recommendations.push("refresh_usage");
+  const degraded =
+    auth === "failed" || snapshots.failed > 0 || options.gemini === "failed";
   return {
-    version: 1,
+    version: 2,
+    status: degraded
+      ? "degraded"
+      : snapshots.stale + snapshots.missing > 0 || visible.length === 0
+        ? "attention"
+        : "healthy",
+    recommendations,
     provider: options.provider,
-    auth: options.authFailed
-      ? "failed"
-      : options.managed
-        ? "managed"
-        : "unmanaged",
+    auth,
     accounts: {
       total: options.accountNames.length,
       visible: visible.length,
@@ -61,8 +84,16 @@ export function formatUsageHealth(options: UsageHealthOptions): string {
     failed: "查询失败",
   }[report.gemini];
   const { fresh, stale, failed, missing } = report.snapshots;
+  const actions: Record<string, string> = {
+    repair_auth: "/accounts 修复登录后再运行任务",
+    review_visibility: "/usage settings 检查隐藏账户",
+    add_account: "/accounts 添加账户（API Key 用户可忽略）",
+    refresh_usage: "/usage refresh 更新额度快照",
+  };
   return [
     "账户额度健康检查（只读，不请求网络／不预热／不切换账户）",
+    `状态：${{ healthy: "正常", attention: "需检查", degraded: "异常" }[report.status]}`,
+    `建议：${report.recommendations.map((code) => actions[code]).join("；") || (report.refreshing ? "等待当前刷新完成" : "无需操作")}`,
     `Provider：${report.provider}`,
     `认证：${report.auth === "failed" ? "激活失败，下次运行前需修复" : report.auth === "managed" ? "扩展托管 OAuth" : "未托管，自动轮换不适用"}`,
     `账户：${report.accounts.total} · 可见 ${report.accounts.visible} · 隐藏 ${report.accounts.hidden}`,

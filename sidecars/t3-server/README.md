@@ -5,9 +5,11 @@ This uses upstream orchestrator V2 and its official `PiDriver`, `PiAdapterV2`,
 and `PiRpc`, without modifying those implementations. The former custom Pi
 adapter, transport, runtime controls, and their tests have been removed.
 
-Pi Mac retains only host policy and management: loopback listeners, explicit
-RPC/HTTP allowlists, supervisor credentials, managed T3 Connect, diagnostics,
-and desktop model preferences. The supervisor has no workspace/Pi command API.
+Pi Mac retains only host policy and management: loopback Server/administration,
+a default-on LAN HTTP/WebSocket transport, explicit RPC/HTTP allowlists, supervisor
+credentials, managed T3 Connect, diagnostics, and desktop model preferences.
+LAN shares upstream authentication and the same environment identity; it never
+publishes administration routes or introduces another orchestration engine. The supervisor has no workspace/Pi command API.
 Provider subprocesses must not inherit supervisor secrets.
 
 ## Reproducible build

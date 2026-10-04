@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import Foundation
 
-/// Supervises the loopback T3 Server; phones connect only through managed Tunnel.
+/// Supervises the loopback T3 Server and a default-on, authenticated LAN transport.
 @MainActor
 final class T3BridgeService: ObservableObject {
   @Published private(set) var port: Int?
@@ -15,6 +15,15 @@ final class T3BridgeService: ObservableObject {
   private var stoppingPID: Int32?
   private var stoppingProcess: Process?
   @Published private(set) var serverURL: URL?
+  @Published private(set) var lanEndpoint: T3NetworkEndpoint?
+  @Published private(set) var lanBusy = false
+  @Published private(set) var lanMessage = ""
+  @Published private(set) var lanPairing: T3Pairing?
+  @Published private(set) var lanStateKnown = true
+  var lanURL: URL? {
+    guard let lanEndpoint else { return nil }
+    return URL(string: "http://\(lanEndpoint.host):\(lanEndpoint.port)")
+  }
   @Published private(set) var clients: [T3PairedClient] = []
   @Published private(set) var managementBusy = false
   private var clientRefreshID: UUID?
@@ -38,8 +47,8 @@ final class T3BridgeService: ObservableObject {
     self.defaults = defaults
     self.stateDirectory = stateDirectory
     self.startupTimeout = startupTimeout
-    // Migrate away from LAN-only consent; never reopen a saved listener.
-    T3ConnectionPreferences.save(nil, to: defaults)
+    // Legacy endpoint data is not reused; current LAN policy owns address selection.
+    defaults.removeObject(forKey: "t3RememberedNetworkEndpoint")
   }
 
   private var process: Process?
@@ -142,6 +151,11 @@ final class T3BridgeService: ObservableObject {
     generation = UUID()
     adminToken = ""
     serverURL = nil
+    lanEndpoint = nil
+    lanPairing = nil
+    lanBusy = false
+    lanMessage = ""
+    lanStateKnown = true
     clients = []
     connectStatus = nil
     connectBusy = false
@@ -229,6 +243,14 @@ final class T3BridgeService: ObservableObject {
       self.port = port
       serverURL = URL(string: "http://127.0.0.1:\(serverPort)")
       status = "本机 T3 Server 已启动（桌面统一使用 Server）"
+      if let endpoint = T3ConnectionPreferences.startupEndpoint(from: defaults) {
+        Task { [weak self] in
+          guard let self, self.generation == current else { return }
+          await self.configureLAN(endpoint)
+        }
+      } else if T3ConnectionPreferences.isEnabled(in: defaults) {
+        lanMessage = "未找到可用的物理网卡私有 IPv4 地址；可在局域网设置中手动选择。"
+      }
       return
     }
     // No desktop/Pi requests on stdio. This pipe carries supervisor readiness only.
@@ -329,6 +351,94 @@ final class T3BridgeService: ObservableObject {
     connectStatus = result
   }
 
+  private struct LANStatus: Decodable {
+    struct Endpoint: Decodable {
+      let host: String
+      let port: Int
+    }
+    let endpoint: Endpoint?
+  }
+
+  func configureLAN(_ endpoint: T3NetworkEndpoint?) async {
+    guard !lanBusy, lanStateKnown, port != nil else { return }
+    // Persist requested on/off policy even if acknowledgement is lost. Actual
+    // live exposure is still reconciled separately and never assumed closed.
+    defaults.set(endpoint != nil, forKey: T3ConnectionPreferences.enabledKey)
+    let current = generation
+    lanBusy = true
+    lanPairing = nil
+    lanMessage = ""
+    defer { if generation == current { lanBusy = false } }
+    do {
+      if let endpoint,
+        !T3NetworkEndpoint.interfaces().contains(where: { $0.address == endpoint.host })
+      {
+        throw ServiceError.invalidEndpoint
+      }
+      let value: Any = endpoint.map { ["host": $0.host, "port": $0.port] as Any } ?? NSNull()
+      let result: LANStatus = try await admin("lan", method: "POST", body: ["endpoint": value])
+      guard generation == current else { return }
+      try applyLANStatus(result)
+      lanMessage = lanEndpoint == nil ? "局域网直连已关闭。" : "局域网直连已开启；手机需在同一网络并单独配对。"
+    } catch {
+      guard generation == current else { return }
+      // A lost acknowledgement does not mean the listener stayed unchanged.
+      lanStateKnown = false
+      if await reconcileLAN(generation: current) {
+        lanMessage = "操作未确认成功，已读取实际状态；请检查网卡地址和端口后重试。"
+      } else if generation == current {
+        lanMessage = "无法确认局域网入口状态，可能仍在监听。请刷新状态；不要视为已经关闭。"
+      }
+    }
+  }
+
+  private func applyLANStatus(_ result: LANStatus) throws {
+    let endpoint = try result.endpoint.map { try T3NetworkEndpoint(host: $0.host, port: $0.port) }
+    if endpoint != lanEndpoint { lanPairing = nil }
+    lanEndpoint = endpoint
+    lanStateKnown = true
+    T3ConnectionPreferences.save(endpoint, to: defaults)
+  }
+
+  private func reconcileLAN(generation current: UUID) async -> Bool {
+    do {
+      let result: LANStatus = try await admin("lan")
+      guard generation == current else { return false }
+      try applyLANStatus(result)
+      return true
+    } catch { return false }
+  }
+
+  func refreshLAN() async {
+    guard !lanBusy, port != nil else { return }
+    let current = generation
+    lanBusy = true
+    defer { if generation == current { lanBusy = false } }
+    if await reconcileLAN(generation: current) {
+      lanMessage = lanEndpoint == nil ? "已确认局域网入口关闭。" : "已确认局域网入口正在监听。"
+    } else if generation == current {
+      lanStateKnown = false
+      lanPairing = nil
+      lanMessage = "无法读取入口状态，请检查服务后重试。"
+    }
+  }
+
+  func generateLANPairing() async {
+    guard !lanBusy, lanStateKnown, lanEndpoint != nil else { return }
+    let current = generation
+    lanBusy = true
+    lanPairing = nil
+    defer { if generation == current { lanBusy = false } }
+    do {
+      let pairing: T3Pairing = try await admin("pairing", method: "POST", body: [:])
+      guard generation == current else { return }
+      lanPairing = pairing
+      lanMessage = "配对凭据只供你的设备使用，勿发送给他人。"
+    } catch {
+      if generation == current { lanMessage = "无法生成配对凭据，请重试。" }
+    }
+  }
+
   private struct Revocation: Decodable { let revoked: Bool }
 
   func refreshClients() async {
@@ -357,10 +467,13 @@ final class T3BridgeService: ObservableObject {
     managementBusy = true
     defer { if generation == current { managementBusy = false } }
     do {
-      let _: Revocation = try await admin("revoke-client", method: "POST", body: ["sessionId": id])
+      let result: Revocation = try await admin(
+        "revoke-client", method: "POST", body: ["sessionId": id])
       let values: [T3PairedClient] = try await admin("clients")
+      guard generation == current else { return }
       clients = values
-      managementMessage = "设备授权已撤销。"
+      guard !values.contains(where: { $0.id == id }) else { throw ServiceError.managementFailed }
+      managementMessage = result.revoked ? "设备授权已撤销。" : "设备授权已不存在（可能已撤销或过期）。"
     } catch {
       if generation == current { managementMessage = "撤销失败；不能视为设备已断开。" }
     }

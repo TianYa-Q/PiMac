@@ -67,9 +67,35 @@ struct T3NetworkEndpoint: Equatable {
   }
 }
 
-/// Stores only explicit network consent and its exact endpoint, never credentials.
+/// LAN defaults on; persist only endpoint and explicit disable, never credentials.
 struct T3ConnectionPreferences {
-  static let key = "t3RememberedNetworkEndpoint"
+  static let key = "t3RememberedLANEndpointV2"
+  static let enabledKey = "t3LANEnabled"
+
+  static func isEnabled(in defaults: UserDefaults) -> Bool {
+    defaults.object(forKey: enabledKey) == nil || defaults.bool(forKey: enabledKey)
+  }
+
+  static func startupEndpoint(
+    from defaults: UserDefaults,
+    interfaces: [T3NetworkEndpoint.Interface] = T3NetworkEndpoint.interfaces()
+  ) -> T3NetworkEndpoint? {
+    guard isEnabled(in: defaults) else { return nil }
+    let saved = load(from: defaults)
+    if let saved, interfaces.contains(where: { $0.address == saved.host }) { return saved }
+    // Never automatically expose VPN/virtual interfaces or wildcard addresses.
+    let physical = interfaces.filter { $0.name.hasPrefix("en") }
+      .sorted {
+        if ($0.name == "en0") != ($1.name == "en0") { return $0.name == "en0" }
+        return $0.id < $1.id
+      }
+    for item in physical {
+      if let endpoint = try? T3NetworkEndpoint(host: item.address, port: saved?.port ?? 3773) {
+        return endpoint
+      }
+    }
+    return nil
+  }
   private struct Endpoint: Codable {
     let host: String
     let port: Int
@@ -99,6 +125,11 @@ struct T3Pairing: Decodable {
   let expiresAt: String
   var expiry: Date? {
     ISO8601DateFormatter.t3.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt)
+  }
+
+  func isValid(at now: Date) -> Bool {
+    guard !credential.isEmpty, let expiry else { return false }
+    return expiry > now
   }
 
   func url(base: URL) -> URL {

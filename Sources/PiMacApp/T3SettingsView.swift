@@ -6,11 +6,14 @@ struct T3SettingsView: View {
   let workspace: WorkspaceModel
   @State private var showConnectConsent = false
   @State private var showConnectLogout = false
+  @State private var showClientRevocation = false
+  @State private var clientToRevoke: T3PairedClient?
   private let timer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       if service.port != nil {
+        T3LANSettingsView(service: service)
         connectView
         devicesView
       } else {
@@ -23,7 +26,7 @@ struct T3SettingsView: View {
       DisclosureGroup("说明") {
         VStack(alignment: .leading, spacing: 8) {
           Text("T3 iOS 登录同一账号，开启通知与实时活动。")
-          Text("仅支持 Tunnel；删除旧 LAN 环境，改用 Pi Mac · Tunnel。")
+          Text("同一网络可用局域网直连；远程连接使用 Tunnel，两者共享 Server 和设备认证。")
           Text("暂停上报不关闭隧道，退出绑定才会停止。")
           Text("公网连接与 iPhone 通知仍需实机验收。")
         }
@@ -48,6 +51,17 @@ struct T3SettingsView: View {
       Text(
         "请使用与 T3 iOS 相同的账号，在官方网页选择 Apple 登录。授权后，官方 T3 Server 会启用托管 Cloudflare Tunnel，允许同账号客户端通过受认证公网入口读取会话并执行 Pi 任务。聊天与附件经 Cloudflare 隧道传输，并非端到端加密；通知上报标题、模型及状态。缺少 cloudflared 时会用官方校验安装器下载。本机管理 IPC 不对外暴露，Pi Mac 不读取 Apple 密码。真实公网连接和 iPhone 通知仍需验收。"
       )
+    }
+    .confirmationDialog(
+      "撤销设备授权？", isPresented: $showClientRevocation, titleVisibility: .visible
+    ) {
+      Button("撤销授权", role: .destructive) {
+        if let id = clientToRevoke?.id { Task { await service.revokeClient(id) } }
+        clientToRevoke = nil
+      }
+      Button("取消", role: .cancel) { clientToRevoke = nil }
+    } message: {
+      Text("将撤销「\(clientToRevoke?.name ?? "设备")」的访问凭据。该设备需要重新配对；不会删除会话或撤销其他设备。")
     }
     .confirmationDialog(
       "退出 T3 Connect 并撤销环境绑定？", isPresented: $showConnectLogout, titleVisibility: .visible
@@ -180,7 +194,8 @@ struct T3SettingsView: View {
     card {
       HStack {
         Label("设备", systemImage: "iphone").font(.headline)
-        Text("\(connectedClients.count)").font(.caption).foregroundStyle(.secondary)
+        Text("\(connectedClients.count) 在线 · \(service.clients.count) 已授权")
+          .font(.caption).foregroundStyle(.secondary)
         Spacer()
         Button {
           Task { await service.refreshClients() }
@@ -189,22 +204,27 @@ struct T3SettingsView: View {
         }
         .controlSize(.small).disabled(service.managementBusy)
       }
-      if connectedClients.isEmpty {
-        Text("暂无连接")
+      if service.clients.isEmpty {
+        Text("暂无已授权设备")
           .font(.caption).foregroundStyle(.secondary).padding(.vertical, 4)
       } else {
-        ForEach(Array(connectedClients.enumerated()), id: \.element.id) { index, client in
+        ForEach(Array(service.clients.enumerated()), id: \.element.id) { index, client in
           if index > 0 { Divider() }
           HStack(spacing: 12) {
             Image(systemName: "iphone")
               .font(.title3).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 4) {
               Text(client.name).font(.body.weight(.medium))
-              Label("已连接", systemImage: "circle.fill")
+              Label(client.connected ? "已连接" : "离线 · 保留授权", systemImage: "circle.fill")
                 .font(.caption)
-                .foregroundStyle(Color.green)
+                .foregroundStyle(client.connected ? Color.green : Color.secondary)
             }
             Spacer()
+            Button("撤销授权", role: .destructive) {
+              clientToRevoke = client
+              showClientRevocation = true
+            }
+            .controlSize(.small).disabled(service.managementBusy)
           }
           .padding(.vertical, 4)
         }
