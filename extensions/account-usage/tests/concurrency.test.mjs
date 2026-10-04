@@ -82,6 +82,30 @@ await test("cancellation never dequeues more work and preserves abort reason", a
   );
 });
 
+await test("failure reason follows failure time, not worker input order", async () => {
+  const gate = deferred();
+  const early = new Error("worker one failed first");
+  const late = new Error("worker zero failed later");
+  const work = mapWithConcurrency([0, 1, 2], 2, async (value) => {
+    if (value === 1) throw early;
+    await gate.promise;
+    throw late;
+  });
+  const assertion = assert.rejects(work, (error) => error === early);
+  await new Promise(setImmediate);
+  gate.resolve();
+  await assertion;
+});
+
+await test("undefined failure reasons are still failures", async () => {
+  await assert.rejects(
+    mapWithConcurrency([0], 1, async () => {
+      throw undefined;
+    }),
+    (error) => error === undefined,
+  );
+});
+
 await test("empty inputs, undefined values and invalid limits are explicit", async () => {
   assert.deepEqual(await mapWithConcurrency([], 2, async () => {}), []);
   assert.deepEqual(

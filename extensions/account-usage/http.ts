@@ -72,7 +72,8 @@ export async function requestBoundedJson(
       }
       if (response.ok)
         return await readBoundedJson(response, options.maxBytes, signal);
-      await response.body?.cancel().catch(() => {});
+      // A transport's cancel hook can hang; cleanup must not consume the deadline.
+      void response.body?.cancel().catch(() => {});
       signal.throwIfAborted();
       if (
         ![502, 503, 504].includes(response.status) ||
@@ -147,11 +148,10 @@ export async function readBoundedJson(
     signal?.removeEventListener("abort", cancel);
     // Stop oversized/invalid bodies immediately; never mask the original error.
     if (reader) {
-      try {
-        await reader.cancel();
-      } catch {
-        /* transport already closed */
-      }
+      // cancel() closes pending reads synchronously, but its underlying source
+      // cleanup promise is untrusted and may never settle. Observe errors without
+      // awaiting that promise, then release the lock immediately.
+      void reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }

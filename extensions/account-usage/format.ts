@@ -1,11 +1,13 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { AccountUsage, UsageWindow } from "./types.js";
+import { sampleAgeLabel, sampleFreshness } from "./freshness.js";
 
 export function formatStatusSegment(
   usage: AccountUsage,
   activeAccount: string | undefined,
   theme: Theme,
   now = Date.now(),
+  maxAgeMs = 180_000,
 ): string {
   const isActive = usage.accountName === activeAccount;
   const account = isActive
@@ -16,13 +18,20 @@ export function formatStatusSegment(
   const windows = [usage.primary, usage.secondary]
     .filter((window): window is UsageWindow => window !== undefined)
     .map((window) => formatStatusWindow(window, theme, now));
-  return `${account}  ${windows.join(" · ")}`;
+  const quota = windows.length ? windows.join(" · ") : "额度未知";
+  const freshness = sampleFreshness(usage.capturedAt, now, maxAgeMs);
+  const warning =
+    freshness === "fresh"
+      ? ""
+      : ` · ${theme.fg("warning", sampleAgeLabel(usage.capturedAt, now, maxAgeMs))}`;
+  return `${account}  ${quota}${warning}`;
 }
 
 export function formatUsageSummary(
   usages: readonly AccountUsage[],
   activeAccount: string | undefined,
   now = Date.now(),
+  maxAgeMs = 180_000,
 ): string {
   if (usages.length === 0) return "没有可显示的 Codex 账户。";
   return usages
@@ -32,7 +41,8 @@ export function formatUsageSummary(
       const windows = [usage.primary, usage.secondary]
         .filter((window): window is UsageWindow => window !== undefined)
         .map((window) => formatWindow(window, now));
-      return `${marker} ${usage.accountName}：${windows.join(" · ")}`;
+      const quota = windows.length ? windows.join(" · ") : "额度未知";
+      return `${marker} ${usage.accountName}：${quota}（${sampleAgeLabel(usage.capturedAt, now, maxAgeMs)}）`;
     })
     .join("\n");
 }

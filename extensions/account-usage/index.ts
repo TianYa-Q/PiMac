@@ -142,7 +142,13 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       visibleNames.has(usage.accountName),
     );
     const segments = sortUsages(visibleUsages, sessionAccount).map((usage) =>
-      formatStatusSegment(usage, sessionAccount, ctx.ui.theme),
+      formatStatusSegment(
+        usage,
+        sessionAccount,
+        ctx.ui.theme,
+        Date.now(),
+        queryInterval(ctx),
+      ),
     );
     const geminiIsActive =
       ctx.model?.provider === "antigravity" && /gemini/iu.test(ctx.model.id);
@@ -290,7 +296,12 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       return;
     if (notify) {
       ctx.ui.notify(
-        formatUsageSummary(sortUsages(results, sessionAccount), sessionAccount),
+        formatUsageSummary(
+          sortUsages(results, sessionAccount),
+          sessionAccount,
+          Date.now(),
+          queryInterval(ctx),
+        ),
         "info",
       );
     }
@@ -976,6 +987,8 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
           formatUsageSummary(
             sortUsages([...usages.values()], sessionAccount),
             sessionAccount,
+            Date.now(),
+            queryInterval(ctx),
           ),
           "info",
         );
@@ -993,6 +1006,8 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         formatUsageSummary(
           sortUsages([...usages.values()], sessionAccount),
           sessionAccount,
+          Date.now(),
+          queryInterval(ctx),
         ),
         "info",
       );

@@ -1,4 +1,5 @@
 import type { AccountProvider, AccountUsage } from "./types.js";
+import { sampleFreshness } from "./freshness.js";
 
 export type UsageHealthOptions = {
   provider: AccountProvider;
@@ -28,9 +29,7 @@ export function buildUsageHealthReport(options: UsageHealthOptions) {
     else if (usage.error !== undefined) snapshots.failed++;
     else if (!usage.primary && !usage.secondary) snapshots.missing++;
     else if (
-      !Number.isFinite(usage.capturedAt) ||
-      usage.capturedAt > now ||
-      now - usage.capturedAt >= options.maxAgeMs
+      sampleFreshness(usage.capturedAt, now, options.maxAgeMs) !== "fresh"
     )
       snapshots.stale++;
     else snapshots.fresh++;

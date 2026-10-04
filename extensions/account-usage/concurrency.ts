@@ -13,6 +13,7 @@ export async function mapWithConcurrency<T, R>(
   const results: R[] = [];
   let nextIndex = 0;
   let failed = false;
+  let firstFailure: unknown;
   const worker = async () => {
     while (!failed) {
       signal?.throwIfAborted();
@@ -21,16 +22,16 @@ export async function mapWithConcurrency<T, R>(
       try {
         results[index] = await mapper(values[index]!);
       } catch (error) {
+        if (!failed) firstFailure = error;
         failed = true;
-        throw error;
+        return;
       }
     }
   };
-  const settled = await Promise.allSettled(
+  await Promise.allSettled(
     Array.from({ length: Math.min(concurrency, values.length) }, worker),
   );
   signal?.throwIfAborted();
-  const failure = settled.find((result) => result.status === "rejected");
-  if (failure?.status === "rejected") throw failure.reason;
+  if (failed) throw firstFailure;
   return results;
 }

@@ -15,6 +15,7 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 
 ## Features
 
+- Scheduler adds remembered sorting, running-state filters and configuration checks before actions; the extension adds sample-age warnings and non-blocking stream cleanup. See [scheduler and stream hardening](docs/scheduler-stream-hardening.md).
 - Add and switch between multiple projects in one window, with separate sessions and background tasks
 - Session search adds `title:` / `text:` scopes, scoped exclusions, quick-insert controls and retry after Server read failures. The extension adds count-only `/usage doctor json`, allowlisted error diagnostics and cancellation-preserving HTTP reads. See [search and diagnostic improvements](docs/search-diagnostics-improvements.md).
 - Current source adds native T3 Git controls: branches, searchable/sortable changes with selected/unselected filters, bounded, syntax-colored diffs with line numbers, search (⌘F), change-only filtering and copy, selected-file commits, push, PR creation and pull; a resizable sidebar with remembered width, a compact Server badge beside Pi Mac, and Git beside the composer’s compact control without a conversation header. See [Git integration](docs/t3-code-integration.md#git--vcs).

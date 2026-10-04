@@ -19,6 +19,7 @@
 - 会话搜索新增 `title:` / `text:` 范围、范围排除、快捷插入与 Server 读取失败后的重试；扩展新增只含计数的 `/usage doctor json`、白名单错误诊断与保留取消原因的 HTTP 读取。详见[搜索与诊断优化](docs/search-diagnostics-improvements.md)。
 - 当前源码新增原生 T3 Git 面板：查看分支、搜索及排序工作区变更、筛选已选／未选文件、查看带行号和增删着色的差异、搜索差异（⌘F）、筛选变更行与复制（含大小及渲染行数保护），选定文件提交、推送、创建 PR 与拉取；支持记忆宽度的可调整侧栏；Server 状态位于 Pi Mac 右侧，Git 位于压缩按钮右侧，不额外占用会话顶部空间。详见 [Git 集成说明](docs/t3-code-integration.md#git--vcs)。
 - Git 安全增强：可搜索本地分支、完整操作审阅（分支、提交说明与文件列表）；刷新使旧确认失效，操作在状态核对完成前保持锁定。扩展新增只读 `/usage doctor` 与按账户身份校验的额度缓存。详见[本轮优化说明](docs/git-account-safety-round.md)。
+- 定时任务新增记忆排序、派发中筛选与操作前配置核对；extension 增加实际采样年龄提示、非阻塞流清理与最早失败保留。详见[任务与流处理优化](docs/scheduler-stream-hardening.md)。
 - 管理 Server 定时任务：多关键词搜索、启用／暂停／失败筛选、最近刷新时间与安全复制。操作结果未知时必须成功刷新后才能继续；副本默认暂停，不复用会话绑定或 worktree。详见[稳定性优化说明](docs/reliability-improvements.md)。
 - 工具文本详情新增有界预览、搜索与匹配导航、自动换行、完整复制和导出；扩展缓存新增容量淘汰与重叠手动刷新合并。不会恢复官方 V2 移除的富输出。详见[文本预览与刷新优化](docs/tool-preview-cache-hardening.md)。
 - 流式显示回答、思考过程和工具调用

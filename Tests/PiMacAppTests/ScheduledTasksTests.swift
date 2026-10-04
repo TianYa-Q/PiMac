@@ -111,14 +111,15 @@ struct ScheduledTasksTests {
     #expect(store.hasLoaded)
     let task = try #require(store.tasks.first)
     await store.setEnabled(task)
-    #expect(calls[1].0 == "scheduledTasks.setEnabled")
-    #expect(calls[1].1.count == 2)
+    #expect(calls[2].0 == "scheduledTasks.setEnabled")
+    #expect(calls[2].1.count == 2)
     #expect(store.tasks[0].enabled == false)
+    let pausedTask = try #require(store.tasks.first)
     fail = true
     let before = calls.count
-    await store.runNow(task)
+    await store.runNow(pausedTask)
     #expect(calls.count == before + 1)
-    #expect(store.errorMessage?.contains("不会自动重试") == true)
+    #expect(store.errorMessage?.contains("未发送修改") == true)
     #expect(!store.isMutating)
     await store.refresh()
     // Never replace authoritative rows with an optimistic empty list.
@@ -126,7 +127,7 @@ struct ScheduledTasksTests {
     fail = false
     await store.refresh()
     #expect(store.errorMessage == nil)
-    await store.delete(task)
+    await store.delete(try #require(store.tasks.first))
     #expect(store.tasks.isEmpty)
   }
 
@@ -176,7 +177,10 @@ struct ScheduledTasksTests {
     #expect(store.errorMessage == nil)
     let before = calls.count
     await store.runNow(task)
-    #expect(Array(calls.dropFirst(before)) == ["scheduledTasks.runNow", "scheduledTasks.list"])
+    #expect(
+      Array(calls.dropFirst(before)) == [
+        "scheduledTasks.list", "scheduledTasks.runNow", "scheduledTasks.list",
+      ])
   }
 
   @Test func malformedRefreshDoesNotDiscardTheLastKnownList() async throws {
@@ -214,7 +218,8 @@ struct ScheduledTasksTests {
       }
       return ["tasks": [row()]]
     }
-    let task = try DesktopScheduledTask(row())
+    await store.refresh()
+    let task = try #require(store.tasks.first)
     let first = Task { await store.runNow(task) }
     for _ in 0..<100 where !store.isMutating { await Task.yield() }
     #expect(store.isMutating)
@@ -223,6 +228,33 @@ struct ScheduledTasksTests {
     await store.refresh()
     await first.value
     #expect(mutations == 1)
+  }
+
+  @Test func preflightKeepsMutationLockWhileTheReadIsSuspended() async throws {
+    var pauseNextRead = false
+    var calls: [String] = []
+    let store = ScheduledTasksStore { method, _ in
+      calls.append(method)
+      if pauseNextRead && method == "scheduledTasks.list" {
+        pauseNextRead = false
+        try await Task.sleep(for: .milliseconds(50))
+      }
+      return ["tasks": [row()]]
+    }
+    await store.refresh()
+    calls = []
+    pauseNextRead = true
+    let task = try #require(store.tasks.first)
+    let first = Task { await store.runNow(task) }
+    for _ in 0..<100 where !store.isMutating { await Task.yield() }
+    #expect(store.isMutating)
+    await store.runNow(task)
+    await store.delete(task)
+    await store.refresh()
+    #expect(await store.save(ScheduledTaskDraft(task: task)) == false)
+    await first.value
+    #expect(calls == ["scheduledTasks.list", "scheduledTasks.runNow", "scheduledTasks.list"])
+    #expect(!store.isMutating)
   }
 
   @Test func validationErrorDoesNotBlockCorrectedDraft() async throws {
@@ -306,6 +338,89 @@ struct ScheduledTasksTests {
       ScheduledTaskPresentation.visibleTasks(
         tasks, query: "PiMac test/model", filter: .all, projectTitles: ["project": "PiMac"]
       ).count == 2)
+  }
+
+  @Test func obsoleteReviewsAndEditorsNeverDispatchMutations() async throws {
+    for action in ["edit", "delete", "enable", "run"] {
+      var rows = [row()]
+      var mutations = 0
+      let store = ScheduledTasksStore { method, _ in
+        if method != "scheduledTasks.list" { mutations += 1 }
+        return ["tasks": rows]
+      }
+      await store.refresh()
+      let original = try #require(store.tasks.first)
+      rows[0]["prompt"] = "changed by another client"
+      // No UI refresh: the action itself must fetch authoritative state.
+      switch action {
+      case "edit": #expect(await store.save(ScheduledTaskDraft(task: original)) == false)
+      case "delete": await store.delete(original)
+      case "enable": await store.setEnabled(original)
+      default: await store.runNow(original)
+      }
+      #expect(mutations == 0)
+      #expect(store.requiresRefresh)
+      #expect(store.errorMessage?.contains("已变更") == true)
+      await store.refresh()
+      await store.delete(try #require(store.tasks.first))
+      #expect(mutations == 1)
+    }
+  }
+
+  @Test func telemetryDoesNotExpireConfigurationButRunningTaskCannotRunAgain() async throws {
+    var rows = [row()]
+    var mutations = 0
+    let store = ScheduledTasksStore { method, _ in
+      if method != "scheduledTasks.list" { mutations += 1 }
+      return ["tasks": rows]
+    }
+    await store.refresh()
+    let original = try #require(store.tasks.first)
+    rows[0]["runCount"] = 2
+    rows[0]["lastRunStatus"] = "running"
+    rows[0]["nextRunAt"] = "2026-06-01T10:00:00Z"
+    await store.refresh()
+    #expect(original.hasSameConfiguration(as: try #require(store.tasks.first)))
+    await store.runNow(original)
+    #expect(mutations == 0)
+    #expect(!store.requiresRefresh)
+    rows[0]["lastRunStatus"] = "succeeded"
+    await store.refresh()
+    await store.runNow(original)
+    #expect(mutations == 1)
+    rows = []
+    await store.refresh()
+    await store.delete(original)
+    #expect(mutations == 1)
+    #expect(store.requiresRefresh)
+  }
+
+  @Test func sortingIsStableAndMissingOrPausedSchedulesGoLast() throws {
+    var one = row(id: "one")
+    one["title"] = "Same"
+    one["nextRunAt"] = "2026-06-01T10:00:00Z"
+    one["lastRunAt"] = "2026-05-01T10:00:00Z"
+    var two = row(id: "two")
+    two["title"] = "Same"
+    two["nextRunAt"] = "2026-06-01T09:00:00.000Z"
+    two["lastRunAt"] = "2026-05-02T10:00:00Z"
+    two["lastRunStatus"] = "running"
+    var paused = row(id: "paused", enabled: false)
+    paused["nextRunAt"] = "2020-01-01T00:00:00Z"
+    var invalid = row(id: "invalid")
+    invalid["nextRunAt"] = "not-a-date"
+    let tasks = try [two, paused, invalid, one].map(DesktopScheduledTask.init)
+    let next = ScheduledTaskPresentation.visibleTasks(
+      tasks, query: "", filter: .all, sort: .nextRun)
+    #expect(next.map(\.id) == ["two", "one", "invalid", "paused"])
+    let recent = ScheduledTaskPresentation.visibleTasks(
+      tasks, query: "", filter: .all, sort: .lastRun)
+    #expect(Array(recent.prefix(2)).map(\.id) == ["two", "one"])
+    #expect(
+      ScheduledTaskPresentation.visibleTasks(tasks, query: "", filter: .running).map(\.id) == [
+        "two"
+      ])
+    #expect(ScheduledTaskPresentation.summary(tasks) == "启用 3 · 暂停 1 · 派发中 1 · 失败 0")
   }
 
   @Test(.timeLimit(.minutes(1)))

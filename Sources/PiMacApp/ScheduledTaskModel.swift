@@ -18,6 +18,19 @@ struct DesktopScheduledTask: Identifiable {
     self.enabled = enabled
   }
 
+  /// Ignore dispatch telemetry: polling must not invalidate a review solely
+  /// because the scheduler ran, but changes to execution policy must expire it.
+  func hasSameConfiguration(as other: DesktopScheduledTask) -> Bool {
+    let keys = [
+      "id", "title", "prompt", "enabled", "projectId", "threadId", "schedule",
+      "modelSelection", "workspaceStrategy", "runtimeMode", "interactionMode",
+      "createdBy", "creationSource",
+    ]
+    let lhs = raw.filter { keys.contains($0.key) }
+    let rhs = other.raw.filter { keys.contains($0.key) }
+    return NSDictionary(dictionary: lhs).isEqual(to: rhs)
+  }
+
   var projectID: String { raw["projectId"] as? String ?? "" }
   var threadID: String? { raw["threadId"] as? String }
   var prompt: String { raw["prompt"] as? String ?? "" }

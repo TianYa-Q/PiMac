@@ -51,25 +51,50 @@ final class ScheduledTasksStore: ObservableObject {
       errorMessage = draft.validationMessage ?? "任务配置无效。"
       return false
     }
-    return await mutate("scheduledTasks.upsert", payload)
+    return await mutate("scheduledTasks.upsert", payload, expected: draft.original)
   }
   func setEnabled(_ task: DesktopScheduledTask) async {
-    _ = await mutate("scheduledTasks.setEnabled", ["id": task.id, "enabled": !task.enabled])
+    _ = await mutate(
+      "scheduledTasks.setEnabled", ["id": task.id, "enabled": !task.enabled], expected: task)
   }
   func delete(_ task: DesktopScheduledTask) async {
-    _ = await mutate("scheduledTasks.delete", ["id": task.id])
+    _ = await mutate("scheduledTasks.delete", ["id": task.id], expected: task)
   }
   func runNow(_ task: DesktopScheduledTask) async {
-    _ = await mutate("scheduledTasks.runNow", ["id": task.id])
+    _ = await mutate("scheduledTasks.runNow", ["id": task.id], expected: task)
   }
 
-  private func mutate(_ method: String, _ payload: [String: Any]) async -> Bool {
+  private func mutate(
+    _ method: String, _ payload: [String: Any], expected: DesktopScheduledTask? = nil
+  ) async -> Bool {
     // Enforce the refresh barrier here too, not only in the view: queued actions
     // must not dispatch against stale state after an unknown mutation outcome.
     guard !isMutating, !isLoading, !requiresRefresh else { return false }
     isMutating = true
     errorMessage = nil
     defer { isMutating = false }
+    // One lock covers preflight, dispatch and reconciliation. Releasing it
+    // between awaits would allow a second click to validate the same snapshot.
+    if let expected {
+      do {
+        try await load()
+      } catch {
+        requiresRefresh = true
+        errorMessage = "操作前核对任务失败，未发送修改。请检查连接后刷新。"
+        return false
+      }
+      guard let current = tasks.first(where: { $0.id == expected.id }),
+        current.hasSameConfiguration(as: expected)
+      else {
+        requiresRefresh = true
+        errorMessage = "任务已变更或移除。请刷新后重新打开编辑／确认，避免覆盖其他客户端的修改。"
+        return false
+      }
+      if method == "scheduledTasks.runNow", current.raw["lastRunStatus"] as? String == "running" {
+        errorMessage = "任务正在派发，请等待完成后再执行。"
+        return false
+      }
+    }
     do {
       _ = try await rpc(method, payload)
     } catch {

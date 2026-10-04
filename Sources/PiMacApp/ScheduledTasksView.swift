@@ -11,6 +11,7 @@ struct ScheduledTasksView: View {
   @State private var running: DesktopScheduledTask?
   @State private var searchText = ""
   @State private var filter = ScheduledTaskFilter.all
+  @AppStorage("scheduledTaskSort") private var sort = ScheduledTaskSort.title
 
   init(workspace: WorkspaceModel) {
     self.workspace = workspace
@@ -22,13 +23,15 @@ struct ScheduledTasksView: View {
   }
 
   private var busy: Bool { store.isLoading || store.isMutating }
-  private var canAct: Bool { server.isConnected && !busy && !store.requiresRefresh }
+  private var canAct: Bool {
+    server.isConnected && store.hasLoaded && !busy && !store.requiresRefresh
+  }
   private var visibleTasks: [DesktopScheduledTask] {
     let projects = server.projects.reduce(into: [String: String]()) { result, row in
       if let id = row["id"] as? String { result[id] = row["title"] as? String ?? id }
     }
     return ScheduledTaskPresentation.visibleTasks(
-      store.tasks, query: searchText, filter: filter, projectTitles: projects)
+      store.tasks, query: searchText, filter: filter, projectTitles: projects, sort: sort)
   }
 
   var body: some View {
@@ -39,6 +42,7 @@ struct ScheduledTasksView: View {
         if busy { ProgressView().controlSize(.small) }
         Button("刷新", systemImage: "arrow.clockwise") { Task { await store.refresh() } }
           .disabled(busy || !server.isConnected)
+          .keyboardShortcut("r", modifiers: .command)
         Button("新建", systemImage: "plus") {
           editor = ScheduledTaskDraft(
             projectID: workspace.selectedModel?.projectURL.flatMap { server.projectID(for: $0) }
@@ -63,13 +67,19 @@ struct ScheduledTasksView: View {
           }
         }
       }
+      Text(ScheduledTaskPresentation.summary(store.tasks))
+        .font(.caption).foregroundStyle(.secondary)
       HStack {
         TextField("搜索标题、提示词、项目或模型", text: $searchText)
           .textFieldStyle(.roundedBorder)
         Picker("筛选", selection: $filter) {
           ForEach(ScheduledTaskFilter.allCases) { Text($0.title).tag($0) }
         }
-        .frame(width: 160)
+        .frame(width: 125)
+        Picker("排序", selection: $sort) {
+          ForEach(ScheduledTaskSort.allCases) { Text($0.title).tag($0) }
+        }
+        .frame(width: 130)
         Text("\(visibleTasks.count) / \(store.tasks.count)").font(.caption).foregroundStyle(
           .secondary)
       }
@@ -100,7 +110,9 @@ struct ScheduledTasksView: View {
     .interactiveDismissDisabled(store.isMutating)
     .task {
       while !Task.isCancelled {
-        if server.isConnected && editor == nil && !store.requiresRefresh {
+        if server.isConnected && editor == nil && deleting == nil && running == nil
+          && !store.requiresRefresh
+        {
           await store.refresh()
         }
         do { try await Task.sleep(for: .seconds(3)) } catch { break }
@@ -118,7 +130,7 @@ struct ScheduledTasksView: View {
         deleting = nil
       }
     } message: {
-      Text("删除后不会再触发；已经派发的会话不会被取消。")
+      Text("删除“\(deleting?.title ?? "")”后不会再触发；已经派发的会话不会被取消。")
     }
     .alert(
       "立即执行一次？", isPresented: Binding(get: { running != nil }, set: { if !$0 { running = nil } })
@@ -129,7 +141,7 @@ struct ScheduledTasksView: View {
         running = nil
       }
     } message: {
-      Text("即使任务已暂停，也会向目标会话派发一次提示词，可能消耗模型额度。")
+      Text("将执行“\(running?.title ?? "")”。即使已暂停，也会向目标会话派发一次提示词，可能消耗模型额度。")
     }
   }
 
@@ -185,7 +197,9 @@ struct ScheduledTasksView: View {
 
   private func dateLabel(_ value: Any?) -> String {
     guard let string = value as? String else { return "—" }
-    return T3DesktopClient.date(string).formatted(date: .abbreviated, time: .shortened)
+    let date = T3DesktopClient.date(string)
+    guard date != .distantPast else { return "—" }
+    return date.formatted(date: .abbreviated, time: .shortened)
   }
 }
 
