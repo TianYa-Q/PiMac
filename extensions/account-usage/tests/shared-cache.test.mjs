@@ -61,6 +61,58 @@ try {
     assert.deepEqual(results, [{ remaining: 42 }, { remaining: 42 }]);
   });
 
+  await test("overlapping forced refreshes share new publications, sequential ones do not", async () => {
+    let queries = 0;
+    let started;
+    const querying = new Promise((resolve) => {
+      started = resolve;
+    });
+    let resume;
+    const gate = new Promise((resolve) => {
+      resume = resolve;
+    });
+    const request = options({
+      namespace: "forced-coalesced",
+      force: true,
+      query: async () => {
+        queries++;
+        started();
+        await gate;
+        return { count: queries };
+      },
+    });
+    const first = readThroughSharedCache(request);
+    await querying;
+    const second = readThroughSharedCache(request);
+    // Both calls captured their baseline before the first publication.
+    resume();
+    assert.deepEqual(await Promise.all([first, second]), [
+      { count: 1 },
+      { count: 1 },
+    ]);
+    assert.equal(queries, 1);
+    assert.deepEqual(await readThroughSharedCache(request), { count: 2 });
+    assert.equal(queries, 2);
+  });
+
+  await test("invalid freshness intervals never query or publish", async () => {
+    const before = await readFile(path, "utf8");
+    for (const maxAgeMs of [-1, NaN, Infinity, 1.5]) {
+      await assert.rejects(
+        readThroughSharedCache(
+          options({
+            maxAgeMs,
+            query: async () => {
+              assert.fail("must not query");
+            },
+          }),
+        ),
+        RangeError,
+      );
+    }
+    assert.equal(await readFile(path, "utf8"), before);
+  });
+
   await test("providers query concurrently and merge without losing snapshots", async () => {
     let started;
     const querying = new Promise((resolve) => {

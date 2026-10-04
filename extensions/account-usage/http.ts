@@ -25,9 +25,26 @@ export async function requestBoundedJson(
   },
 ): Promise<Record<string, unknown>> {
   const timeoutMs = options.timeoutMs ?? 15_000;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
+  // Node clamps overflowing timers to 1 ms, turning a long deadline into an
+  // immediate abort. Validate before transmitting any credentials.
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > 2_147_483_647
+  )
     throw new RangeError("Invalid request timeout");
+  if (
+    options.retries !== undefined &&
+    options.retries !== 0 &&
+    options.retries !== 1
+  )
+    throw new RangeError("Invalid request retry limit");
   validateSizeLimit(options.maxBytes);
+  const endpoint = new URL(url);
+  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password)
+    throw new TypeError(
+      "Quota endpoints require HTTPS without URL credentials",
+    );
   options.signal.throwIfAborted();
   const controller = new AbortController();
   const signal = AbortSignal.any([options.signal, controller.signal]);

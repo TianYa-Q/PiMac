@@ -31,6 +31,35 @@ try {
     assert.equal(calls, 0);
   });
 
+  await test("invalid deadlines, retry budgets and insecure URLs never send credentials", async () => {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return Response.json({});
+    };
+    for (const timeoutMs of [0, -1, 1.5, NaN, Infinity, 2_147_483_648]) {
+      await assert.rejects(
+        requestBoundedJson("https://example.test", { ...options(), timeoutMs }),
+        RangeError,
+      );
+    }
+    for (const retries of [-1, 2, NaN, null]) {
+      await assert.rejects(
+        requestBoundedJson("https://example.test", { ...options(), retries }),
+        RangeError,
+      );
+    }
+    for (const url of [
+      "http://example.test",
+      "file:///tmp/quota",
+      "https://user:password@example.test",
+      "not a URL",
+    ]) {
+      await assert.rejects(requestBoundedJson(url, options()), TypeError);
+    }
+    assert.equal(calls, 0);
+  });
+
   await test("transient HTTP failure is cancelled and retried exactly once", async () => {
     let calls = 0;
     let cancelled = false;

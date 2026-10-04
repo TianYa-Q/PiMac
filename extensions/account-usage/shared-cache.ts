@@ -14,20 +14,14 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
+import {
+  serializeBoundedCache,
+  type CacheDocument,
+  type CacheEntry,
+} from "./cache-capacity.js";
 
 const CACHE_PATH = join(getAgentDir(), "account-usage-shared-cache.json");
 const MAX_CACHE_BYTES = 1024 * 1024;
-
-type CacheEntry = {
-  key: string;
-  updatedAt: number;
-  value: unknown;
-};
-
-type CacheDocument = {
-  version: 1;
-  entries: Record<string, CacheEntry>;
-};
 
 /**
  * Coalesce queries within a provider, but let unrelated providers query concurrently.
@@ -43,7 +37,14 @@ export async function readThroughSharedCache<T>(options: {
   validate?: (value: unknown) => boolean;
 }): Promise<T> {
   options.signal.throwIfAborted();
+  if (!Number.isSafeInteger(options.maxAgeMs) || options.maxAgeMs < 0)
+    throw new RangeError("Invalid cache freshness interval");
   mkdirSync(getAgentDir(), { recursive: true, mode: 0o700 });
+  // Atomic replacement makes this unlocked baseline read safe. A forced waiter
+  // may reuse a snapshot published AFTER it started, never the preexisting one.
+  const initialRevision = options.force
+    ? readCache().entries[options.namespace]?.revision
+    : undefined;
   let compromised: Error | undefined;
   const namespacePath = `${CACHE_PATH}.${createHash("sha256").update(options.namespace).digest("hex")}`;
   const release = await acquireCacheLock(namespacePath, options.signal, {
@@ -65,7 +66,9 @@ export async function readThroughSharedCache<T>(options: {
       () => readCache().entries[options.namespace],
     );
     if (
-      !options.force &&
+      (!options.force ||
+        (cached?.revision !== undefined &&
+          cached.revision !== initialRevision)) &&
       cached?.key === options.key &&
       cached.updatedAt <= Date.now() &&
       Date.now() - cached.updatedAt < options.maxAgeMs &&
@@ -88,9 +91,10 @@ export async function readThroughSharedCache<T>(options: {
       document.entries[options.namespace] = {
         key: options.key,
         updatedAt: Date.now(),
+        revision: randomUUID(),
         value,
       };
-      writeCache(document);
+      writeCache(document, options.namespace);
     });
     return value;
   } finally {
@@ -180,6 +184,9 @@ function readCache(): CacheDocument {
         entries[namespace] = {
           key: raw.key,
           updatedAt: raw.updatedAt,
+          ...(typeof raw.revision === "string"
+            ? { revision: raw.revision }
+            : {}),
           value: raw.value,
         };
       }
@@ -210,12 +217,14 @@ function readBoundedCache(): string {
   }
 }
 
-function writeCache(document: CacheDocument): void {
+function writeCache(document: CacheDocument, protectedNamespace: string): void {
   const temporaryPath = `${CACHE_PATH}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    const serialized = `${JSON.stringify(document)}\n`;
-    if (Buffer.byteLength(serialized) > MAX_CACHE_BYTES)
-      throw new Error("额度共享缓存过大，未写入。");
+    const serialized = serializeBoundedCache(
+      document,
+      protectedNamespace,
+      MAX_CACHE_BYTES,
+    );
     writeFileSync(temporaryPath, serialized, {
       encoding: "utf8",
       mode: 0o600,
