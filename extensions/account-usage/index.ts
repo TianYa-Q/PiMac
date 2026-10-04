@@ -21,6 +21,7 @@ import {
   type AntigravityUsageState,
 } from "./antigravity.js";
 import { accountUsageCacheKey } from "./account-identity.js";
+import { buildCachedReport, formatCachedReport } from "./cached-report.js";
 import { buildUsageHealthReport, formatUsageHealth } from "./health.js";
 import { CodexSessionAuth } from "./auth.js";
 import { queryAccountUsage } from "./codex.js";
@@ -983,7 +984,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         await showAutoWarmupRecords(ctx);
         return;
       }
-      if (action === "cached") {
+      if (action === "cached" || action === "cached json") {
         const state = safeReadAccountState(ctx);
         if (!state) return;
         const visibleNames = new Set(
@@ -997,19 +998,19 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
           ),
           sessionAccount,
         );
+        const maxAgeMs = queryInterval(ctx);
+        const report = buildCachedReport({
+          provider: providerId,
+          visibleNames: [...visibleNames],
+          usages: snapshot,
+          activeAccount: sessionAccount,
+          now: Date.now(),
+          maxAgeMs,
+        });
         ctx.ui.notify(
-          [
-            "当前会话的额度缓存（不请求网络／不预热／不切换账户）",
-            snapshot.length
-              ? formatUsageSummary(
-                  snapshot,
-                  sessionAccount,
-                  Date.now(),
-                  queryInterval(ctx),
-                )
-              : "暂无有效快照。运行 /usage refresh 获取额度；隐藏账户不会显示。",
-            "缓存不代表实时额度；后台自动刷新仍按原有周期运行。",
-          ].join("\n"),
+          action === "cached json"
+            ? JSON.stringify(report, null, 2)
+            : formatCachedReport(report, snapshot, sessionAccount, maxAgeMs),
           "info",
         );
         return;
@@ -1029,7 +1030,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       }
       if (action) {
         ctx.ui.notify(
-          "用法：/usage [refresh|settings|history|show|cached|doctor [json]]",
+          "用法：/usage [refresh|settings|history|show|cached [json]|doctor [json]]",
           "warning",
         );
         return;

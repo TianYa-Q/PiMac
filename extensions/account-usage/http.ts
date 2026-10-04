@@ -7,6 +7,15 @@ function validateSizeLimit(maxBytes: number): void {
     throw new RangeError("Invalid response size limit");
 }
 
+/** Cleanup is best-effort even for custom transports with throwing hooks. */
+function cancelBody(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => {});
+  } catch {
+    // A locked body or custom transport must not mask HTTP/cancellation errors.
+  }
+}
+
 export class HttpStatusError extends Error {
   constructor(readonly status: number) {
     super(`额度接口返回 HTTP ${status}。`);
@@ -73,13 +82,13 @@ export async function requestBoundedJson(
           continue;
         }
         if (signal.aborted) {
-          void response.body?.cancel().catch(() => {});
+          cancelBody(response);
           signal.throwIfAborted();
         }
         if (response.ok)
           return await readBoundedJson(response, options.maxBytes, signal);
         // A transport's cancel hook can hang; cleanup must not consume the deadline.
-        void response.body?.cancel().catch(() => {});
+        cancelBody(response);
         signal.throwIfAborted();
         if (
           ![502, 503, 504].includes(response.status) ||
@@ -109,7 +118,11 @@ export async function readBoundedJson(
   validateSizeLimit(maxBytes);
   const reader = response.body?.getReader();
   const cancel = () => {
-    void reader?.cancel().catch(() => {});
+    try {
+      void reader?.cancel().catch(() => {});
+    } catch {
+      // Never throw from an abort listener or obscure the original read error.
+    }
   };
   signal?.addEventListener("abort", cancel, { once: true });
   try {
@@ -164,8 +177,12 @@ export async function readBoundedJson(
       // cancel() closes pending reads synchronously, but its underlying source
       // cleanup promise is untrusted and may never settle. Observe errors without
       // awaiting that promise, then release the lock immediately.
-      void reader.cancel().catch(() => {});
-      reader.releaseLock();
+      cancel();
+      try {
+        reader.releaseLock();
+      } catch {
+        // Preserve the read result/error if a custom reader's cleanup throws.
+      }
     }
   }
 }

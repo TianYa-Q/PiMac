@@ -18,6 +18,58 @@ const bounded = (work) =>
     }),
   ]);
 
+test("throwing custom reader cleanup never masks parse failures or success", async () => {
+  for (const payload of ["invalid", '{"ok":true}']) {
+    let read = false;
+    const response = {
+      headers: new Headers(),
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (read) return { done: true };
+            read = true;
+            return { done: false, value: new TextEncoder().encode(payload) };
+          },
+          cancel: () => {
+            throw new Error("cleanup failure");
+          },
+          releaseLock: () => {
+            throw new Error("release failure");
+          },
+        }),
+      },
+    };
+    const work = readBoundedJson(response, 64);
+    if (payload === "invalid") await assert.rejects(work, /无效 JSON/u);
+    else assert.deepEqual(await work, { ok: true });
+  }
+});
+
+test("throwing HTTP body cleanup preserves status failures", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 401,
+      body: {
+        cancel: () => {
+          throw new Error("cleanup failure");
+        },
+      },
+    });
+    await assert.rejects(
+      requestBoundedJson("https://example.test", {
+        headers: {},
+        maxBytes: 64,
+        signal: new AbortController().signal,
+      }),
+      /HTTP 401/u,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("oversized response returns even if underlying cancellation never settles", async () => {
   const response = new Response(
     new ReadableStream(

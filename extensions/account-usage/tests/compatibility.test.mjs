@@ -195,6 +195,19 @@ try {
       assert.match(app.notices.at(-1).message, /不请求网络/u);
       assert.match(app.notices.at(-1).message, /当前会话的额度缓存/u);
       assert.match(app.notices.at(-1).message, /90%/u);
+      await app.commands.get("usage").handler("cached json", app.ctx);
+      const exported = JSON.parse(app.notices.at(-1).message);
+      assert.equal(exported.version, 1);
+      assert.equal(exported.source, "session-cache");
+      assert.equal(
+        exported.accounts.find((row) => row.name === "same").primary
+          .remainingPercent,
+        90,
+      );
+      assert.doesNotMatch(
+        JSON.stringify(exported),
+        /credential|access|refresh|accountId/u,
+      );
       assert.equal(requests.length, beforeRequests);
       assert.equal(app.mutations.length, beforeMutations);
       const replacement = {
@@ -205,6 +218,12 @@ try {
       await app.commands.get("usage").handler("cached", app.ctx);
       assert.match(app.notices.at(-1).message, /暂无有效快照/u);
       assert.doesNotMatch(app.notices.at(-1).message, /90%/u);
+      await app.commands.get("usage").handler("cached json", app.ctx);
+      const replaced = JSON.parse(app.notices.at(-1).message).accounts.find(
+        (row) => row.name === "same",
+      );
+      assert.equal(replaced.status, "missing");
+      assert.equal(replaced.primary, undefined);
       assert.equal(requests.length, beforeRequests);
       assert.equal(app.mutations.length, beforeMutations);
     } finally {

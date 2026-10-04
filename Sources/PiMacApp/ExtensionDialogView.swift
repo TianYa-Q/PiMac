@@ -6,6 +6,7 @@ struct ExtensionDialogView: View {
   let dialog: ExtensionDialog
   @State private var text = ""
   @State private var query = ""
+  @State private var confirmingDiscard = false
   @FocusState private var inputFocused: Bool
 
   var body: some View {
@@ -30,6 +31,10 @@ struct ExtensionDialogView: View {
       } else {
         standardDialog
       }
+    }
+    .confirmationDialog("放弃尚未提交的修改？", isPresented: $confirmingDiscard) {
+      Button("放弃修改", role: .destructive) { answer(cancelled: true) }
+      Button("继续编辑", role: .cancel) {}
     }
     .onAppear {
       if case .input(let initialText, _, _) = dialog.kind {
@@ -115,16 +120,35 @@ struct ExtensionDialogView: View {
             .accessibilityLabel(placeholder.isEmpty ? dialog.title : placeholder)
         } else {
           TextField(placeholder, text: $text).textFieldStyle(.roundedBorder)
-            .focused($inputFocused).onSubmit { answer(value: text) }
+            .focused($inputFocused).onSubmit { submitInput() }
         }
         HStack {
+          Text("\(text.utf8.count) / \(ExtensionDialogLimits.maximumBytes) 字节")
+            .font(.caption).monospacedDigit()
+            .foregroundStyle(ExtensionDialogLimits.acceptsInput(text) ? Color.secondary : Color.red)
           Spacer()
-          Button("取消") { answer(cancelled: true) }.keyboardShortcut(.cancelAction)
-          Button("提交") { answer(value: text) }.buttonStyle(.borderedProminent)
+          Button("取消") { cancelInput() }.keyboardShortcut(.cancelAction)
+          Button("提交") { submitInput() }.buttonStyle(.borderedProminent)
+            .keyboardShortcut(.return, modifiers: .command)
+            .help("提交输入（⌘Return）")
+            .disabled(!ExtensionDialogLimits.acceptsInput(text))
         }
       }
     }
     .padding(24).frame(width: 480)
+  }
+
+  private func submitInput() {
+    guard ExtensionDialogLimits.acceptsInput(text) else { return }
+    answer(value: text)
+  }
+
+  private func cancelInput() {
+    if case .input(let initial, _, _) = dialog.kind, text != initial {
+      confirmingDiscard = true
+    } else {
+      answer(cancelled: true)
+    }
   }
 
   private func answer(value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false) {

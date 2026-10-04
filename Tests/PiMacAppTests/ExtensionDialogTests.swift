@@ -91,6 +91,44 @@ struct ExtensionDialogTests {
     #expect(ui.dialog == nil)
   }
 
+  @Test func invalidRepliesKeepTheDialogOpen() throws {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    ui.handle(["id": "select", "method": "select", "options": ["Allow", "Deny"]], from: source)
+    let id = try #require(ui.dialog?.presentationID)
+    ui.answerDialog(presentationID: id, value: "not an option")
+    #expect(ui.pendingDialogCount == 1)
+    ui.answerDialog(presentationID: id, value: "Allow", confirmed: true)
+    #expect(ui.dialog?.presentationID == id)
+    ui.answerDialog(presentationID: id, value: "Allow", cancelled: true)
+    #expect(ui.dialog?.presentationID == id)
+    ui.answerDialog(presentationID: id, value: "Deny")
+    #expect(ui.dialog == nil)
+  }
+
+  @Test func inputResponseBudgetAndConfirmationTypes() {
+    let input = ExtensionDialog(
+      id: "input", title: "", kind: .input(initialText: "", placeholder: "", multiline: true))
+    let limit = String(repeating: "😀", count: ExtensionDialogLimits.maximumBytes / 4)
+    #expect(ExtensionDialogLimits.acceptsInput(limit))
+    #expect(!ExtensionDialogLimits.acceptsInput(limit + "a"))
+    #expect(
+      ExtensionDialogLimits.acceptsResponse(to: input, value: "", confirmed: nil, cancelled: false))
+    #expect(
+      !ExtensionDialogLimits.acceptsResponse(
+        to: input, value: limit + "a", confirmed: nil, cancelled: false))
+    let confirm = ExtensionDialog(id: "confirm", title: "", kind: .confirm(message: ""))
+    #expect(
+      ExtensionDialogLimits.acceptsResponse(
+        to: confirm, value: nil, confirmed: false, cancelled: false))
+    #expect(
+      !ExtensionDialogLimits.acceptsResponse(
+        to: confirm, value: "true", confirmed: nil, cancelled: false))
+    #expect(
+      ExtensionDialogLimits.acceptsResponse(
+        to: confirm, value: nil, confirmed: nil, cancelled: true))
+  }
+
   @Test func optionSearchPreservesWireValuesOrderAndDuplicates() {
     let options = ["Café Account", "Other", "CAFÉ account", "Café Account", "中文 😀"]
     let matches = ExtensionOptionSearch.filter(options, query: " cafe  ACCOUNT ")

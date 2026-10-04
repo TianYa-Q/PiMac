@@ -31,6 +31,22 @@ enum ExtensionDialogLimits {
   static let maximumBytes = 256 * 1024
   static let maximumOptions = 4096
 
+  static func acceptsResponse(
+    to dialog: ExtensionDialog, value: String?, confirmed: Bool?, cancelled: Bool
+  ) -> Bool {
+    if cancelled { return value == nil && confirmed == nil }
+    switch dialog.kind {
+    case .select(let options):
+      return confirmed == nil && value.map { options.contains($0) } == true
+    case .confirm:
+      return value == nil && confirmed != nil
+    case .input:
+      return confirmed == nil && value.map { $0.utf8.count <= maximumBytes } == true
+    }
+  }
+
+  static func acceptsInput(_ text: String) -> Bool { text.utf8.count <= maximumBytes }
+
   static func accepts(_ dialog: ExtensionDialog) -> Bool {
     var remaining = maximumBytes
     func consume(_ text: String) -> Bool {

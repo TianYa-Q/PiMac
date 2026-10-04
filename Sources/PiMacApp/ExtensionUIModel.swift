@@ -147,7 +147,9 @@ final class ExtensionUIModel: ObservableObject {
     cancelled: Bool = false
   ) {
     guard let pending = presentedDialog,
-      presentationID == pending.dialog.presentationID
+      presentationID == pending.dialog.presentationID,
+      ExtensionDialogLimits.acceptsResponse(
+        to: pending.dialog, value: value, confirmed: confirmed, cancelled: cancelled)
     else { return }
     pending.source.sendExtensionResponse(
       id: pending.dialog.id,
