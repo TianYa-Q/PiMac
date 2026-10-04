@@ -20,6 +20,8 @@ import {
   validAntigravityUsageState,
   type AntigravityUsageState,
 } from "./antigravity.js";
+import { accountUsageCacheKey } from "./account-identity.js";
+import { formatUsageHealth } from "./health.js";
 import { CodexSessionAuth } from "./auth.js";
 import { queryAccountUsage } from "./codex.js";
 import { mapWithConcurrency } from "./concurrency.js";
@@ -64,6 +66,8 @@ type SelectionEntryData = {
 export default function codexAccountExtension(pi: ExtensionAPI) {
   let settings: UsageSettings = { version: 1, hiddenAccounts: [] };
   let usages = new Map<string, AccountUsage>();
+  let usageIdentityKey: string | undefined;
+  let activeRefreshes = 0;
   let antigravityUsage: AntigravityUsageState = { kind: "unconfigured" };
   let antigravityGeneration = 0;
   let lastAntigravityQueryAt = 0;
@@ -108,13 +112,24 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   const safeReadAccountState = (ctx: ExtensionContext) =>
     readAccountStateSafely(ctx, providerId);
 
+  const usagesForState = (state: CodexAccountState): AccountUsage[] => {
+    if (
+      usageIdentityKey !==
+      accountUsageCacheKey(visibleAccounts(state.accounts, settings))
+    ) {
+      usages.clear();
+      usageIdentityKey = undefined;
+    }
+    return [...usages.values()];
+  };
+
   const publishStatus = (ctx: ExtensionContext) => {
     const state = safeReadAccountState(ctx);
     if (!state) return;
     const visibleNames = new Set(
       visibleAccounts(state.accounts, settings).map((account) => account.name),
     );
-    const visibleUsages = [...usages.values()].filter((usage) =>
+    const visibleUsages = usagesForState(state).filter((usage) =>
       visibleNames.has(usage.accountName),
     );
     const segments = sortUsages(visibleUsages, sessionAccount).map((usage) =>
@@ -203,6 +218,8 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     if (!state) return;
     const queriedProvider = providerId;
     const visible = visibleAccounts(state.accounts, settings);
+    const identityKey = accountUsageCacheKey(visible);
+    if (usageIdentityKey !== identityKey) usages.clear();
     const currentGeneration = ++generation;
     queryController?.abort();
     const controller = new AbortController();
@@ -216,7 +233,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
 
     const results = await readThroughSharedCache({
       namespace: providerId === "openai" ? "openai-chatgpt" : "codex",
-      key: JSON.stringify(visible.map((account) => account.name).sort()),
+      key: identityKey,
       validate: (value) =>
         validAccountUsages(
           value,
@@ -241,6 +258,19 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       return;
     }
 
+    // Another Pi process can replace a same-name login while this query is running.
+    // Do not publish or warm up telemetry belonging to that previous identity.
+    const latest = safeReadAccountState(ctx);
+    if (
+      !latest ||
+      accountUsageCacheKey(visibleAccounts(latest.accounts, settings)) !==
+        identityKey
+    ) {
+      usages.clear();
+      usageIdentityKey = undefined;
+      throw new Error("账户身份已变更，请重新刷新额度。");
+    }
+    usageIdentityKey = identityKey;
     usages = new Map(results.map((usage) => [usage.accountName, usage]));
     await runAutoWarmupCheck(ctx, visible, notify);
     if (
@@ -315,6 +345,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     rotateIdle = true,
   ) => {
     const startedAt = Date.now();
+    activeRefreshes++;
     const currentRefresh = ++refreshGeneration;
     const owner = sessionController;
     const store = accountStore;
@@ -363,6 +394,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         throw error;
       }
     } finally {
+      activeRefreshes--;
       if (isCurrent()) scheduleRefresh(ctx);
     }
   };
@@ -546,7 +578,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     if (!state) return false;
     const decision = nextAccount({
       activeAccount: previous,
-      usages: [...usages.values()].filter((usage) =>
+      usages: usagesForState(state).filter((usage) =>
         state.accounts.some((account) => account.name === usage.accountName),
       ),
       hiddenAccounts: settings.hiddenAccounts,
@@ -879,6 +911,25 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     description: "查看当前 OpenAI ChatGPT / Codex 账户的剩余额度和重置时间",
     handler: async (args, ctx) => {
       const action = args.trim();
+      if (action === "doctor") {
+        const state = safeReadAccountState(ctx);
+        if (!state) return;
+        ctx.ui.notify(
+          formatUsageHealth({
+            provider: providerId,
+            managed: managesSelectedAuth,
+            authFailed,
+            accountNames: state.accounts.map((account) => account.name),
+            hiddenNames: settings.hiddenAccounts,
+            usages: usagesForState(state),
+            maxAgeMs: queryInterval(ctx),
+            gemini: antigravityUsage.kind,
+            refreshing: activeRefreshes > 0,
+          }),
+          "info",
+        );
+        return;
+      }
       if (action === "refresh") {
         await refreshAll(ctx, true);
         return;
@@ -904,7 +955,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       }
       if (action) {
         ctx.ui.notify(
-          "用法：/usage [refresh|settings|history|show]",
+          "用法：/usage [refresh|settings|history|show|doctor]",
           "warning",
         );
         return;
@@ -936,6 +987,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     authFailed = false;
     sessionAccount = undefined;
     usages.clear();
+    usageIdentityKey = undefined;
     lastRebalanceAt = 0;
     lastFailedRotationAt = 0;
     automaticRetryUsed = false;

@@ -88,6 +88,7 @@ function instance(provider = "openai", apiKey = true, entries = []) {
   const events = new Map();
   const commands = new Map();
   const statuses = [];
+  const notices = [];
   const tokens = new Map();
   const overlays = new Map();
   const mutations = [];
@@ -110,7 +111,7 @@ function instance(provider = "openai", apiKey = true, entries = []) {
     },
     ui: {
       theme: { fg: (_color, text) => text, bold: (text) => text },
-      notify: () => {},
+      notify: (message, level) => notices.push({ message, level }),
       setStatus: (key, text) => statuses.push([key, text]),
     },
     modelRegistry: {
@@ -137,6 +138,7 @@ function instance(provider = "openai", apiKey = true, entries = []) {
     ctx,
     events,
     commands,
+    notices,
     tokens,
     mutations,
     entries,
@@ -509,6 +511,27 @@ try {
     });
   });
 
+  await test("rotation never uses quota from a replaced same-name account", async () => {
+    await rotationFixture(async (app) => {
+      usageFixture.get("modern").short = 1;
+      await app.commands.get("usage").handler("refresh", app.ctx);
+      await modern.saveAccount("spare", {
+        ...credential("replaced-spare", true),
+        accountId: "new-spare-identity",
+      });
+      await app.events.get("turn_end")({ outcome: "completed" }, app.ctx);
+      assert.equal(app.tokens.get("openai"), "modern");
+      assert.equal(app.entries.at(-1).data.accountName, "same");
+      const replacement = app
+        .status()
+        .accounts.find((row) => row.name === "spare");
+      assert.equal(replacement.primary, undefined);
+      assert.ok(replacement.error); // New identity was queried, not given the old quota.
+      await app.commands.get("usage").handler("doctor", app.ctx);
+      assert.match(app.notices.at(-1).message, /失败 1/u);
+    });
+  });
+
   await test("extension balances weekly quota pre-run and respects manual-selection cooldown", async () => {
     await rotationFixture(async (app) => {
       Object.assign(usageFixture.get("modern"), { weekly: 50, days: 6 });
@@ -658,6 +681,86 @@ try {
         false,
       );
     });
+  });
+
+  await test("doctor is read-only and does not fetch, mutate auth or append session entries", async () => {
+    const app = instance("openai", true);
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      const before = [
+        requests.length,
+        app.mutations.length,
+        app.entries.length,
+      ];
+      await app.commands.get("usage").handler("doctor", app.ctx);
+      assert.deepEqual(
+        [requests.length, app.mutations.length, app.entries.length],
+        before,
+      );
+      assert.match(app.notices.at(-1).message, /健康检查/u);
+      assert.match(app.notices.at(-1).message, /自动轮换不适用/u);
+    } finally {
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
+  await test("same-name re-login invalidates cached quota without forcing refresh", async () => {
+    const app = instance("openai", true);
+    const saved = modern
+      .readCodexAccountState()
+      .accounts.find((row) => row.name === "same");
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      await modern.saveAccount("same", {
+        ...credential("replacement-token", true),
+        accountId: "replacement-id",
+      });
+      const before = requests.length;
+      await app.commands.get("usage").handler("show", app.ctx);
+      assert.ok(
+        requests
+          .slice(before)
+          .some(
+            (row) => row.headers?.Authorization === "Bearer replacement-token",
+          ),
+      );
+    } finally {
+      if (saved) await modern.saveAccount("same", saved.credential);
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
+  await test("re-login during query cannot publish the previous identity", async () => {
+    const app = instance("openai", true);
+    const saved = modern
+      .readCodexAccountState()
+      .accounts.find((row) => row.name === "same");
+    const fetchMock = globalThis.fetch;
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      let replaced = false;
+      globalThis.fetch = async (url, options) => {
+        if (!replaced && String(url).endsWith("/usage")) {
+          replaced = true;
+          await modern.saveAccount("same", {
+            ...credential("inflight-replacement", true),
+            accountId: "inflight-id",
+          });
+        }
+        return fetchMock(url, options);
+      };
+      await assert.rejects(
+        app.commands.get("usage").handler("refresh", app.ctx),
+        AggregateError,
+      );
+      const same = app.status().accounts.find((row) => row.name === "same");
+      assert.equal(same.primary, undefined);
+      assert.equal(same.capturedAt, undefined);
+    } finally {
+      globalThis.fetch = fetchMock;
+      if (saved) await modern.saveAccount("same", saved.credential);
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
   });
 
   await test("automatic switching preserves unmanaged legacy API keys too", async () => {

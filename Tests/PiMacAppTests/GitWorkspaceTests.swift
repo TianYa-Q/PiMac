@@ -107,7 +107,8 @@ struct GitWorkspaceTests {
       GitWorkspaceStore.actionPayload(
         cwd: repo.path, action: "commit", message: "selected", files: ["file.txt"]))
     await store.perform(
-      client: client, method: "git.runStackedAction", payload: payload, cwd: repo.path)
+      client: client, method: "git.runStackedAction", payload: payload, cwd: repo.path,
+      expectedSnapshotID: store.snapshotID)
     #expect(!store.requiresRefresh)
     #expect(
       try git("show", "--pretty=", "--name-only", "HEAD").trimmingCharacters(
@@ -115,12 +116,13 @@ struct GitWorkspaceTests {
     #expect(try git("status", "--porcelain").contains("keep.txt"))
     await store.perform(
       client: client, method: "vcs.switchRef", payload: ["cwd": repo.path, "refName": "missing"],
-      cwd: repo.path)
+      cwd: repo.path, expectedSnapshotID: store.snapshotID)
     #expect(store.requiresRefresh)
     #expect(store.message.contains("未自动重试"))
     await store.perform(
       client: client, method: "vcs.createRef",
-      payload: ["cwd": repo.path, "refName": "must-not-exist"], cwd: repo.path)
+      payload: ["cwd": repo.path, "refName": "must-not-exist"], cwd: repo.path,
+      expectedSnapshotID: store.snapshotID)
     #expect(!(try git("branch", "--list")).contains("must-not-exist"))
     await store.refresh(client: client, cwd: repo.path)
     #expect(!store.requiresRefresh)

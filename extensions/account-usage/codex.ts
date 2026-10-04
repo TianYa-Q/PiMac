@@ -1,4 +1,5 @@
 import type { OAuthCredential } from "@earendil-works/pi-ai";
+import { resolveAccountId } from "./account-identity.js";
 import { logQuotaFailure } from "./diagnostics.js";
 import { HttpStatusError, requestBoundedJson } from "./http.js";
 import { getCodexOAuth } from "./oauth.js";
@@ -226,28 +227,6 @@ function parseWindow(value: unknown): UsageWindow | undefined {
         ? windowSeconds
         : undefined,
   };
-}
-
-function resolveAccountId(credential: OAuthCredential): string | undefined {
-  const value = credential as OAuthCredential & { accountId?: unknown };
-  if (typeof value.accountId === "string" && value.accountId)
-    return value.accountId;
-  const payload = decodeJwtPayload(credential.access);
-  const auth = asRecord(payload?.["https://api.openai.com/auth"]);
-  const accountId = auth?.chatgpt_account_id;
-  return typeof accountId === "string" && accountId ? accountId : undefined;
-}
-
-function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
-  const payload = token.split(".")[1];
-  if (!payload) return undefined;
-  try {
-    return asRecord(
-      JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown,
-    );
-  } catch {
-    return undefined;
-  }
 }
 
 function finiteNumber(value: unknown): number | undefined {

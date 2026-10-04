@@ -19,6 +19,7 @@ struct GitWorkspaceView: View {
   @State private var fileScope = GitWorkspacePresentation.FileScope.all
   @State private var fileSort = GitWorkspacePresentation.FileSort.server
   @State private var pending: Operation?
+  @State private var showingBranches = false
   @State private var previewFile: GitWorkspaceStatus.File?
 
   private struct Operation: Identifiable {
@@ -26,6 +27,8 @@ struct GitWorkspaceView: View {
     let title: String
     let method: String
     let payload: [String: Any]
+    let snapshotID: UUID
+    let branch: String?
   }
   private var locked: Bool {
     store.busy || store.loading || store.requiresRefresh || !server.isConnected
@@ -77,14 +80,14 @@ struct GitWorkspaceView: View {
             .disabled(locked || !status.hasUpstream || !status.files.isEmpty)
         }
         HStack {
-          Menu("切换分支") {
-            ForEach(store.branches, id: \.self) { branch in
-              Button(branch) {
+          Button("切换分支", systemImage: "arrow.triangle.branch") { showingBranches = true }
+            .disabled(locked || !status.files.isEmpty || store.branches.isEmpty)
+            .popover(isPresented: $showingBranches) {
+              GitBranchPicker(branches: store.branches, current: status.branch) { branch in
+                showingBranches = false
                 queue("切换到 \(branch)", "vcs.switchRef", ["cwd": cwd, "refName": branch])
               }
-              .disabled(branch == status.branch)
             }
-          }.disabled(locked || !status.files.isEmpty || store.branches.isEmpty)
           TextField("新分支名称", text: $newBranch).textFieldStyle(.roundedBorder)
           Button("创建并切换") {
             queue(
@@ -220,16 +223,21 @@ struct GitWorkspaceView: View {
     .sheet(item: $previewFile) { file in
       GitFilePreview(server: server, cwd: cwd, file: file.path)
     }
-    .alert(item: $pending) { operation in
-      Alert(
-        title: Text(operation.title),
-        message: Text("将在当前工作区执行原生 T3 Git 操作。提交会运行 Git hooks；推送或创建 PR 会访问远端。结果未确认时不会自动重试。"),
-        primaryButton: .default(Text("执行")) {
-          Task {
-            await store.perform(
-              client: server, method: operation.method, payload: operation.payload, cwd: cwd)
+    .sheet(item: $pending) { operation in
+      GitOperationReview(
+        store: store, server: server, title: operation.title, payload: operation.payload,
+        snapshotID: operation.snapshotID, branch: operation.branch
+      ) {
+        Task {
+          let completed = await store.perform(
+            client: server, method: operation.method, payload: operation.payload, cwd: cwd,
+            expectedSnapshotID: operation.snapshotID)
+          if completed && (operation.payload["action"] as? String)?.contains("commit") == true {
+            commitMessage = ""
           }
-        }, secondaryButton: .cancel())
+          if completed && operation.method == "vcs.createRef" { newBranch = "" }
+        }
+      }
     }
   }
 
@@ -264,6 +272,9 @@ struct GitWorkspaceView: View {
     queue(title, "git.runStackedAction", payload)
   }
   private func queue(_ title: String, _ method: String, _ payload: [String: Any]) {
-    pending = Operation(title: title, method: method, payload: payload)
+    guard !locked else { return }
+    pending = Operation(
+      title: title, method: method, payload: payload,
+      snapshotID: store.snapshotID, branch: store.status?.branch)
   }
 }

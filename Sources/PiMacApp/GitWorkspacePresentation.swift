@@ -64,6 +64,18 @@ enum GitWorkspacePresentation {
     return paths.isSubset(of: selected) ? selected.subtracting(paths) : selected.union(paths)
   }
 
+  static func filteredBranches(_ branches: [String], query: String, current: String?) -> [String] {
+    let terms = query.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+    return Array(Set(branches)).filter { branch in
+      terms.allSatisfy { branch.localizedStandardContains($0) }
+    }.sorted { lhs, rhs in
+      if lhs == current { return true }
+      if rhs == current { return false }
+      let order = lhs.localizedStandardCompare(rhs)
+      return order == .orderedSame ? lhs < rhs : order == .orderedAscending
+    }
+  }
+
   static func branchNameError(_ input: String) -> String? {
     let name = input.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !name.isEmpty else { return "请输入分支名称。" }

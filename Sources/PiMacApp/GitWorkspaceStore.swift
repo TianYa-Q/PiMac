@@ -84,6 +84,8 @@ final class GitWorkspaceStore: ObservableObject {
   @Published private(set) var progress = ""
   @Published private(set) var pullRequestURL: URL?
   @Published private(set) var refreshedAt: Date?
+  /// Confirmation tokens expire on every refresh attempt, including failed refreshes.
+  @Published private(set) var snapshotID = UUID()
   @Published var selectedFiles: Set<String> = []
   private var cwd = ""
   private var refreshID = UUID()
@@ -96,9 +98,17 @@ final class GitWorkspaceStore: ObservableObject {
 
   // Inject the transport so refresh races can be tested without a running Server.
   func refresh(cwd: String, rpc: (String, [String: Any]) async throws -> [String: Any]) async {
-    guard !busy else { return }
+    await refreshSnapshot(cwd: cwd, rpc: rpc, reconcilingMutation: false)
+  }
+
+  private func refreshSnapshot(
+    cwd: String, rpc: (String, [String: Any]) async throws -> [String: Any],
+    reconcilingMutation: Bool
+  ) async {
+    guard !busy || reconcilingMutation else { return }
     let current = UUID()
     refreshID = current
+    snapshotID = UUID()
     loading = true
     defer { if refreshID == current { loading = false } }
     if self.cwd != cwd {
@@ -162,48 +172,99 @@ final class GitWorkspaceStore: ObservableObject {
     var payload: [String: Any] = ["cwd": cwd, "action": action, "actionId": UUID().uuidString]
     if action.contains("commit") {
       let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !text.isEmpty, text.count <= 10_000, !files.isEmpty else { return nil }
+      guard !text.isEmpty, text.count <= 10_000, !files.isEmpty,
+        files.allSatisfy(validFilePath)
+      else { return nil }
       payload["commitMessage"] = text
       payload["filePaths"] = files.sorted()
     }
     return payload
   }
 
-  func perform(client: T3DesktopClient, method: String, payload: [String: Any], cwd: String) async {
-    guard !busy, !loading, !requiresRefresh, self.cwd == cwd,
+  private static func validFilePath(_ path: String) -> Bool {
+    !path.isEmpty && !path.hasPrefix("/") && !path.contains("\0")
+      && path.split(separator: "/", omittingEmptySubsequences: false)
+        .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+  }
+
+  @discardableResult
+  func perform(
+    client: T3DesktopClient, method: String, payload: [String: Any], cwd: String,
+    expectedSnapshotID: UUID
+  ) async -> Bool {
+    await perform(
+      method: method, payload: payload, cwd: cwd, expectedSnapshotID: expectedSnapshotID
+    ) { method, payload in
+      if method != "git.runStackedAction" {
+        return try await client.gitRPC(method, payload: payload)
+      }
+      return try await client.gitAction(payload: payload) { [weak self] event in
+        // Hook output may contain secrets; show only fixed progress categories.
+        switch event["phase"] as? String {
+        case "branch": self?.progress = "正在准备分支…"
+        case "commit": self?.progress = "正在提交（包括 Git hooks）…"
+        case "push": self?.progress = "正在推送…"
+        case "pr": self?.progress = "正在创建 Pull Request…"
+        default: break
+        }
+      }
+    }
+  }
+
+  /// The same state machine serves the live transport and deterministic race tests.
+  @discardableResult
+  func perform(
+    method: String, payload: [String: Any], cwd: String, expectedSnapshotID: UUID,
+    rpc: (String, [String: Any]) async throws -> [String: Any]
+  ) async -> Bool {
+    guard !busy, !loading, !requiresRefresh, self.cwd == cwd, !Task.isCancelled,
       payload["cwd"] as? String == cwd, status?.isRepo == true
-    else { return }
+    else { return false }
+    if expectedSnapshotID != snapshotID {
+      message = "Git 状态在确认期间已刷新，操作未发送。请检查最新状态并重新确认。"
+      return false
+    }
+    guard ["git.runStackedAction", "vcs.pull", "vcs.switchRef", "vcs.createRef"].contains(method)
+    else { return false }
+    if method == "git.runStackedAction" {
+      guard let action = payload["action"] as? String,
+        let validated = Self.actionPayload(
+          cwd: cwd, action: action, message: payload["commitMessage"] as? String ?? "",
+          files: Set(payload["filePaths"] as? [String] ?? [])),
+        payload["actionId"] is String
+      else { return false }
+      if let files = validated["filePaths"] as? [String] {
+        guard Set(files).isSubset(of: Set(status?.files.map(\.path) ?? [])) else {
+          message = "所选文件已不在最新变更列表中，操作未发送。请重新选择。"
+          return false
+        }
+      }
+      if action.contains("pr") { pullRequestURL = nil }
+    }
     busy = true
     progress = "正在执行；请等待 Server 完成…"
+    defer {
+      busy = false
+      progress = ""
+    }
     do {
-      if method == "git.runStackedAction" {
-        let result = try await client.gitAction(payload: payload) { [weak self] event in
-          // Hook output may contain secrets; show only fixed progress categories.
-          switch event["phase"] as? String {
-          case "branch": self?.progress = "正在准备分支…"
-          case "commit": self?.progress = "正在提交（包括 Git hooks）…"
-          case "push": self?.progress = "正在推送…"
-          case "pr": self?.progress = "正在创建 Pull Request…"
-          default: break
-          }
-        }
-        if let text = (result["pr"] as? [String: Any])?["url"] as? String,
-          let url = URL(string: text), url.scheme == "https", url.host != nil,
-          url.user == nil, url.password == nil
-        {
-          pullRequestURL = url
-        }
-      } else {
-        _ = try await client.gitRPC(method, payload: payload)
+      let result = try await rpc(method, payload)
+      if method == "git.runStackedAction",
+        let text = (result["pr"] as? [String: Any])?["url"] as? String,
+        let url = URL(string: text), url.scheme == "https", url.host != nil,
+        url.user == nil, url.password == nil
+      {
+        pullRequestURL = url
       }
-      busy = false
-      await refresh(client: client, cwd: cwd)
+      // Keep the mutation lease through reconciliation. A second operation or
+      // workspace refresh must not interleave while its outcome is being read.
+      await refreshSnapshot(cwd: cwd, rpc: rpc, reconcilingMutation: true)
       if !requiresRefresh { message = "Git 操作已完成。" }
+      return !requiresRefresh
     } catch {
-      busy = false
       requiresRefresh = true
       message = "操作结果未确认，未自动重试。请先刷新并检查分支、提交或远端状态，再决定是否再次执行。"
+      return false
     }
-    progress = ""
   }
 }
