@@ -362,6 +362,82 @@ try {
     }
   });
 
+  await test("an account menu cannot apply an old response after provider replacement", async () => {
+    const app = instance();
+    let resolveMenu;
+    let menuStarted;
+    const started = new Promise((resolve) => {
+      menuStarted = resolve;
+    });
+    app.ctx.ui.select = () =>
+      new Promise((resolve) => {
+        resolveMenu = resolve;
+        menuStarted();
+      });
+    let loginPrompts = 0;
+    app.ctx.ui.input = async () => {
+      loginPrompts++;
+      return "unexpected";
+    };
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      const command = app.commands.get("accounts").handler("", app.ctx);
+      const cancelled = assert.rejects(command, /已变更/);
+      await started;
+      app.ctx.model = {
+        provider: "openai-codex",
+        id: "gpt-test",
+        api: "openai-codex-responses",
+      };
+      await app.events.get("model_select")({}, app.ctx);
+      resolveMenu("登录新账户");
+      await cancelled;
+      assert.equal(loginPrompts, 0);
+    } finally {
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
+  await test("a menu response cannot survive shutdown and restart of the same provider", async () => {
+    const app = instance();
+    let resolveMenu;
+    app.ctx.ui.select = () =>
+      new Promise((resolve) => {
+        resolveMenu = resolve;
+      });
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      const command = app.commands.get("accounts").handler("", app.ctx);
+      const cancelled = assert.rejects(command, /已变更/);
+      await app.events.get("session_shutdown")({}, app.ctx);
+      await app.events.get("session_start")({ reason: "resume" }, app.ctx);
+      resolveMenu("健康检查");
+      await cancelled;
+    } finally {
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
+  await test("account menu health check remains read-only", async () => {
+    const app = instance();
+    let menus = 0;
+    app.ctx.ui.select = async (_title, options) => {
+      assert.ok(options.includes("健康检查"));
+      return menus++ === 0 ? "健康检查" : "关闭";
+    };
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      const before = requests.length;
+      const mutations = app.mutations.length;
+      await app.commands.get("accounts").handler("", app.ctx);
+      assert.equal(requests.length, before);
+      assert.equal(app.mutations.length, mutations);
+      assert.match(app.notices.at(-1).message, /健康检查/);
+    } finally {
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
   await test("a login-name prompt cannot migrate an operation to another provider", async () => {
     const app = instance();
     let resolveName;

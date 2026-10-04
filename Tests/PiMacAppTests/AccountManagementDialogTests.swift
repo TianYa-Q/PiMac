@@ -38,6 +38,24 @@ struct AccountManagementDialogTests {
     #expect(!result.accounts[2].isCurrent && result.accounts[2].isDefault)
   }
 
+  @Test func healthActionIsOptionalAndSearchPreservesIdentity() throws {
+    let result = try #require(
+      AccountManagementPresentation(
+        dialog: ExtensionDialog(
+          id: "test", title: "OpenAI ChatGPT 多账户管理\n\nWork\nPersonal\nWORK-backup（当前会话）",
+          kind: .select(options: Array(options.dropLast()) + ["健康检查", "关闭"]))))
+    #expect(result.supportsHealthCheck)
+    #expect(result.filteredAccounts(query: " work ").map(\.name) == ["Work", "WORK-backup"])
+    #expect(result.filteredAccounts(query: "backup").first?.id == 2)
+    #expect(result.filteredAccounts(query: "missing").isEmpty)
+    #expect(result.filteredAccounts(query: "  ").count == 3)
+    let legacy = try #require(
+      AccountManagementPresentation(
+        dialog: ExtensionDialog(
+          id: "old", title: "Codex legacy 多账户管理", kind: .select(options: options))))
+    #expect(!legacy.supportsHealthCheck)
+  }
+
   @Test func leavesOtherExtensionDialogsUnchanged() {
     #expect(
       AccountManagementPresentation(

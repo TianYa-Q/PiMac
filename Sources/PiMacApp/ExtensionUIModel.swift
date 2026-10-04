@@ -233,10 +233,10 @@ final class ExtensionUIModel: ObservableObject {
   }
 
   private func updateCodexAccounts(from text: String, source: AppModel) {
-    guard !text.isEmpty,
+    guard !text.isEmpty, text.utf8.count <= 1_048_576,
       let data = text.data(using: .utf8),
       let payload = try? JSONSerialization.jsonObject(with: data) as? PiRPCClient.JSON,
-      let version = payload["version"] as? Int, [1, 2].contains(version),
+      let version = AccountUsageSnapshot.number(payload["version"]), [1, 2].contains(version),
       let rawAccounts = payload["accounts"] as? [PiRPCClient.JSON]
     else { return }
 
@@ -245,15 +245,18 @@ final class ExtensionUIModel: ObservableObject {
     guard let provider = AccountUsageProvider(rawValue: providerID) else { return }
     let usageSnapshot =
       usageSnapshots[provider] ?? UsageSnapshot(accounts: [], gemini: nil, updatedAt: nil)
-    let updatedAt = (payload["updatedAt"] as? Double).map {
-      Date(timeIntervalSince1970: $0 / 1_000)
-    }
+    let updatedAt = AccountUsageSnapshot.date(payload["updatedAt"], milliseconds: true)
+    // An explicitly malformed timestamp must not bypass out-of-order protection.
+    guard payload["updatedAt"] == nil || updatedAt != nil else { return }
     let sourceID = ObjectIdentifier(source)
     let isFirstStatusAfterSessionChange = awaitingSessionStatus.remove(sourceID) != nil
     let active = payload["activeAccount"] as? String
     let defaultAccount = payload["defaultAccount"] as? String
+    var seenNames: Set<String> = []
     let accounts = rawAccounts.compactMap { raw -> CodexAccountStatus? in
-      guard let name = raw["name"] as? String else { return nil }
+      guard let name = raw["name"] as? String, !name.isEmpty,
+        seenNames.insert(name).inserted
+      else { return nil }
       return CodexAccountStatus(
         name: name,
         isActive: name == active,
@@ -262,7 +265,8 @@ final class ExtensionUIModel: ObservableObject {
         primary: Self.codexWindow(from: raw["primary"]),
         secondary: Self.codexWindow(from: raw["secondary"]),
         resetCredits: Self.codexResetCredits(from: raw["resetCredits"]),
-        error: raw["error"] as? String
+        error: raw["error"] as? String,
+        capturedAt: AccountUsageSnapshot.date(raw["capturedAt"], milliseconds: true)
       )
     }.sorted {
       $0.name.localizedStandardCompare($1.name) == .orderedAscending
@@ -271,16 +275,18 @@ final class ExtensionUIModel: ObservableObject {
     let gemini: GeminiUsageStatus?
     if let rawGemini = payload["gemini"] as? PiRPCClient.JSON {
       let kind = rawGemini["kind"] as? String
+      var seenQuotaIDs: Set<String> = []
       let quotas = (rawGemini["quotas"] as? [PiRPCClient.JSON] ?? []).compactMap {
         raw -> GeminiQuota? in
-        guard let remaining = raw["remainingPercent"] as? Double else { return nil }
-        return GeminiQuota(
+        guard let remaining = AccountUsageSnapshot.percent(raw["remainingPercent"]) else {
+          return nil
+        }
+        let quota = GeminiQuota(
           remainingPercent: remaining,
-          resetAt: (raw["resetAt"] as? Double).map {
-            Date(timeIntervalSince1970: $0 / 1_000)
-          },
+          resetAt: AccountUsageSnapshot.date(raw["resetAt"], milliseconds: true),
           window: raw["window"] as? String
         )
+        return seenQuotaIDs.insert(quota.id).inserted ? quota : nil
       }
       gemini = GeminiUsageStatus(
         isConfigured: kind != "unconfigured",
@@ -371,7 +377,8 @@ final class ExtensionUIModel: ObservableObject {
         primary: account.primary,
         secondary: account.secondary,
         resetCredits: account.resetCredits,
-        error: account.error
+        error: account.error,
+        capturedAt: account.capturedAt
       )
     }.sorted {
       if $0.isActive != $1.isActive { return $0.isActive }
@@ -420,27 +427,27 @@ final class ExtensionUIModel: ObservableObject {
 
   nonisolated private static func codexWindow(from value: Any?) -> CodexUsageWindow? {
     guard let raw = value as? PiRPCClient.JSON,
-      let remaining = raw["remainingPercent"] as? Double
+      let remaining = AccountUsageSnapshot.percent(raw["remainingPercent"])
     else { return nil }
-    let resetAt = (raw["resetAt"] as? Double).map(Date.init(timeIntervalSince1970:))
+    let resetAt = AccountUsageSnapshot.date(raw["resetAt"])
     return CodexUsageWindow(
       remainingPercent: remaining,
       resetAt: resetAt,
-      windowSeconds: raw["windowSeconds"] as? Double
+      windowSeconds: AccountUsageSnapshot.number(raw["windowSeconds"]).flatMap {
+        (1...31_536_000).contains($0) ? $0 : nil
+      }
     )
   }
 
   nonisolated private static func codexResetCredits(from value: Any?) -> CodexResetCredits? {
     guard let raw = value as? PiRPCClient.JSON,
-      let availableCount = (raw["availableCount"] as? NSNumber)?.intValue,
-      availableCount > 0
+      let count = AccountUsageSnapshot.number(raw["availableCount"]),
+      count > 0, count < Double(Int.max), count.rounded(.towardZero) == count
     else { return nil }
     let expirations = (raw["credits"] as? [PiRPCClient.JSON] ?? []).compactMap {
-      ($0["expiresAt"] as? NSNumber).map {
-        Date(timeIntervalSince1970: $0.doubleValue)
-      }
+      AccountUsageSnapshot.date($0["expiresAt"])
     }.sorted()
-    return CodexResetCredits(availableCount: availableCount, expirations: expirations)
+    return CodexResetCredits(availableCount: Int(count), expirations: expirations)
   }
 
   nonisolated private static func removingANSIEscapes(_ text: String) -> String {

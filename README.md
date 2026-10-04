@@ -33,6 +33,7 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 - View compaction, token, cost, and context usage statistics, plus task output speed in tokens/s using actual provider usage (includes reasoning and request latency, excludes tool time; updates at response completion when streaming usage is unavailable)
 - Toggle OpenAI Responses / Codex Fast mode for priority processing (may consume more quota; does not change reasoning level). Preferences survive restarts and are shared by desktop and Telegram without modifying global Pi settings
 - Support select, confirm, input, and editor dialogs provided by Pi extensions
+- Account cards show actual quota sample age, stale/clock-skew warnings and refresh progress. Account management supports search (more than four accounts) and a read-only Health Check; expired dialogs cannot act on a replacement session/provider. See [snapshot and lifecycle hardening](docs/account-snapshot-lifecycle.md).
 - Manage OpenAI ChatGPT / Codex accounts and Gemini quotas with the companion [account-usage](extensions/account-usage/README.md), maintained in this repository. Credentials, defaults and quotas stay provider-isolated; API keys are never automatically replaced. Low-quota rotation and weekly-budget balancing run inside the extension at safe Pi boundaries, independent of the desktop UI; automatic changes affect only the current session
 - Reuse existing authentication, models, skills, extensions, and settings from `~/.pi/agent`
 

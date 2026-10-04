@@ -11,6 +11,12 @@ struct AccountManagementPresentation {
 
   let provider: String
   let accounts: [Account]
+  let supportsHealthCheck: Bool
+
+  func filteredAccounts(query: String) -> [Account] {
+    let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    return query.isEmpty ? accounts : accounts.filter { $0.name.localizedStandardContains(query) }
+  }
 
   var credentialLabel: String {
     provider == "Codex legacy"
@@ -24,8 +30,11 @@ struct AccountManagementPresentation {
 
   init?(dialog: ExtensionDialog) {
     guard case .select(let options) = dialog.kind,
-      options == ["切换账户", "刷新额度", "登录新账户", "删除账户", "额度显示设置", "自动启动记录", "关闭"]
+      options.filter({ $0 != "健康检查" })
+        == ["切换账户", "刷新额度", "登录新账户", "删除账户", "额度显示设置", "自动启动记录", "关闭"],
+      options.filter({ $0 == "健康检查" }).count <= 1
     else { return nil }
+    supportsHealthCheck = options.contains("健康检查")
     let lines = dialog.title.components(separatedBy: "\n")
     switch lines.first {
     case "Codex legacy 多账户管理": provider = "Codex legacy"
@@ -54,6 +63,11 @@ struct AccountManagementPresentation {
 struct AccountManagementDialogView: View {
   let presentation: AccountManagementPresentation
   let answer: (String) -> Void
+  @State private var searchQuery = ""
+
+  private var visibleAccounts: [AccountManagementPresentation.Account] {
+    presentation.filteredAccounts(query: searchQuery)
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 20) {
@@ -84,15 +98,23 @@ struct AccountManagementDialogView: View {
           .frame(maxWidth: .infinity).padding(.vertical, 20)
           .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
         } else {
+          if presentation.accounts.count > 4 {
+            TextField("搜索账户", text: $searchQuery)
+              .textFieldStyle(.roundedBorder)
+              .accessibilityLabel("搜索已登录账户")
+          }
           ScrollView {
-            VStack(spacing: 0) {
-              ForEach(presentation.accounts) { account in
-                if account.id != 0 { Divider().padding(.leading, 46) }
+            LazyVStack(spacing: 0) {
+              if visibleAccounts.isEmpty {
+                Text("没有匹配的账户").foregroundStyle(.secondary).padding(20)
+              }
+              ForEach(visibleAccounts) { account in
+                if account.id != visibleAccounts.first?.id { Divider().padding(.leading, 46) }
                 accountRow(account)
               }
             }
           }
-          .frame(height: min(CGFloat(presentation.accounts.count) * 58, 232))
+          .frame(height: min(CGFloat(max(visibleAccounts.count, 1)) * 58, 232))
           .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
           .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.06)))
         }
@@ -119,6 +141,15 @@ struct AccountManagementDialogView: View {
 
       Divider()
       HStack(spacing: 16) {
+        if presentation.supportsHealthCheck {
+          Button {
+            answer("健康检查")
+          } label: {
+            Label("健康检查", systemImage: "stethoscope")
+          }
+          .buttonStyle(.plain).foregroundStyle(.secondary)
+          .help("只读诊断，不请求网络、不切换账户")
+        }
         Button {
           answer("自动启动记录")
         } label: {

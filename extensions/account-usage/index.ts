@@ -92,10 +92,19 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   let lastRebalanceAt = 0;
   let lastFailedRotationAt = 0;
   let automaticRetryUsed = false;
-  const requireCurrentStore = (store: typeof accountStore) => {
-    if (!sessionActive || store !== accountStore) {
-      throw new Error("账户管理会话或模型 provider 已变更，请重新执行命令。");
-    }
+  const accountContextGuard = (store: typeof accountStore) => {
+    const owner = sessionController;
+    return () => {
+      if (
+        !sessionActive ||
+        store !== accountStore ||
+        !owner ||
+        owner !== sessionController ||
+        owner.signal.aborted
+      ) {
+        throw new Error("账户管理会话或模型 provider 已变更，请重新执行命令。");
+      }
+    };
   };
   const updateVisibility = (hiddenAccounts: Iterable<string>) => {
     const updated: UsageSettings = {
@@ -629,14 +638,16 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     ctx: ExtensionCommandContext,
     accountName: string,
   ) => {
+    const store = accountStore;
+    const assertCurrent = accountContextGuard(store);
     if (rotationInFlight) await rotationInFlight;
+    assertCurrent();
     if (!ctx.isIdle()) throw new Error("请先停止当前任务再切换账户。");
     lastRebalanceAt = Date.now(); // Respect an explicit choice; urgency can override it.
-    const store = accountStore;
     await activateForSession(ctx, accountName);
-    requireCurrentStore(store);
+    assertCurrent();
     await store.setActiveAccount(accountName);
-    requireCurrentStore(store);
+    assertCurrent();
     managesSelectedAuth = true;
     persistSessionSelection(pi, ctx, accountName, providerId);
     sessionAccount = accountName;
@@ -651,6 +662,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   const loginAccount = async (ctx: ExtensionCommandContext) => {
     if (!ctx.isIdle()) throw new Error("请先停止当前任务再登录账户。");
     const store = accountStore;
+    const assertCurrent = accountContextGuard(store);
     const loginProvider = providerId;
     const ownerSignal = sessionController?.signal;
     const input = await ctx.ui.input(
@@ -658,7 +670,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       "仅允许字母、数字、点、下划线和连字符",
     );
     if (input === undefined) return;
-    requireCurrentStore(store);
+    assertCurrent();
     const accountName = input.trim();
     if (!/^[A-Za-z0-9._-]{1,64}$/u.test(accountName)) {
       ctx.ui.notify("账户名称格式无效。", "error");
@@ -678,7 +690,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       return;
     }
 
-    requireCurrentStore(store);
+    assertCurrent();
     const controller = new AbortController();
     const abortLogin = () => controller.abort();
     ownerSignal?.addEventListener("abort", abortLogin, {
@@ -690,13 +702,13 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         controller.signal,
         loginProvider,
       );
-      requireCurrentStore(store);
+      assertCurrent();
       await store.saveAccount(accountName, credential);
-      requireCurrentStore(store);
+      assertCurrent();
       await activateForSession(ctx, accountName);
-      requireCurrentStore(store);
+      assertCurrent();
       await store.setActiveAccount(accountName);
-      requireCurrentStore(store);
+      assertCurrent();
       managesSelectedAuth = true;
       persistSessionSelection(pi, ctx, accountName, providerId);
       sessionAccount = accountName;
@@ -714,6 +726,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
 
   const deleteAccount = async (ctx: ExtensionCommandContext) => {
     const store = accountStore;
+    const assertCurrent = accountContextGuard(store);
     const state = store.readCodexAccountState();
     const removable = state.accounts.filter(
       (account) =>
@@ -728,6 +741,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       removable.map((account) => account.name),
     );
     if (!selected) return;
+    assertCurrent();
     if (
       !(await ctx.ui.confirm(
         "删除账户",
@@ -736,9 +750,9 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     ) {
       return;
     }
-    requireCurrentStore(store);
+    assertCurrent();
     await store.removeAccount(selected);
-    requireCurrentStore(store);
+    assertCurrent();
     usages.delete(selected);
     unhideAccount(selected);
     publishStatus(ctx);
@@ -754,8 +768,29 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     }
   };
 
+  const showUsageHealth = (ctx: ExtensionContext) => {
+    const state = safeReadAccountState(ctx);
+    if (!state) return;
+    ctx.ui.notify(
+      formatUsageHealth({
+        provider: providerId,
+        managed: managesSelectedAuth,
+        authFailed,
+        accountNames: state.accounts.map((account) => account.name),
+        hiddenNames: settings.hiddenAccounts,
+        usages: usagesForState(state),
+        maxAgeMs: queryInterval(ctx),
+        gemini: antigravityUsage.kind,
+        refreshing: activeRefreshes > 0,
+      }),
+      "info",
+    );
+  };
+
   const openAccountsMenu = async (ctx: ExtensionCommandContext) => {
+    const assertCurrent = accountContextGuard(accountStore);
     while (true) {
+      assertCurrent();
       const state = safeReadAccountState(ctx);
       if (!state) return;
       const accountLines = state.accounts.map((account) => {
@@ -778,10 +813,12 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
           "删除账户",
           "额度显示设置",
           "自动启动记录",
+          "健康检查",
           "关闭",
         ],
       );
       if (!action || action === "关闭") return;
+      assertCurrent();
       if (action === "切换账户") {
         if (state.accounts.length === 0) {
           ctx.ui.notify("请先登录一个账户。", "warning");
@@ -796,6 +833,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
           ),
         );
         if (selected) {
+          assertCurrent();
           await switchAccount(ctx, selected.replace(/^✓\s+/u, ""));
           return;
         }
@@ -805,11 +843,13 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       if (action === "删除账户") await deleteAccount(ctx);
       if (action === "额度显示设置") await openVisibilitySettings(ctx);
       if (action === "自动启动记录") await showAutoWarmupRecords(ctx);
+      if (action === "健康检查") showUsageHealth(ctx);
     }
   };
 
   const openVisibilitySettings = async (ctx: ExtensionCommandContext) => {
     const store = accountStore;
+    const assertCurrent = accountContextGuard(store);
     const state = safeReadAccountState(ctx);
     if (!state || state.accounts.length === 0) return;
     const hidden = new Set(settings.hiddenAccounts);
@@ -824,7 +864,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         ),
       );
       if (!selected) return;
-      requireCurrentStore(store);
+      assertCurrent();
       const accountName = selected.replace(/^[○✓]\s+/u, "");
       if (hidden.has(accountName)) hidden.delete(accountName);
       else hidden.add(accountName);
@@ -860,7 +900,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
           if (value === "隐藏") hidden.add(id);
           else hidden.delete(id);
           try {
-            requireCurrentStore(store);
+            assertCurrent();
             updateVisibility(hidden);
             usages.delete(id);
             publishStatus(ctx);
@@ -912,22 +952,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const action = args.trim();
       if (action === "doctor") {
-        const state = safeReadAccountState(ctx);
-        if (!state) return;
-        ctx.ui.notify(
-          formatUsageHealth({
-            provider: providerId,
-            managed: managesSelectedAuth,
-            authFailed,
-            accountNames: state.accounts.map((account) => account.name),
-            hiddenNames: settings.hiddenAccounts,
-            usages: usagesForState(state),
-            maxAgeMs: queryInterval(ctx),
-            gemini: antigravityUsage.kind,
-            refreshing: activeRefreshes > 0,
-          }),
-          "info",
-        );
+        showUsageHealth(ctx);
         return;
       }
       if (action === "refresh") {

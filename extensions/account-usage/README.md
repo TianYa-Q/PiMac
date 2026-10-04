@@ -15,7 +15,7 @@ The link points `~/.pi/agent/extensions/account-usage` at this directory. Existi
 
 ## Commands
 
-- `/accounts`: manage accounts for the current model's provider, including logging in.
+- `/accounts`: manage accounts for the current model's provider, including logging in. The Health Check menu action runs the same read-only report as `/usage doctor`; it performs no network requests or account switching.
 - `/accounts switch <name>`: explicitly switch the current session and future default.
 - `/usage`, `/usage refresh`, `/usage settings`, `/usage history`, `/usage show`.
 - `/usage doctor`: read-only health report for auth ownership, visible/hidden account counts, fresh/stale/failed/unknown quota snapshots, refresh activity and Gemini snapshot state. It does not query the network, warm up models or switch accounts, and never prints credentials, account IDs or raw provider errors. Snapshot health is not a live connectivity test.
@@ -32,7 +32,7 @@ Select an **openai** model before logging in to a new OpenAI ChatGPT account; se
 
 All files remain under Pi's agent directory (`~/.pi/agent` by default), with owner-only permissions. **No credentials belong in this repository.** Names, defaults, refresh tokens, quota caches, and session bindings are isolated by provider. Existing legacy files and old session bindings remain compatible. Legacy tokens are never copied into the new OpenAI store: log in again to obtain the required OAuth grant.
 
-An OpenAI API key (stored or environment/runtime) is not automatically replaced by managed subscription accounts. Explicit `/accounts switch` opts that session into managed ChatGPT auth; automatic rotation is enabled only when the extension reports managed auth. Manual account changes are rejected during active tasks. Automatic changes use Pi's awaited safe boundaries (see below). Old sessions retain their own provider-specific account binding.
+An OpenAI API key (stored or environment/runtime) is not automatically replaced by managed subscription accounts. Explicit `/accounts switch` opts that session into managed ChatGPT auth; automatic rotation is enabled only when the extension reports managed auth. Manual account changes are rejected during active tasks. Pending account menus, selection, login and visibility dialogs are bound to their originating store and session cancellation owner; responses after shutdown/restart or provider replacement are rejected instead of applying to the new context. Automatic changes use Pi's awaited safe boundaries (see below). Old sessions retain their own provider-specific account binding.
 
 Quota requests use the ChatGPT usage/reset-credit endpoints. Both response bodies are read incrementally with a 64 KiB limit on received bytes, even without a reliable Content-Length header. Oversized/error bodies are cancelled rather than drained into memory; cancellation releases stream readers. Request timeouts are distinguished from user cancellation. A direct-token credential must include a usable ChatGPT account ID (credential metadata or token claims) and be authorized by those endpoints. Missing IDs, unsupported grants, or HTTP failures produce an account error, not invented quota or a fallback to another provider's credentials. **Live browser login and direct-token endpoint permissions require manual validation; mocked tests do not establish upstream authorization.**
 
@@ -101,6 +101,8 @@ Failures are recorded in the private `account-usage-errors.jsonl` diagnostic log
   "gemini": { "kind": "unconfigured", "isActive": false, "quotas": [] }
 }
 ```
+
+Each account can include `capturedAt` (Unix milliseconds), the provider query time. `updatedAt` is the status publication time, not proof of fresh quota. Pi Mac displays sample age separately, marks samples stale at 60 seconds while busy / 180 seconds while idle, and warns about samples more than five seconds in the future. Legacy samples without timestamps display an unknown-age label. It rejects oversized status JSON (over 1 MiB), malformed numeric fields and duplicate row identities before rendering.
 
 `activeAccount` is omitted when the session uses unmanaged auth, including an API key. Pi Mac retains version-1 legacy support and keeps quota snapshots separate by provider. TUI uses `account-usage` for human-readable status.
 

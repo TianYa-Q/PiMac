@@ -204,6 +204,7 @@ struct CodexAccountStatus: Identifiable, Hashable {
   let secondary: CodexUsageWindow?
   let resetCredits: CodexResetCredits?
   let error: String?
+  var capturedAt: Date? = nil
 
   var id: String { name }
 }
