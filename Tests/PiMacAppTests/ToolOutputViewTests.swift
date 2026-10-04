@@ -5,6 +5,61 @@ import Testing
 
 @MainActor
 struct ToolOutputViewTests {
+  @Test func allMatchesUseTemporaryAttributesWithoutChangingTextOrSelection() {
+    let view = ToolOutputScrollView()
+    view.setOutput("cat cat")
+    let selection = NSRange(location: 0, length: 3)
+    view.outputTextView.setSelectedRange(selection)
+    view.setSearchMatches([selection, NSRange(location: 4, length: 3)])
+    #expect(view.searchMatches.count == 2)
+    #expect(view.outputTextView.selectedRange() == selection)
+    #expect(view.outputTextView.string == "cat cat")
+    let manager = view.outputTextView.layoutManager!
+    #expect(
+      manager.temporaryAttribute(.backgroundColor, atCharacterIndex: 4, effectiveRange: nil) != nil)
+    #expect(
+      view.outputTextView.textStorage!.attribute(.backgroundColor, at: 4, effectiveRange: nil)
+        == nil)
+    view.setSearchMatches([])
+    #expect(
+      manager.temporaryAttribute(.backgroundColor, atCharacterIndex: 4, effectiveRange: nil) == nil)
+    view.setSearchMatches([selection])
+    view.setOutput("dog dog")
+    view.setSearchMatches([])
+    #expect(
+      manager.temporaryAttribute(.backgroundColor, atCharacterIndex: 0, effectiveRange: nil) == nil)
+  }
+
+  @Test func invalidAndExcessiveHighlightsAreBoundedAndReplacementClearsOldRanges() {
+    let view = ToolOutputScrollView()
+    view.setOutput("cat cat")
+    view.setSearchMatches([
+      NSRange(location: Int.max, length: Int.max), NSRange(location: -1, length: 1),
+      NSRange(location: 6, length: 2), NSRange(location: 0, length: 0),
+      NSRange(location: 4, length: 3),
+    ])
+    #expect(view.searchMatches == [NSRange(location: 4, length: 3)])
+    view.setSearchMatches(Array(repeating: NSRange(location: 0, length: 3), count: 2000))
+    #expect(view.searchMatches.count == ToolOutputPresentation.maximumMatches)
+    view.setOutput("x")
+    view.setSearchMatches([NSRange(location: 4, length: 3)])
+    #expect(view.searchMatches.isEmpty)
+  }
+
+  @Test func tailFollowingScrollsAfterLayoutAndCanBePaused() {
+    let view = ToolOutputScrollView()
+    view.setFrameSize(CGSize(width: 300, height: 100))
+    view.setOutput(Array(repeating: "line", count: 100).joined(separator: "\n"))
+    view.setFollowsTail(true)
+    view.layoutSubtreeIfNeeded()
+    #expect(view.contentView.bounds.maxY >= view.outputTextView.frame.height - 1)
+    view.setFollowsTail(false)
+    view.contentView.scroll(to: .zero)
+    view.setOutput(Array(repeating: "line", count: 120).joined(separator: "\n"))
+    view.layoutSubtreeIfNeeded()
+    #expect(view.contentView.bounds.origin.y == 0)
+  }
+
   @Test func outputIsLaidOutBeforeAnyClickOrWindowAttachment() {
     let view = ToolOutputScrollView()
     view.setOutput("Script completed\nWall time 0.1 seconds\nOutput:\n\nimport Foundation")

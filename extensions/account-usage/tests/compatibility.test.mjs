@@ -185,6 +185,34 @@ try {
     assert.notEqual(getCodexOAuth("openai"), getCodexOAuth("openai-codex"));
   });
 
+  await test("cached usage performs no network or auth mutation and discards replaced identities", async () => {
+    const app = instance();
+    await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+    try {
+      const beforeRequests = requests.length;
+      const beforeMutations = app.mutations.length;
+      await app.commands.get("usage").handler("cached", app.ctx);
+      assert.match(app.notices.at(-1).message, /不请求网络/u);
+      assert.match(app.notices.at(-1).message, /当前会话的额度缓存/u);
+      assert.match(app.notices.at(-1).message, /90%/u);
+      assert.equal(requests.length, beforeRequests);
+      assert.equal(app.mutations.length, beforeMutations);
+      const replacement = {
+        ...credential("replaced", true),
+        accountId: "other-account-id",
+      };
+      await modern.saveAccount("same", replacement);
+      await app.commands.get("usage").handler("cached", app.ctx);
+      assert.match(app.notices.at(-1).message, /暂无有效快照/u);
+      assert.doesNotMatch(app.notices.at(-1).message, /90%/u);
+      assert.equal(requests.length, beforeRequests);
+      assert.equal(app.mutations.length, beforeMutations);
+    } finally {
+      await modern.saveAccount("same", credential("modern", true));
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
   await test("a failed provider cache still publishes the other provider's settled quota", async () => {
     const app = instance();
     const originalLock = lockfile.lock;

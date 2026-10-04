@@ -983,6 +983,37 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         await showAutoWarmupRecords(ctx);
         return;
       }
+      if (action === "cached") {
+        const state = safeReadAccountState(ctx);
+        if (!state) return;
+        const visibleNames = new Set(
+          visibleAccounts(state.accounts, settings).map(
+            (account) => account.name,
+          ),
+        );
+        const snapshot = sortUsages(
+          usagesForState(state).filter((usage) =>
+            visibleNames.has(usage.accountName),
+          ),
+          sessionAccount,
+        );
+        ctx.ui.notify(
+          [
+            "当前会话的额度缓存（不请求网络／不预热／不切换账户）",
+            snapshot.length
+              ? formatUsageSummary(
+                  snapshot,
+                  sessionAccount,
+                  Date.now(),
+                  queryInterval(ctx),
+                )
+              : "暂无有效快照。运行 /usage refresh 获取额度；隐藏账户不会显示。",
+            "缓存不代表实时额度；后台自动刷新仍按原有周期运行。",
+          ].join("\n"),
+          "info",
+        );
+        return;
+      }
       if (action === "show") {
         await refreshAll(ctx, false);
         ctx.ui.notify(
@@ -998,7 +1029,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       }
       if (action) {
         ctx.ui.notify(
-          "用法：/usage [refresh|settings|history|show|doctor [json]]",
+          "用法：/usage [refresh|settings|history|show|cached|doctor [json]]",
           "warning",
         );
         return;

@@ -16,7 +16,7 @@ final class ScheduledTasksStore: ObservableObject {
   init(rpc: @escaping RPC) { self.rpc = rpc }
 
   func refresh() async {
-    guard !isLoading, !isMutating else { return }
+    guard !Task.isCancelled, !isLoading, !isMutating else { return }
     isLoading = true
     defer { isLoading = false }
     do {
@@ -46,7 +46,7 @@ final class ScheduledTasksStore: ObservableObject {
   }
 
   func save(_ draft: ScheduledTaskDraft) async -> Bool {
-    guard !isMutating, !isLoading, !requiresRefresh else { return false }
+    guard !Task.isCancelled, !isMutating, !isLoading, !requiresRefresh else { return false }
     guard let payload = try? draft.payload() else {
       errorMessage = draft.validationMessage ?? "任务配置无效。"
       return false
@@ -69,7 +69,7 @@ final class ScheduledTasksStore: ObservableObject {
   ) async -> Bool {
     // Enforce the refresh barrier here too, not only in the view: queued actions
     // must not dispatch against stale state after an unknown mutation outcome.
-    guard !isMutating, !isLoading, !requiresRefresh else { return false }
+    guard !Task.isCancelled, !isMutating, !isLoading, !requiresRefresh else { return false }
     isMutating = true
     errorMessage = nil
     defer { isMutating = false }
@@ -78,6 +78,9 @@ final class ScheduledTasksStore: ObservableObject {
     if let expected {
       do {
         try await load()
+      } catch is CancellationError {
+        // Preflight is read-only; nothing has been dispatched and no outcome is ambiguous.
+        return false
       } catch {
         requiresRefresh = true
         errorMessage = "操作前核对任务失败，未发送修改。请检查连接后刷新。"
@@ -95,6 +98,9 @@ final class ScheduledTasksStore: ObservableObject {
         return false
       }
     }
+    // Cancellation before dispatch is definitive. After dispatch, retain the
+    // unknown-outcome barrier even for CancellationError: the Server may have acted.
+    guard !Task.isCancelled else { return false }
     do {
       _ = try await rpc(method, payload)
     } catch {

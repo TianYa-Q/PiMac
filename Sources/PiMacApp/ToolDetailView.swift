@@ -53,6 +53,9 @@ struct ReadToolInputView: View {
 struct ToolDetailView: View {
   let title: String
   let text: String
+  var isExpanded = false
+  @State private var showsInspector = false
+  @State private var followsTail = false
   @State private var isSearching = false
   @State private var search = ToolOutputSearchState(text: "")
   @State private var wrapsLines = false
@@ -69,6 +72,27 @@ struct ToolDetailView: View {
         .font(.caption2)
         .foregroundStyle(.tertiary)
         Spacer()
+        if !isExpanded {
+          Button {
+            showsInspector = true
+          } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+          }
+          .buttonStyle(.plain)
+          .help("放大阅读\(title)")
+          .accessibilityLabel("放大阅读\(title)")
+        }
+        if search.fromEnd {
+          Button {
+            followsTail.toggle()
+          } label: {
+            Image(systemName: followsTail ? "pause.circle" : "play.circle")
+          }
+          .buttonStyle(.plain)
+          .help(followsTail ? "暂停尾部跟随" : "跟随最新输出（搜索时暂缓）")
+          .accessibilityLabel("跟随最新输出")
+          .accessibilityValue(followsTail ? "开启" : "关闭")
+        }
         Button {
           isSearching.toggle()
           searchFocused = isSearching
@@ -158,7 +182,9 @@ struct ToolDetailView: View {
         .padding(6)
       }
       ToolOutputView(
-        text: preview.text, searchSelection: search.selectedRange, wrapsLines: wrapsLines)
+        text: preview.text, searchSelection: search.selectedRange, wrapsLines: wrapsLines,
+        searchMatches: search.matches.ranges, followsTail: followsTail && search.fromEnd,
+        maximumHeight: isExpanded ? 600 : 300)
       if preview.isTruncated {
         Text(
           "仅显示\(search.fromEnd ? "尾部" : "开头") \(ToolOutputPresentation.maximumLines) 行／128 KiB 以内内容；搜索仅覆盖预览，复制与导出保留完整内容。"
@@ -167,6 +193,9 @@ struct ToolDetailView: View {
         .foregroundStyle(.secondary)
         .padding(9)
       }
+    }
+    .sheet(isPresented: $showsInspector) {
+      ToolOutputInspector(title: title, text: text)
     }
     .onChange(of: text, initial: true) { _, next in search.updateText(next) }
     .frame(maxWidth: .infinity, alignment: .leading)

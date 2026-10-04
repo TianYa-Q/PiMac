@@ -22,6 +22,61 @@ struct ScheduledTasksTests {
     ]
   }
 
+  @Test func cancelledNewTaskNeverDispatchesEvenWhenTransportIgnoresCancellation() async {
+    var calls: [String] = []
+    let store = ScheduledTasksStore { method, _ in
+      calls.append(method)
+      return ["tasks": []]
+    }
+    var draft = ScheduledTaskDraft(projectID: "project", modelID: "test/model")
+    draft.title = "Task"
+    draft.prompt = "Prompt"
+    let cancelled = Task {
+      withUnsafeCurrentTask { $0?.cancel() }
+      await store.refresh()
+      return await store.save(draft)
+    }
+    #expect(await cancelled.value == false)
+    #expect(calls.isEmpty)
+    #expect(!store.requiresRefresh)
+    #expect(!store.isMutating)
+  }
+
+  @Test func cancellationDuringReadOnlyPreflightDoesNotCreateAnUnknownOutcome() async throws {
+    var cancelPreflight = false
+    var mutations = 0
+    let store = ScheduledTasksStore { method, _ in
+      if method == "scheduledTasks.list" {
+        if cancelPreflight {
+          withUnsafeCurrentTask { $0?.cancel() }
+        }
+        return ["tasks": [row()]]
+      }
+      mutations += 1
+      return [:]
+    }
+    await store.refresh()
+    let original = try #require(store.tasks.first)
+    cancelPreflight = true
+    let operation = Task { await store.delete(original) }
+    await operation.value
+    #expect(mutations == 0)
+    #expect(!store.requiresRefresh)
+    #expect(store.errorMessage == nil)
+    #expect(!store.isMutating)
+  }
+
+  @Test func cancellationAfterDispatchRetainsTheRefreshBarrier() async throws {
+    let store = ScheduledTasksStore { method, _ in
+      if method == "scheduledTasks.list" { return ["tasks": [row()]] }
+      throw CancellationError()
+    }
+    await store.refresh()
+    await store.delete(try #require(store.tasks.first))
+    #expect(store.requiresRefresh)
+    #expect(store.errorMessage?.contains("可能已生效") == true)
+  }
+
   @Test func editingPreservesServerPoliciesAndRejectsDeletedTaskRecreation() throws {
     let task = try DesktopScheduledTask(row())
     var draft = ScheduledTaskDraft(task: task)

@@ -161,6 +161,47 @@ try {
     assert.equal(calls, 1);
   });
 
+  await test("server backoff exceeding the deadline skips retry and cancels its body", async () => {
+    let calls = 0;
+    let cancelled = false;
+    globalThis.fetch = async () => {
+      calls++;
+      return new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        {
+          status: 503,
+          headers: { "Retry-After": "60" },
+        },
+      );
+    };
+    await assert.rejects(
+      requestBoundedJson("https://example.test", {
+        ...options(),
+        timeoutMs: 500,
+      }),
+      /HTTP 503/u,
+    );
+    assert.equal(calls, 1);
+    assert.equal(cancelled, true);
+  });
+
+  await test("zero Retry-After still uses bounded backoff and one retry", async () => {
+    let calls = 0;
+    globalThis.fetch = async () =>
+      ++calls === 1
+        ? new Response(null, { status: 503, headers: { "Retry-After": "0" } })
+        : Response.json({ ok: true });
+    assert.deepEqual(
+      await requestBoundedJson("https://example.test", options()),
+      { ok: true },
+    );
+    assert.equal(calls, 2);
+  });
+
   await test("optional requests can disable retries", async () => {
     let calls = 0;
     globalThis.fetch = async () => {

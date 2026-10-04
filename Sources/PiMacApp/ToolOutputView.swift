@@ -8,6 +8,9 @@ struct ToolOutputView: NSViewRepresentable {
   let text: String
   var searchSelection: NSRange? = nil
   var wrapsLines = false
+  var searchMatches: [NSRange] = []
+  var followsTail = false
+  var maximumHeight: CGFloat = 300
 
   func makeNSView(context: Context) -> ToolOutputScrollView {
     ToolOutputScrollView()
@@ -16,7 +19,9 @@ struct ToolOutputView: NSViewRepresentable {
   func updateNSView(_ view: ToolOutputScrollView, context: Context) {
     view.setWrapsLines(wrapsLines)
     view.setOutput(text)
+    view.setSearchMatches(searchMatches)
     view.setSearchSelection(searchSelection)
+    view.setFollowsTail(followsTail && searchSelection == nil)
   }
 
   func sizeThatFits(
@@ -24,7 +29,7 @@ struct ToolOutputView: NSViewRepresentable {
   ) -> CGSize? {
     let width = proposal.width.flatMap { $0.isFinite ? max(1, $0) : nil } ?? 400
     nsView.prepareLayout(viewportWidth: width)
-    return CGSize(width: width, height: min(300, nsView.outputSize.height))
+    return CGSize(width: width, height: min(maximumHeight, nsView.outputSize.height))
   }
 }
 
@@ -33,6 +38,8 @@ final class ToolOutputScrollView: NSScrollView {
   private(set) var outputSize = CGSize(width: 18, height: 18)
   private let inset: CGFloat = 9
   private var searchSelection: NSRange?
+  private(set) var searchMatches: [NSRange] = []
+  private var followsTail = false
   private(set) var wrapsLines = false
   private var layoutWidth: CGFloat = 0
 
@@ -77,10 +84,14 @@ final class ToolOutputScrollView: NSScrollView {
       let container = outputTextView.textContainer
     else { return }
     let selection = outputTextView.selectedRange()
+    manager.removeTemporaryAttribute(
+      .backgroundColor,
+      forCharacterRange: NSRange(location: 0, length: (outputTextView.string as NSString).length))
     outputTextView.string = text
     // The same range may now refer to different text. Reapply it after replacement,
     // but preserve manual selections across unrelated SwiftUI updates.
     searchSelection = nil
+    searchMatches = []
     let length = (text as NSString).length
     let start = min(selection.location, length)
     outputTextView.setSelectedRange(
@@ -131,6 +142,34 @@ final class ToolOutputScrollView: NSScrollView {
     outputTextView.scrollRangeToVisible(range)
   }
 
+  /// Temporary layout attributes never alter copied/exported text or manual selections.
+  func setSearchMatches(_ ranges: [NSRange]) {
+    guard ranges != searchMatches, let manager = outputTextView.layoutManager else { return }
+    let length = (outputTextView.string as NSString).length
+    manager.removeTemporaryAttribute(
+      .backgroundColor, forCharacterRange: NSRange(location: 0, length: length))
+    searchMatches = Array(ranges.prefix(ToolOutputPresentation.maximumMatches)).filter {
+      $0.location >= 0 && $0.location <= length && $0.length > 0
+        && $0.length <= length - $0.location
+    }
+    for range in searchMatches {
+      manager.addTemporaryAttribute(
+        .backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.25),
+        forCharacterRange: range)
+    }
+  }
+
+  func setFollowsTail(_ follows: Bool) {
+    followsTail = follows
+    if follows { scrollToTail() }
+  }
+
+  private func scrollToTail() {
+    let y = max(0, outputTextView.frame.height - contentView.bounds.height)
+    contentView.scroll(to: NSPoint(x: contentView.bounds.origin.x, y: y))
+    reflectScrolledClipView(contentView)
+  }
+
   /// SwiftUI must measure wrapped height before assigning the native view's frame.
   func prepareLayout(viewportWidth: CGFloat) {
     if let manager = outputTextView.layoutManager,
@@ -150,6 +189,7 @@ final class ToolOutputScrollView: NSScrollView {
     super.layout()
     prepareLayout(viewportWidth: contentView.bounds.width)
     resizeDocument()
+    if followsTail { scrollToTail() }
   }
 
   private func resizeDocument() {

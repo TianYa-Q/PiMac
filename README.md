@@ -15,6 +15,8 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 
 ## Features
 
+- Textual tool previews add an enlarged reader, all-match highlights and optional tail following; scheduled task cancellation is checked before dispatch. The extension adds `/usage cached` and deadline-aware `Retry-After` backoff. See [output inspector and quota backoff](docs/output-inspector-quota-backoff.md).
+
 - LAN transport hardening, live pairing expiry, offline-device revocation and actionable extension health diagnostics: see [connection and quota hardening](docs/connection-quota-hardening.md).
 
 - Scheduler adds remembered sorting, running-state filters and configuration checks before actions; the extension adds sample-age warnings and non-blocking stream cleanup. See [scheduler and stream hardening](docs/scheduler-stream-hardening.md).

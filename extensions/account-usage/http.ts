@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { withDeadline } from "./deadline.js";
+import { quotaRetryDelay } from "./retry-policy.js";
 
 function validateSizeLimit(maxBytes: number): void {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
@@ -49,6 +50,7 @@ export async function requestBoundedJson(
   options.signal.throwIfAborted();
   // A custom fetch/transport can ignore abort. Bound the caller as well as I/O,
   // and check the signal before applying any late headers or starting a retry.
+  const startedAt = performance.now();
   return withDeadline(
     async (signal) => {
       for (let attempt = 0; ; attempt++) {
@@ -84,7 +86,13 @@ export async function requestBoundedJson(
           attempt >= (options.retries ?? 1)
         )
           throw new HttpStatusError(response.status);
-        await delay(250, undefined, { signal });
+        const retryDelay = quotaRetryDelay(
+          response.headers.get("retry-after"),
+          timeoutMs - (performance.now() - startedAt),
+        );
+        if (retryDelay === undefined)
+          throw new HttpStatusError(response.status);
+        await delay(retryDelay, undefined, { signal });
       }
     },
     options.signal,
