@@ -1,10 +1,12 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { fetchAccountUsage } from "./antigravity-runtime.js";
 import { logQuotaFailure } from "./diagnostics.js";
+import { withDeadline } from "./deadline.js";
+import { sampleFreshness } from "./freshness.js";
 
 export type AntigravityUsageState =
   | { kind: "unconfigured" }
-  | { kind: "loaded"; usage: AntigravityUsage }
+  | { kind: "loaded"; usage: AntigravityUsage; capturedAt?: number }
   | { kind: "failed"; error: string };
 
 type AntigravityUsage = {
@@ -34,7 +36,12 @@ export function validAntigravityUsageState(
     if (state.kind === "failed") return typeof state.error === "string";
     if (state.kind !== "loaded") return false;
     parseUsage(state.usage);
-    return true;
+    return (
+      state.capturedAt === undefined ||
+      (typeof state.capturedAt === "number" &&
+        Number.isFinite(state.capturedAt) &&
+        state.capturedAt >= 0)
+    );
   } catch {
     return false;
   }
@@ -43,18 +50,29 @@ export function validAntigravityUsageState(
 export async function queryAntigravityUsage(
   ctx: ExtensionContext,
   signal: AbortSignal,
+  timeoutMs = 15_000,
 ): Promise<AntigravityUsageState> {
   const startedAt = Date.now();
   let operation = "credential_lookup";
   try {
-    signal.throwIfAborted();
-    const apiKey = await ctx.modelRegistry.getApiKeyForProvider("antigravity");
-    if (!apiKey) return { kind: "unconfigured" };
+    return await withDeadline(
+      async (boundedSignal) => {
+        const apiKey =
+          await ctx.modelRegistry.getApiKeyForProvider("antigravity");
+        boundedSignal.throwIfAborted();
+        if (!apiKey) return { kind: "unconfigured" };
 
-    operation = "usage_request";
-    const usage = parseUsage(await fetchAccountUsage(apiKey));
-    signal.throwIfAborted();
-    return { kind: "loaded", usage };
+        operation = "usage_request";
+        // The upstream adapter has no AbortSignal argument. Bound our wait and
+        // check ownership after completion; it may still finish I/O in the background.
+        const raw = await fetchAccountUsage(apiKey);
+        boundedSignal.throwIfAborted();
+        const usage = parseUsage(raw);
+        return { kind: "loaded", usage, capturedAt: Date.now() };
+      },
+      signal,
+      timeoutMs,
+    );
   } catch (error) {
     if (signal.aborted) throw error;
     logQuotaFailure(
@@ -68,6 +86,7 @@ export async function queryAntigravityUsage(
 export type AntigravityGUIStatus = {
   kind: "unconfigured" | "loaded" | "failed";
   isActive: boolean;
+  capturedAt?: number;
   quotas: Array<{
     remainingPercent: number;
     resetAt: number | undefined;
@@ -89,6 +108,7 @@ export function antigravityGUIStatus(
   return {
     kind: "loaded",
     isActive,
+    ...(state.capturedAt === undefined ? {} : { capturedAt: state.capturedAt }),
     quotas: collectGeminiQuotas(state.usage).map((quota) => ({
       remainingPercent: Math.round(quota.remainingFraction * 1_000) / 10,
       resetAt: quota.resetTime
@@ -105,6 +125,7 @@ export function formatAntigravityStatus(
   isActive: boolean,
   theme: Theme,
   now = Date.now(),
+  maxAgeMs = 180_000,
 ): string | undefined {
   if (state.kind === "unconfigured") return undefined;
   const label = isActive
@@ -119,9 +140,21 @@ export function formatAntigravityStatus(
     return `${label} ${theme.fg("warning", "无额度数据")}`;
   }
 
+  const freshness = sampleFreshness(state.capturedAt, now, maxAgeMs);
+  const warning =
+    freshness === "fresh"
+      ? ""
+      : theme.fg(
+          "warning",
+          freshness === "stale"
+            ? " · 已过期"
+            : freshness === "future"
+              ? " · 采样时间超前"
+              : " · 采样时间未知",
+        );
   return `${label} ${quotas
     .map((quota) => formatQuota(quota, theme, now))
-    .join(" · ")}`;
+    .join(" · ")}${warning}`;
 }
 
 type DisplayQuota = {

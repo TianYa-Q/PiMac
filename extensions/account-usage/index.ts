@@ -156,6 +156,8 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       antigravityUsage,
       geminiIsActive,
       ctx.ui.theme,
+      Date.now(),
+      queryInterval(ctx),
     );
     if (antigravitySegment) {
       if (geminiIsActive) segments.unshift(antigravitySegment);

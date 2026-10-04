@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { boundedJSON, discardBody } from './bounded-json.mjs';
 
 const providers = new Set(['openai', 'openai-codex', 'antigravity']);
 const MAX_BYTES = 256 * 1024;
@@ -39,15 +40,6 @@ function window(value) {
     ...(Number.isFinite(value.reset_at) && value.reset_at > 0 ? { resetAt: value.reset_at } : {}),
     ...(Number.isFinite(value.limit_window_seconds) && value.limit_window_seconds > 0 ? { windowSeconds: value.limit_window_seconds } : {}) };
 }
-async function boundedJSON(response) {
-  const chunks = []; let size = 0;
-  for await (const chunk of response.body) {
-    size += chunk.length;
-    if (size > MAX_BYTES) throw new Error('oversize');
-    chunks.push(chunk);
-  }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-}
 export function createPiAccountManagement({ agentDirectory = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent'), fetchImpl = fetch, now = Date.now } = {}) {
   const cache = new Map(), pending = new Map();
   const controller = new AbortController();
@@ -74,8 +66,8 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
             'user-agent': 'antigravity/cli/1.1.23 (aidev_client; os_type=linux; arch=amd64; cl=974125021; auth_method=consumer)' },
           body: JSON.stringify(payload),
           });
-          if (!response.ok) { await response.body?.cancel(); continue; }
-          return await boundedJSON(response);
+          if (!response.ok) { discardBody(response); signal.throwIfAborted(); continue; }
+          return await boundedJSON(response, { maxBytes: MAX_BYTES, signal });
         } catch {
           if (signal.aborted) break;
         }
@@ -103,7 +95,7 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
       }
       if (unique.size) {
         const rank = row => /5\s*h|five.?hour/i.test(row.window ?? '') ? 0 : /7\s*d|week/i.test(row.window ?? '') ? 1 : 2;
-        return { ...status, kind: 'loaded', quotas: [...unique.values()].sort((a, b) => rank(a) - rank(b)).slice(0, 64) };
+        return { ...status, kind: 'loaded', capturedAt: now(), quotas: [...unique.values()].sort((a, b) => rank(a) - rank(b)).slice(0, 64) };
       }
     } catch { /* Summary is optional; retain per-model quota fallback. */ }
     try {
@@ -119,7 +111,7 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
           unique.set(JSON.stringify(row), row);
         }
         if (!unique.size) throw new Error('shape');
-        return { ...status, kind: 'loaded', quotas: [...unique.values()].slice(0, 64) };
+        return { ...status, kind: 'loaded', capturedAt: now(), quotas: [...unique.values()].slice(0, 64) };
     } catch { /* No provider error bodies cross IPC. */ }
     return { ...status, error: 'Antigravity 额度查询失败，请检查网络和账户授权。' };
   }
@@ -131,8 +123,8 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
         headers: { authorization: `Bearer ${credential.access}`, 'chatgpt-account-id': id },
         redirect: 'error', signal,
       });
-      if (!response.ok) { await response.body?.cancel(); return undefined; }
-      const body = await boundedJSON(response);
+      if (!response.ok) { discardBody(response); return undefined; }
+      const body = await boundedJSON(response, { maxBytes: MAX_BYTES, signal });
       const rawCount = body?.available_count;
       const count = typeof rawCount === 'number' ? rawCount
         : typeof rawCount === 'string' && rawCount.trim() ? Number(rawCount) : NaN;
@@ -184,8 +176,8 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
             headers: { authorization: `Bearer ${credential.access}`, 'chatgpt-account-id': id },
             redirect: 'error', signal,
           });
-          if (!response.ok) { await response.body?.cancel(); throw new Error('http'); }
-          const body = await boundedJSON(response);
+          if (!response.ok) { discardBody(response); throw new Error('http'); }
+          const body = await boundedJSON(response, { maxBytes: MAX_BYTES, signal });
           row.primary = window(body.rate_limit?.primary_window);
           row.secondary = window(body.rate_limit?.secondary_window);
           if (!row.primary && !row.secondary) throw new Error('shape');

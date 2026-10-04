@@ -188,6 +188,7 @@ struct GeminiUsageStatus: Hashable {
   let isActive: Bool
   let quotas: [GeminiQuota]
   let error: String?
+  var capturedAt: Date? = nil
 }
 
 struct CodexResetCredits: Hashable {

@@ -292,7 +292,8 @@ final class ExtensionUIModel: ObservableObject {
         isConfigured: kind != "unconfigured",
         isActive: rawGemini["isActive"] as? Bool ?? false,
         quotas: quotas,
-        error: rawGemini["error"] as? String
+        error: rawGemini["error"] as? String,
+        capturedAt: AccountUsageSnapshot.date(rawGemini["capturedAt"], milliseconds: true)
       )
     } else {
       gemini = nil
@@ -389,7 +390,8 @@ final class ExtensionUIModel: ObservableObject {
         isConfigured: $0.isConfigured,
         isActive: geminiIsActive ?? false,
         quotas: $0.quotas,
-        error: $0.error
+        error: $0.error,
+        capturedAt: $0.capturedAt
       )
     }
 

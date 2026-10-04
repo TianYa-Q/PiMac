@@ -167,7 +167,10 @@ private struct CodexAccountsCard: View, Equatable {
   let refresh: () -> Void
   let manage: () -> Void
   let switchAccount: (String) -> Void
-  @State private var isExpanded = false
+  @AppStorage("accountQuotaExpanded") private var isExpanded = false
+  @AppStorage("accountQuotaSort") private var sort = AccountQuotaPresentation.Sort.name
+  @State private var filter = AccountQuotaPresentation.Filter.all
+  @State private var query = ""
 
   static func == (lhs: Self, rhs: Self) -> Bool { lhs.snapshot == rhs.snapshot }
 
@@ -209,6 +212,7 @@ private struct CodexAccountsCard: View, Equatable {
           }
           .buttonStyle(.plain)
           .help(isExpanded ? "折叠账户额度" : "展开全部账户额度")
+          .accessibilityLabel(isExpanded ? "折叠账户额度" : "展开全部账户额度")
         }
 
         if isExpanded {
@@ -226,17 +230,59 @@ private struct CodexAccountsCard: View, Equatable {
     if snapshot.accounts.isEmpty && snapshot.gemini == nil {
       emptyStatus
     } else {
-      ScrollView {
-        LazyVStack(spacing: 7) {
-          ForEach(snapshot.accounts) { account in
-            accountRow(account)
+      HStack(spacing: 6) {
+        TextField("搜索账户", text: $query)
+          .textFieldStyle(.roundedBorder)
+          .accessibilityLabel("搜索额度账户")
+        Menu {
+          Picker("筛选", selection: $filter) {
+            ForEach(AccountQuotaPresentation.Filter.allCases) { Text($0.title).tag($0) }
           }
-          if let gemini = snapshot.gemini, gemini.isConfigured {
-            geminiRow(gemini)
+          Picker("排序", selection: $sort) {
+            ForEach(AccountQuotaPresentation.Sort.allCases) { Text($0.title).tag($0) }
           }
+        } label: {
+          Image(systemName: "line.3.horizontal.decrease.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("筛选：\(filter.title)；排序：\(sort.title)；当前账户置顶")
+        .accessibilityLabel("账户额度筛选与排序")
+      }
+      TimelineView(.periodic(from: .now, by: 60)) { context in
+        let accounts = AccountQuotaPresentation.accounts(
+          snapshot.accounts, query: query, filter: filter, sort: sort,
+          now: context.date, maxAge: snapshot.maxAge)
+        let gemini = snapshot.gemini.flatMap {
+          AccountQuotaPresentation.showsGemini(
+            $0, query: query, filter: filter, now: context.date, maxAge: snapshot.maxAge) ? $0 : nil
+        }
+        VStack(alignment: .leading, spacing: 6) {
+          HStack {
+            Text("\(accounts.count + (gemini == nil ? 0 : 1)) 项 · \(filter.title)")
+              .font(.caption2).foregroundStyle(.secondary)
+            Spacer()
+            if !query.isEmpty || filter != .all {
+              Button("清除筛选") {
+                query = ""
+                filter = .all
+              }
+              .buttonStyle(.plain).font(.caption2)
+            }
+          }
+          ScrollView {
+            LazyVStack(spacing: 7) {
+              if accounts.isEmpty && gemini == nil {
+                Text("没有匹配的额度账户")
+                  .font(.caption2).foregroundStyle(.secondary).padding(.vertical, 8)
+              }
+              ForEach(accounts) { account in accountRow(account) }
+              if let gemini { geminiRow(gemini) }
+            }
+          }
+          .frame(maxHeight: 240)
         }
       }
-      .frame(maxHeight: 240)
     }
   }
 
@@ -292,7 +338,7 @@ private struct CodexAccountsCard: View, Equatable {
       // The hover card extends over the quota rows, so its source row must paint above them.
       .zIndex(1)
       if let error = account.error {
-        Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2)
+        Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2).help(error)
       } else if account.primary == nil && account.secondary == nil {
         Text(account.isHidden ? "额度已隐藏" : "暂无额度数据，可刷新重试")
           .font(.caption2).foregroundStyle(.secondary)
@@ -321,7 +367,7 @@ private struct CodexAccountsCard: View, Equatable {
         Spacer()
       }
       if let error = status.error {
-        Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2)
+        Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2).help(error)
       } else if status.quotas.isEmpty {
         Text("暂无额度数据").font(.caption2).foregroundStyle(.secondary)
       } else {
@@ -347,6 +393,9 @@ private struct CodexAccountsCard: View, Equatable {
           .font(.caption2)
           .foregroundStyle(.secondary)
         }
+      }
+      if !status.quotas.isEmpty {
+        AccountQuotaFreshnessView(capturedAt: status.capturedAt, maxAge: snapshot.maxAge)
       }
     }
     .padding(7)

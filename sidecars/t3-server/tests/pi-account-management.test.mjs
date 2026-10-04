@@ -175,8 +175,14 @@ test('Antigravity quotas are read-only, deduplicated and cached', async t => {
   assert.deepEqual(result.accounts, []); assert.equal(result.supportsAccountSwitch, false);
   assert.doesNotMatch(JSON.stringify(result), /secret|project-id/);
   assert.equal(fs.readFileSync(path.join(f.dir, 'auth.json'), 'utf8'), before);
-  assert.equal((await f.manager.accountStatus({ provider: 'antigravity' })).cached, true);
-  assert.equal(f.calls(), 3);
+  assert.equal(result.gemini.capturedAt, 100000);
+  f.advance();
+  const refreshed = await f.manager.accountStatus({ provider: 'antigravity' });
+  assert.equal(refreshed.gemini.capturedAt, 160001);
+  const cached = await f.manager.accountStatus({ provider: 'antigravity' });
+  assert.equal(cached.cached, true);
+  assert.equal(cached.gemini.capturedAt, refreshed.gemini.capturedAt);
+  assert.equal(f.calls(), 6);
 });
 test('Antigravity summary preserves weekly reset time and window identity', async t => {
   const resetTime = '2026-10-11T00:00:00Z';
@@ -194,6 +200,7 @@ test('Antigravity summary preserves weekly reset time and window identity', asyn
   f.write('auth.json', { antigravity: f.credential });
   const result = await f.manager.accountStatus({ provider: 'antigravity' });
   assert.equal(result.gemini.kind, 'loaded');
+  assert.equal(result.gemini.capturedAt, 100000);
   assert.deepEqual(result.gemini.quotas, [
     { remainingPercent: 75, resetAt: Date.parse(resetTime), window: '5h Five Hour Limit Remaining' },
     { remainingPercent: 75, resetAt: Date.parse(resetTime), window: 'weekly Weekly Limit Remaining' },
@@ -234,6 +241,17 @@ test('OpenAI quota cards also include configured Antigravity usage', async t => 
   assert.equal(result.accounts[0].primary.remainingPercent, 75);
   assert.equal(result.gemini.quotas[0].remainingPercent, 50); assert.equal(result.gemini.isActive, false);
 });
+test('quota HTTP failures do not await a hanging response cleanup', { timeout: 2000 }, async t => {
+  const f = fixture(t, { response: () => new Response(new ReadableStream({
+    cancel() { return new Promise(() => {}); },
+  }), { status: 503 }) });
+  f.write('auth.json', { openai: f.credential, antigravity: f.credential });
+  const result = await f.manager.accountStatus({ provider: 'openai' });
+  assert.match(result.accounts[0].error, /额度查询失败/);
+  assert.equal(result.gemini.kind, 'failed');
+  assert.equal(result.gemini.capturedAt, undefined);
+});
+
 test('unsupported providers and closed managers reject without network', async t => {
   const f = fixture(t); await assert.rejects(f.manager.accountStatus({ provider: 'unsupported' }));
   f.manager.close(); await assert.rejects(f.manager.accountStatus({ provider: 'openai' })); assert.equal(f.calls(), 0);

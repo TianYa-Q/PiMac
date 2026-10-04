@@ -38,7 +38,7 @@ struct AccountUsageSnapshotTests {
       "version": 2, "provider": "openai-codex", "updatedAt": 1_000,
       "accounts": [["name": "work", "primary": ["remainingPercent": 50]]],
       "gemini": [
-        "kind": "loaded",
+        "kind": "loaded", "capturedAt": 500,
         "quotas": [
           ["remainingPercent": 50, "window": "5h"],
           ["remainingPercent": 90, "window": "5h"],
@@ -56,6 +56,8 @@ struct AccountUsageSnapshotTests {
         from: source)
     }
     try publish()
+    #expect(ui.geminiUsage?.capturedAt == Date(timeIntervalSince1970: 0.5))
+    #expect(ui.usage(for: source).gemini?.capturedAt == ui.geminiUsage?.capturedAt)
     #expect(ui.geminiUsage?.quotas.count == 1)
     #expect(ui.geminiUsage?.quotas.first?.remainingPercent == 50)
     payload["accounts"] = [["name": "replacement"]]

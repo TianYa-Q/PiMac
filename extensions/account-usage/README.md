@@ -39,6 +39,12 @@ Quota requests use the ChatGPT usage/reset-credit endpoints. Both response bodie
 
 Usage GETs retry transient network failures and HTTP 502/503/504 at most once after 250 ms, within the 15-second total query budget. Authentication failures, HTTP 429, malformed responses and OAuth refreshes are not automatically retried. The supplementary reset-credit endpoint has a separate 3-second ceiling and no retries: its failure does not hide valid usage windows. Requests require HTTPS without embedded URL credentials and never follow redirects with credentials. Invalid timer sizes and retry budgets fail before making a request.
 
+## Gemini snapshot reliability
+
+Gemini snapshots carry their original `capturedAt` time through the shared cache and RPC status. Re-publishing a cached snapshot does not make it fresh. TUI warns on stale, future or unknown sample times, using the active (60 seconds) / idle (180 seconds) cadence. Old snapshots without a timestamp remain readable but show unknown age.
+
+Credential lookup and the Antigravity adapter share a 15-second wait deadline. Session cancellation immediately ends the wait; late results and failures cannot replace current state. The upstream adapter does not accept an AbortSignal, so timeout bounds the extension's wait, **not necessarily the underlying network request**. No new automatic retries are introduced.
+
 ## Automatic rotation and weekly balancing
 
 Both policies run **inside this Pi extension**, in TUI/RPC/headless sessions;
