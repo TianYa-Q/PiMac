@@ -134,7 +134,7 @@ struct UsageDashboardTests {
     #expect(UsageScanner.scan(root: root, startingAt: nil, cacheURL: cache).totalTokens == 50)
     let rebuilt = try #require(
       JSONSerialization.jsonObject(with: Data(contentsOf: cache)) as? [String: Any])
-    #expect(rebuilt["version"] as? Int == 2)
+    #expect(rebuilt["version"] as? Int == 3)
   }
 
   @Test func scannerHonorsStartDate() throws {

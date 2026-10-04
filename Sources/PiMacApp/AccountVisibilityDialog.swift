@@ -10,6 +10,21 @@ struct AccountVisibilityPresentation {
 
   let accounts: [Account]
 
+  enum Filter: String, CaseIterable, Identifiable {
+    case all = "全部"
+    case visible = "已显示"
+    case hidden = "已隐藏"
+    var id: String { rawValue }
+  }
+
+  func filteredAccounts(query: String, filter: Filter = .all) -> [Account] {
+    let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+    return accounts.filter {
+      (filter == .all || $0.isVisible == (filter == .visible))
+        && (query.isEmpty || $0.name.localizedStandardContains(query))
+    }
+  }
+
   init?(dialog: ExtensionDialog) {
     guard dialog.title == "选择要显示或隐藏额度的账户",
       case .select(let options) = dialog.kind,
@@ -27,6 +42,12 @@ struct AccountVisibilityDialogView: View {
   let presentation: AccountVisibilityPresentation
   let answer: (String) -> Void
   let cancel: () -> Void
+  @State private var query = ""
+  @State private var filter: AccountVisibilityPresentation.Filter = .all
+
+  private var visibleAccounts: [AccountVisibilityPresentation.Account] {
+    presentation.filteredAccounts(query: query, filter: filter)
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
@@ -38,10 +59,25 @@ struct AccountVisibilityDialogView: View {
         Text("暂无可设置的账户")
           .foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(24)
       } else {
+        TextField("搜索账户", text: $query)
+          .textFieldStyle(.roundedBorder).accessibilityLabel("搜索额度显示账户")
+        Picker("显示状态", selection: $filter) {
+          ForEach(AccountVisibilityPresentation.Filter.allCases) { item in
+            Text(item.rawValue).tag(item)
+          }
+        }
+        .pickerStyle(.segmented)
+        Text(
+          "\(visibleAccounts.count) / \(presentation.accounts.count) 个账户 · 已显示 \(presentation.accounts.filter(\.isVisible).count)"
+        )
+        .font(.caption).foregroundStyle(.secondary)
         ScrollView {
-          VStack(spacing: 0) {
-            ForEach(presentation.accounts) { account in
-              if account.id != 0 { Divider().padding(.leading, 44) }
+          LazyVStack(spacing: 0) {
+            if visibleAccounts.isEmpty {
+              Text("没有匹配的账户").foregroundStyle(.secondary).padding(24)
+            }
+            ForEach(visibleAccounts) { account in
+              if account.id != visibleAccounts.first?.id { Divider().padding(.leading, 44) }
               Button {
                 answer(account.option)
               } label: {
@@ -66,7 +102,7 @@ struct AccountVisibilityDialogView: View {
             }
           }
         }
-        .frame(height: min(CGFloat(presentation.accounts.count) * 52, 312))
+        .frame(height: min(CGFloat(max(visibleAccounts.count, 1)) * 52, 312))
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.06)))
       }
