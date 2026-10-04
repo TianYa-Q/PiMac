@@ -1,19 +1,6 @@
-import { randomUUID } from "node:crypto";
-import {
-  chmodSync,
-  closeSync,
-  constants,
-  fchmodSync,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { readPrivateRegularFile, writePrivateJson } from "./private-json.js";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
@@ -332,7 +319,8 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
   function readLegacyStore(): StoreDocument {
     // Legacy Codex grants cannot be used on api.openai.com: new OpenAI requires
     // direct-token scope and its dynamically issued OAuth client ID.
-    if (provider === "openai") return { version: 1, accounts: {} };
+    if (provider === "openai")
+      return { version: 1, accounts: Object.create(null) };
     try {
       const value = parseJson(readPrivateRegularFile(LEGACY_ACCOUNTS_PATH));
       if (
@@ -344,7 +332,7 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
       }
       const provider = value.providers["openai-codex"];
       if (!isRecord(provider) || !isRecord(provider.accounts)) {
-        return { version: 1, accounts: {} };
+        return { version: 1, accounts: Object.create(null) };
       }
       return normalizeStoreDocument({
         version: 1,
@@ -353,7 +341,7 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
       });
     } catch (error) {
       if (isNodeError(error) && error.code === "ENOENT") {
-        return { version: 1, accounts: {} };
+        return { version: 1, accounts: Object.create(null) };
       }
       throw error;
     }
@@ -407,10 +395,10 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
       if (isNodeError(error) && error.code === "ENOENT") {
         return {
           version: 1,
-          claimedWindowResetAtByAccount: {},
-          claimedAtByAccount: {},
-          weeklyClaimedWindowResetAtByAccount: {},
-          weeklyClaimedAtByAccount: {},
+          claimedWindowResetAtByAccount: Object.create(null),
+          claimedAtByAccount: Object.create(null),
+          weeklyClaimedWindowResetAtByAccount: Object.create(null),
+          weeklyClaimedAtByAccount: Object.create(null),
           records: [],
         };
       }
@@ -422,10 +410,10 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
     value: unknown,
     label: string,
   ): Record<string, number> {
-    if (value === undefined) return {};
+    if (value === undefined) return Object.create(null);
     if (!isRecord(value)) throw new Error(`${label}无效。`);
 
-    const timestamps: Record<string, number> = {};
+    const timestamps: Record<string, number> = Object.create(null);
     for (const [accountName, timestamp] of Object.entries(value)) {
       validateAccountName(accountName);
       if (
@@ -472,7 +460,7 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
       throw new Error("codex-accounts.json 数据结构无效。");
     }
 
-    const accounts: Record<string, OAuthCredential> = {};
+    const accounts: Record<string, OAuthCredential> = Object.create(null);
     for (const [name, credential] of Object.entries(value.accounts)) {
       validateAccountName(name);
       accounts[name] = validateCredential(credential, name);
@@ -559,51 +547,6 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
     chmodSync(parent, 0o700);
   }
 
-  function readPrivateRegularFile(path: string): string {
-    const info = lstatSync(path);
-    if (!info.isFile() || info.isSymbolicLink()) {
-      throw new Error(`${path} 必须是普通文件。`);
-    }
-    let descriptor: number | undefined;
-    try {
-      descriptor = openSync(
-        path,
-        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
-      );
-      if (!fstatSync(descriptor).isFile()) {
-        throw new Error(`${path} 必须是普通文件。`);
-      }
-      fchmodSync(descriptor, 0o600);
-      return readFileSync(descriptor, "utf8");
-    } finally {
-      if (descriptor !== undefined) closeSync(descriptor);
-    }
-  }
-
-  function writePrivateJson(path: string, value: unknown): void {
-    const parent = dirname(path);
-    mkdirSync(parent, { recursive: true, mode: 0o700 });
-    chmodSync(parent, 0o700);
-    const temporaryPath = `${path}.${randomUUID()}.tmp`;
-    writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    try {
-      chmodSync(temporaryPath, 0o600);
-      renameSync(temporaryPath, path);
-      chmodSync(path, 0o600);
-    } catch (error) {
-      try {
-        unlinkSync(temporaryPath);
-      } catch {
-        // 保留原始写入错误；临时文件清理失败不能掩盖根因。
-      }
-      throw new Error(`写入 ${path} 失败：${errorMessage(error)}`);
-    }
-  }
-
   function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
@@ -612,9 +555,6 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
     return error instanceof Error && "code" in error;
   }
 
-  function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
   return {
     readCodexAccountState,
     saveAccount,

@@ -82,7 +82,7 @@ struct OpenAIAccountTests {
     #expect(ui.codexAccounts.first(where: \.isActive) == nil)
   }
 
-  @Test func browserLoginCompletionDismissesOnlyItsOwnObsoletePrompts() {
+  @Test func browserLoginCompletionDismissesOnlyItsOwnObsoletePrompts() throws {
     let ui = ExtensionUIModel()
     let first = model("openai", ui: ui)
     let second = model("openai", ui: ui)
@@ -95,7 +95,7 @@ struct OpenAIAccountTests {
       ["id": "done", "method": "setStatus", "statusKey": "account-usage-login"], from: first)
     #expect(ui.dialog?.id == "confirm")
     #expect(ui.hasPendingRequests(from: second))
-    ui.answerDialog(cancelled: true)
+    ui.answerDialog(presentationID: try #require(ui.dialog?.presentationID), cancelled: true)
     #expect(ui.dialog?.id == "login2")
   }
 

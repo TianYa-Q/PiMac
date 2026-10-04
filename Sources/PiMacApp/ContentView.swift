@@ -297,8 +297,14 @@ struct ContentView: View {
     .sheet(item: $previewedAttachment) { attachment in
       ImageAttachmentPreview(attachment: attachment)
     }
-    .sheet(item: $extensionUI.dialog) { dialog in
-      ExtensionDialogView(dialog: dialog)
+    .sheet(
+      item: Binding(
+        get: { extensionUI.dialog.map { ExtensionDialogPresentation(dialog: $0) } },
+        set: { _ in }  // Requests are dismissed only by reconciliation or an explicit answer.
+      )
+    ) { presentation in
+      ExtensionDialogView(dialog: presentation.dialog)
+        .id(presentation.id)
         .interactiveDismissDisabled()
     }
     .onChange(of: app.connectionState) {
@@ -3255,89 +3261,6 @@ private struct SettingsView: View {
     if item.hasUpdate { return "当前 \(current) · 最新 \(item.latestVersion ?? "未知")" }
     if let latest = item.latestVersion { return "当前 \(current) · 已是最新版本（\(latest)）" }
     return "当前 \(current) · 最新版本未知"
-  }
-}
-
-private struct ExtensionDialogView: View {
-  @EnvironmentObject private var extensionUI: ExtensionUIModel
-  let dialog: ExtensionDialog
-  @State private var text = ""
-
-  var body: some View {
-    if let presentation = AccountManagementPresentation(dialog: dialog) {
-      AccountManagementDialogView(presentation: presentation) { option in
-        extensionUI.answerDialog(value: option)
-      }
-    } else if let presentation = AccountVisibilityPresentation(dialog: dialog) {
-      AccountVisibilityDialogView(
-        presentation: presentation,
-        answer: { extensionUI.answerDialog(value: $0) },
-        cancel: { extensionUI.answerDialog(cancelled: true) })
-    } else {
-      standardDialog
-    }
-  }
-
-  private var standardDialog: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      Text(dialog.title).font(.headline)
-      switch dialog.kind {
-      case .select(let options):
-        ScrollView {
-          VStack(spacing: 8) {
-            ForEach(Array(options.enumerated()), id: \.offset) { _, option in
-              Button {
-                extensionUI.answerDialog(value: option)
-              } label: {
-                HStack {
-                  Text(option).multilineTextAlignment(.leading)
-                  Spacer()
-                  Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
-                .contentShape(Rectangle())
-              }
-              .buttonStyle(.plain)
-            }
-          }
-        }
-        .frame(maxHeight: 320)
-        Divider()
-        HStack {
-          Spacer()
-          Button("取消") { extensionUI.answerDialog(cancelled: true) }
-            .keyboardShortcut(.cancelAction)
-        }
-      case .confirm(let message):
-        Text(message)
-        HStack {
-          Button("取消") { extensionUI.answerDialog(confirmed: false) }
-            .keyboardShortcut(.cancelAction)
-          Button("确认") { extensionUI.answerDialog(confirmed: true) }
-            .buttonStyle(.borderedProminent)
-        }
-      case .input(_, let placeholder, let multiline):
-        if multiline {
-          TextEditor(text: $text).frame(minHeight: 180)
-        } else {
-          TextField(placeholder, text: $text).textFieldStyle(.roundedBorder)
-        }
-        HStack {
-          Button("取消") { extensionUI.answerDialog(cancelled: true) }
-            .keyboardShortcut(.cancelAction)
-          Button("提交") { extensionUI.answerDialog(value: text) }
-            .buttonStyle(.borderedProminent)
-        }
-      }
-    }
-    .padding(24)
-    .frame(minWidth: 420)
-    .onAppear {
-      if case .input(let initialText, _, _) = dialog.kind {
-        text = initialText
-      }
-    }
   }
 }
 

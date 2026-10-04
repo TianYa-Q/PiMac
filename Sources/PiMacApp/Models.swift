@@ -225,6 +225,8 @@ enum ExtensionDialogKind {
 }
 
 struct ExtensionDialog: Identifiable {
+  /// Local presentation identity; RPC request IDs can collide across processes.
+  let presentationID = UUID()
   let id: String
   let title: String
   let kind: ExtensionDialogKind

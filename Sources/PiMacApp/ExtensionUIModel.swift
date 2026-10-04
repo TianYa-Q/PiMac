@@ -9,6 +9,8 @@ import Foundation
 @MainActor
 final class ExtensionUIModel: ObservableObject {
   @Published var dialog: ExtensionDialog?
+  @Published private(set) var pendingDialogCount = 0
+  static let maximumPendingDialogs = 64
   @Published private(set) var statuses: [String: String] = [:]
   @Published private(set) var codexAccounts: [CodexAccountStatus] = []
   @Published private(set) var geminiUsage: GeminiUsageStatus?
@@ -122,8 +124,14 @@ final class ExtensionUIModel: ObservableObject {
     {
       self.presentedDialog = nil
       dialog = nil
-      presentNextDialog()
     }
+    presentNextDialog()
+  }
+
+  var dialogSourceLabel: String {
+    guard let source = presentedDialog?.source else { return "Pi 扩展" }
+    let project = source.projectURL?.lastPathComponent ?? "未选择项目"
+    return source.sessionName.isEmpty ? project : "\(project) · \(source.sessionName)"
   }
 
   func hasPendingRequests(from source: AppModel) -> Bool {
@@ -134,8 +142,13 @@ final class ExtensionUIModel: ObservableObject {
     presentedDialog?.source === source || queuedDialogs.contains { $0.source === source }
   }
 
-  func answerDialog(value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false) {
-    guard let pending = presentedDialog else { return }
+  func answerDialog(
+    presentationID: UUID, value: String? = nil, confirmed: Bool? = nil,
+    cancelled: Bool = false
+  ) {
+    guard let pending = presentedDialog,
+      presentationID == pending.dialog.presentationID
+    else { return }
     pending.source.sendExtensionResponse(
       id: pending.dialog.id,
       value: value,
@@ -168,11 +181,19 @@ final class ExtensionUIModel: ObservableObject {
       }
     guard !isDuplicate else { return }
 
+    // Fail closed rather than retaining unbounded sources and blocking the whole app.
+    guard pendingDialogCount < Self.maximumPendingDialogs,
+      ExtensionDialogLimits.accepts(dialog)
+    else {
+      source.sendExtensionResponse(id: dialog.id, cancelled: true)
+      return
+    }
     queuedDialogs.append(PendingDialog(dialog: dialog, source: source))
     presentNextDialog()
   }
 
   private func presentNextDialog() {
+    defer { pendingDialogCount = queuedDialogs.count + (presentedDialog == nil ? 0 : 1) }
     guard presentedDialog == nil, !queuedDialogs.isEmpty else { return }
     let next = queuedDialogs.removeFirst()
     presentedDialog = next
@@ -228,8 +249,8 @@ final class ExtensionUIModel: ObservableObject {
       source.sendExtensionResponse(id: presentedDialog.dialog.id, cancelled: true)
       self.presentedDialog = nil
       dialog = nil
-      presentNextDialog()
     }
+    presentNextDialog()
   }
 
   private func updateCodexAccounts(from text: String, source: AppModel) {
