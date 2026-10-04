@@ -1,13 +1,16 @@
 import SwiftUI
 
 struct GitFilePreview: View {
-  let server: T3DesktopClient
+  @ObservedObject var server: T3DesktopClient
   let cwd: String
   let file: String
   @Environment(\.dismiss) private var dismiss
   @StateObject private var store = GitDiffPreviewStore()
   private var diff: String { store.preview?.text ?? "" }
   @State private var requestID = UUID()
+  @State private var query = ""
+  @State private var scope = GitDiffPresentation.Scope.all
+  @FocusState private var searchFocused: Bool
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
@@ -20,6 +23,8 @@ struct GitFilePreview: View {
         }
         .disabled(store.loading || store.failed || diff.isEmpty)
         .help("复制当前预览；截断时仅复制已显示的内容")
+        Button("刷新", systemImage: "arrow.clockwise") { requestID = UUID() }
+          .disabled(store.loading || !server.isConnected)
         Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
       }
       if store.loading { ProgressView("正在读取差异…") }
@@ -39,16 +44,63 @@ struct GitFilePreview: View {
             .orange)
       }
       if !store.loading && !store.failed {
-        if diff.isEmpty { Text("没有可显示的文本差异（可能是二进制文件）。").foregroundStyle(.secondary) }
-        ScrollView([.horizontal, .vertical]) {
-          Text(diff).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
-            .fixedSize(horizontal: true, vertical: true).padding(12)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-          .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+        HStack {
+          Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+          TextField("搜索差异", text: $query).textFieldStyle(.roundedBorder)
+            .focused($searchFocused).accessibilityLabel("搜索差异")
+          if !query.isEmpty {
+            Button("清除搜索", systemImage: "xmark.circle.fill") { query = "" }
+              .labelStyle(.iconOnly).buttonStyle(.plain)
+          }
+          Picker("显示范围", selection: $scope) {
+            ForEach(GitDiffPresentation.Scope.allCases) { Text($0.rawValue).tag($0) }
+          }.pickerStyle(.segmented).frame(width: 160)
+          Text("+\(store.presentation.additions)").foregroundStyle(.green)
+          Text("−\(store.presentation.deletions)").foregroundStyle(.red)
+        }.font(.caption.monospacedDigit())
+        if store.presentation.truncated {
+          Label("仅渲染前 10,000 行；复制差异仍包含已读取的完整文本。", systemImage: "info.circle")
+            .font(.caption).foregroundStyle(.orange)
+        }
+        let lines = store.presentation.filtered(query: query, scope: scope)
+        Text("显示 \(lines.count) / \(store.presentation.lines.count) 行 · 行号为差异文本位置")
+          .font(.caption).foregroundStyle(.secondary)
+        if diff.isEmpty {
+          ContentUnavailableView(
+            "没有文本差异", systemImage: "doc",
+            description: Text("文件可能没有变更或是二进制文件。"))
+        } else if lines.isEmpty {
+          ContentUnavailableView(
+            "没有匹配的行", systemImage: "magnifyingglass",
+            description: Text("尝试其他关键词或切换显示范围。"))
+        } else {
+          ScrollView([.horizontal, .vertical]) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+              ForEach(lines) { line in
+                HStack(alignment: .top, spacing: 12) {
+                  Text("\(line.id)").foregroundStyle(.secondary)
+                    .frame(width: 48, alignment: .trailing).accessibilityHidden(true)
+                  Text(line.text.isEmpty ? " " : line.text)
+                    .foregroundStyle(color(for: line.kind)).textSelection(.enabled)
+                }
+                .font(.system(size: 12, design: .monospaced))
+                .fixedSize(horizontal: true, vertical: true)
+                .padding(.horizontal, 10).padding(.vertical, 2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(color(for: line.kind).opacity(line.kind == .context ? 0 : 0.08))
+              }
+            }.padding(.vertical, 8)
+          }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+        }
       }
       Spacer(minLength: 0)
     }
-    .padding(20).frame(width: 780, height: 540)
+    .padding(20).frame(width: 880, height: 600)
+    .background {
+      Button("搜索差异") { searchFocused = true }
+        .keyboardShortcut("f", modifiers: .command).hidden()
+    }
     .task(id: requestID) {
       await store.load {
         try await server.gitRPC(
@@ -58,6 +110,15 @@ struct GitFilePreview: View {
             "file": ["path": file, "previousPath": NSNull(), "sourceKind": "working-tree"],
           ])
       }
+    }
+  }
+
+  private func color(for kind: GitDiffPresentation.Kind) -> Color {
+    switch kind {
+    case .addition: .green
+    case .deletion: .red
+    case .header, .hunk: .blue
+    case .context: .primary
     }
   }
 }

@@ -79,6 +79,8 @@ Quota results are shared through owner-only caches, partitioned by provider. Que
 
 The existing warm-up behavior is retained: a full, unused 5-hour or 7-day window may trigger a small `你好` request with `gpt-5.6-luna` at low reasoning, using the account's own provider. Window claims and the 10-minute cooldown are provider-specific. These requests can consume subscription quota. Hidden accounts are excluded.
 
+Account queries and warm-ups run with at most two workers. Cancellation or a failed worker stops queued work and drains active workers before releasing shared-cache leases. Refreshes await both providers and publish successful results even when the other provider fails; obsolete refreshes cannot publish or reschedule timers. Overlapping automatic Gemini refreshes await the same in-flight query. Failed Gemini queries do not start a freshness cooldown. Incremental HTTP storage grows geometrically rather than retaining one object per received chunk.
+
 Failures are recorded in the private `account-usage-errors.jsonl` diagnostic log, excluding credentials, headers, URLs, and response bodies.
 
 ## RPC protocol

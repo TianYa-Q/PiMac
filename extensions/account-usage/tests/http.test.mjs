@@ -53,6 +53,25 @@ await test("chunked JSON permits exact byte limit and split UTF-8", async () => 
   assert.equal(response.body.locked, false);
 });
 
+await test("tiny chunks grow bounded storage without losing data", async () => {
+  const text = JSON.stringify({ text: "你好".repeat(12_000) });
+  const bytes = encoder.encode(text);
+  let offset = 0;
+  const response = new Response(
+    new ReadableStream({
+      pull(controller) {
+        if (offset === bytes.length) controller.close();
+        else controller.enqueue(bytes.subarray(offset, ++offset));
+      },
+    }),
+  );
+  assert.deepEqual(
+    await readBoundedJson(response, bytes.length),
+    JSON.parse(text),
+  );
+  assert.equal(response.body.locked, false);
+});
+
 await test("oversized chunked body stops before consuming remaining chunks", async () => {
   const body = streamed(["12345", "67890", "never consumed"]);
   await assert.rejects(readBoundedJson(body.response, 8), /响应过大/u);

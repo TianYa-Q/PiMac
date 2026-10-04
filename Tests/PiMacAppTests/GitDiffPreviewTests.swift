@@ -46,6 +46,7 @@ struct GitDiffPreviewTests {
         return response("old")
       }
       #expect(store.preview?.text == "new")
+      #expect(store.presentation.lines.map(\.text) == ["new"])
       #expect(!store.failed && !store.loading)
     }
   }
@@ -56,6 +57,7 @@ struct GitDiffPreviewTests {
     #expect(store.failed && !store.loading && store.preview == nil)
     await store.load { throw CancellationError() }
     #expect(!store.failed && !store.loading && store.preview == nil)
+    #expect(store.presentation.lines.isEmpty)
     await store.load { response("recovered") }
     #expect(store.preview?.text == "recovered" && !store.failed)
   }

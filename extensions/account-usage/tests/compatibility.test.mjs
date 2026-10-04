@@ -4,6 +4,8 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createJiti } from "jiti";
+import { createHash } from "node:crypto";
+import lockfile from "proper-lockfile";
 
 const root = await mkdtemp(join(tmpdir(), "account-usage-tests-"));
 process.env.PI_CODING_AGENT_DIR = root;
@@ -179,6 +181,76 @@ try {
       true,
     );
     assert.notEqual(getCodexOAuth("openai"), getCodexOAuth("openai-codex"));
+  });
+
+  await test("a failed provider cache still publishes the other provider's settled quota", async () => {
+    const app = instance();
+    const originalLock = lockfile.lock;
+    const antigravitySuffix = createHash("sha256")
+      .update("antigravity")
+      .digest("hex");
+    lockfile.lock = async (path, options) => {
+      if (path.endsWith(antigravitySuffix)) {
+        throw new Error("synthetic Antigravity cache failure");
+      }
+      return originalLock(path, options);
+    };
+    try {
+      await assert.rejects(
+        app.events.get("session_start")({ reason: "startup" }, app.ctx),
+        /部分账户额度刷新失败/u,
+      );
+      assert.equal(app.status().provider, "openai");
+      assert.equal(app.status().accounts[0].name, "same");
+      assert.equal(app.status().accounts[0].primary.remainingPercent, 90);
+    } finally {
+      lockfile.lock = originalLock;
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
+  await test("overlapping refreshes await one Gemini flight instead of publishing early", async () => {
+    const app = instance();
+    const originalLock = lockfile.lock;
+    const suffix = createHash("sha256").update("antigravity").digest("hex");
+    let releaseGate, started;
+    const gate = new Promise((resolve) => {
+      releaseGate = resolve;
+    });
+    const starting = new Promise((resolve) => {
+      started = resolve;
+    });
+    let queries = 0;
+    lockfile.lock = async (path, options) => {
+      if (path.endsWith(suffix)) {
+        queries++;
+        started();
+        await gate;
+      }
+      return originalLock(path, options);
+    };
+    let first, second;
+    try {
+      first = app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      await starting;
+      let settled = false;
+      second = app.events
+        .get("turn_end")({ outcome: "completed" }, app.ctx)
+        .then(() => {
+          settled = true;
+        });
+      await new Promise(setImmediate);
+      assert.equal(settled, false);
+      assert.equal(queries, 1);
+      releaseGate();
+      await Promise.all([first, second]);
+      assert.equal(app.status().accounts[0].primary.remainingPercent, 90);
+    } finally {
+      releaseGate();
+      await Promise.allSettled([first, second]);
+      lockfile.lock = originalLock;
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
   });
 
   await test("OpenAI refresh uses dynamic client ID/direct scope, not legacy OAuth", async () => {

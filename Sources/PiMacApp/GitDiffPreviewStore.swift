@@ -42,6 +42,7 @@ struct GitDiffPreview: Equatable {
 @MainActor
 final class GitDiffPreviewStore: ObservableObject {
   @Published private(set) var preview: GitDiffPreview?
+  @Published private(set) var presentation = GitDiffPresentation("")
   @Published private(set) var loading = false
   @Published private(set) var failed = false
   private var requestID = UUID()
@@ -50,6 +51,7 @@ final class GitDiffPreviewStore: ObservableObject {
     let current = UUID()
     requestID = current
     preview = nil
+    presentation = GitDiffPresentation("")
     loading = true
     failed = false
     defer { if requestID == current { loading = false } }
@@ -57,7 +59,16 @@ final class GitDiffPreviewStore: ObservableObject {
       let result = try await rpc()
       try Task.checkCancellation()
       guard requestID == current else { return }
-      preview = try GitDiffPreview.validated(result)
+      let next = try GitDiffPreview.validated(result)
+      // Parsing large diffs must not monopolize the main actor. The request token
+      // is checked again after the background work to reject late completions.
+      let parsed = await Task.detached(priority: .userInitiated) {
+        GitDiffPresentation(next.text)
+      }.value
+      try Task.checkCancellation()
+      guard requestID == current else { return }
+      presentation = parsed
+      preview = next
     } catch {
       guard requestID == current else { return }
       if !(error is CancellationError) && !Task.isCancelled { failed = true }

@@ -13,6 +13,24 @@ const options = () => ({
 });
 
 try {
+  await test("invalid size limits fail before sending credentials", async () => {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return Response.json({});
+    };
+    for (const maxBytes of [0, -1, 1.5, NaN, Infinity]) {
+      await assert.rejects(
+        requestBoundedJson("https://example.test", {
+          ...options(),
+          maxBytes,
+        }),
+        RangeError,
+      );
+    }
+    assert.equal(calls, 0);
+  });
+
   await test("transient HTTP failure is cancelled and retried exactly once", async () => {
     let calls = 0;
     let cancelled = false;

@@ -22,6 +22,7 @@ import {
 } from "./antigravity.js";
 import { CodexSessionAuth } from "./auth.js";
 import { queryAccountUsage } from "./codex.js";
+import { mapWithConcurrency } from "./concurrency.js";
 import { logQuotaFailure } from "./diagnostics.js";
 import { formatStatusSegment, formatUsageSummary } from "./format.js";
 import { loginCodexAccount } from "./oauth.js";
@@ -66,6 +67,9 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   let antigravityUsage: AntigravityUsageState = { kind: "unconfigured" };
   let antigravityGeneration = 0;
   let lastAntigravityQueryAt = 0;
+  let antigravityFlight:
+    | { owner: AbortController; promise: Promise<void> }
+    | undefined;
   let sessionActive = false;
   let sessionAccount: string | undefined;
   let authFailed = false;
@@ -75,6 +79,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
   let countdownTimer: ReturnType<typeof setInterval> | undefined;
   let autoWarmupRunning = false;
   let generation = 0;
+  let refreshGeneration = 0;
   let providerId: AccountProvider = "openai-codex";
   let accountStore = createAccountStore(providerId);
   let sessionAuth = new CodexSessionAuth(providerId);
@@ -221,8 +226,11 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       force: notify || force,
       signal: controller.signal,
       query: () =>
-        mapWithConcurrency(visible, QUERY_CONCURRENCY, (account) =>
-          queryAccountUsage(account, controller.signal),
+        mapWithConcurrency(
+          visible,
+          QUERY_CONCURRENCY,
+          (account) => queryAccountUsage(account, controller.signal),
+          controller.signal,
         ),
     });
     if (
@@ -249,7 +257,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     }
   };
 
-  const refreshAntigravityUsage = async (
+  const queryAntigravityQuota = async (
     ctx: ExtensionContext,
     force: boolean,
   ) => {
@@ -259,7 +267,6 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
 
     const signal = sessionController?.signal;
     if (!signal) return;
-    lastAntigravityQueryAt = now;
     const currentGeneration = ++antigravityGeneration;
     const next = await readThroughSharedCache({
       namespace: "antigravity",
@@ -278,6 +285,26 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       return;
     }
     antigravityUsage = next;
+    lastAntigravityQueryAt = Date.now();
+  };
+
+  const refreshAntigravityUsage = (
+    ctx: ExtensionContext,
+    force: boolean,
+  ): Promise<void> => {
+    const owner = sessionController;
+    if (!owner) return Promise.resolve();
+    // A newer Codex refresh must await the ongoing Gemini query rather than
+    // publishing a stale snapshot merely because its refresh interval has started.
+    if (!force && antigravityFlight?.owner === owner) {
+      return antigravityFlight.promise;
+    }
+    const flight = { owner, promise: Promise.resolve() };
+    flight.promise = queryAntigravityQuota(ctx, force).finally(() => {
+      if (antigravityFlight === flight) antigravityFlight = undefined;
+    });
+    antigravityFlight = flight;
+    return flight.promise;
   };
 
   // 两类额度并行刷新，完成后只发布一次完整快照。
@@ -288,21 +315,38 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     rotateIdle = true,
   ) => {
     const startedAt = Date.now();
+    const currentRefresh = ++refreshGeneration;
     const owner = sessionController;
     const store = accountStore;
     const isCurrent = () =>
       sessionActive &&
+      currentRefresh === refreshGeneration &&
       owner === sessionController &&
       !owner?.signal.aborted &&
       store === accountStore;
     try {
-      await Promise.all([
+      // Drain both providers before publishing or scheduling: one cache/transport
+      // failure must not hide the other provider's successfully refreshed quota.
+      const results = await Promise.allSettled([
         refreshCodexUsage(ctx, notify, forceCodex),
         refreshAntigravityUsage(ctx, notify),
       ]);
-      if (isCurrent()) {
-        if (rotateIdle) await rotateAccounts(ctx);
-        publishStatus(ctx);
+      if (!isCurrent()) return;
+      if (rotateIdle && results[0]?.status === "fulfilled") {
+        await rotateAccounts(ctx);
+      }
+      if (!isCurrent()) return;
+      publishStatus(ctx);
+      const failures = results.flatMap((result) =>
+        result.status === "rejected" && !isAbortError(result.reason)
+          ? [result.reason]
+          : [],
+      );
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          "部分账户额度刷新失败，请稍后重试。",
+        );
       }
     } catch (error) {
       // A newer refresh or session shutdown deliberately aborts the previous one.
@@ -356,10 +400,13 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       const signal = sessionController?.signal;
       if (!signal) return;
       const results = (
-        await Promise.all(
-          candidates.map(async ({ account, windows }) => {
+        await mapWithConcurrency(
+          candidates,
+          QUERY_CONCURRENCY,
+          async ({ account, windows }) => {
             const claimed = [] as Array<(typeof windows)[number]>;
             for (const window of windows) {
+              signal.throwIfAborted();
               if (
                 await warmupStore.claimAutoWarmupWindow(
                   account.name,
@@ -387,7 +434,8 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
                 error: safeProviderErrorMessage(error),
               };
             }
-          }),
+          },
+          signal,
         )
       ).filter((result) => result !== undefined);
       if (
@@ -436,7 +484,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
         );
       }
     } catch (error) {
-      if (sessionActive) {
+      if (sessionActive && !isAbortError(error)) {
         ctx.ui.notify(
           `自动检查 ${providerId} 账户失败：${errorMessage(error)}`,
           "warning",
@@ -1257,30 +1305,6 @@ function readAccountStateSafely(
     ctx.ui.notify(errorMessage(error), "error");
     return undefined;
   }
-}
-
-async function mapWithConcurrency<T, R>(
-  values: readonly T[],
-  concurrency: number,
-  mapper: (value: T) => Promise<R>,
-): Promise<R[]> {
-  const indexedResults: Array<{ index: number; result: R }> = [];
-  let nextIndex = 0;
-  const worker = async () => {
-    while (true) {
-      const index = nextIndex++;
-      if (index >= values.length) return;
-      const value = values[index];
-      if (value === undefined) return;
-      indexedResults.push({ index, result: await mapper(value) });
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, values.length) }, worker),
-  );
-  return indexedResults
-    .sort((left, right) => left.index - right.index)
-    .map(({ result }) => result);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

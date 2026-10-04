@@ -1,5 +1,10 @@
 import { setTimeout as delay } from "node:timers/promises";
 
+function validateSizeLimit(maxBytes: number): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
+    throw new RangeError("Invalid response size limit");
+}
+
 export class HttpStatusError extends Error {
   constructor(readonly status: number) {
     super(`额度接口返回 HTTP ${status}。`);
@@ -22,6 +27,7 @@ export async function requestBoundedJson(
   const timeoutMs = options.timeoutMs ?? 15_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1)
     throw new RangeError("Invalid request timeout");
+  validateSizeLimit(options.maxBytes);
   options.signal.throwIfAborted();
   const controller = new AbortController();
   const signal = AbortSignal.any([options.signal, controller.signal]);
@@ -69,8 +75,7 @@ export async function readBoundedJson(
   maxBytes: number,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
-    throw new RangeError("Invalid response size limit");
+  validateSizeLimit(maxBytes);
   const reader = response.body?.getReader();
   const cancel = () => {
     void reader?.cancel().catch(() => {});
@@ -81,23 +86,33 @@ export async function readBoundedJson(
     const length = Number(response.headers.get("content-length"));
     if (Number.isFinite(length) && length > maxBytes)
       throw new Error("额度响应过大。");
-    const chunks: Uint8Array[] = [];
+    // Geometric storage bounds memory even for millions of tiny chunks. Keeping
+    // every chunk until Buffer.concat would amplify the body limit into GBs.
+    let bytes = new Uint8Array(Math.min(maxBytes, 16_384));
     let size = 0;
     if (reader) {
       for (;;) {
         const { done, value } = await reader.read();
         signal?.throwIfAborted();
         if (done) break;
-        size += value.byteLength;
-        if (size > maxBytes) throw new Error("额度响应过大。");
-        chunks.push(value);
+        const nextSize = size + value.byteLength;
+        if (nextSize > maxBytes) throw new Error("额度响应过大。");
+        if (nextSize > bytes.length) {
+          const grown = new Uint8Array(
+            Math.min(maxBytes, Math.max(nextSize, bytes.length * 2)),
+          );
+          grown.set(bytes.subarray(0, size));
+          bytes = grown;
+        }
+        bytes.set(value, size);
+        size = nextSize;
       }
     }
     let value: unknown;
     try {
       value = JSON.parse(
         new TextDecoder("utf-8", { fatal: true }).decode(
-          Buffer.concat(chunks, size),
+          bytes.subarray(0, size),
         ),
       ) as unknown;
     } catch {
