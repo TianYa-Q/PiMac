@@ -4,9 +4,9 @@
   "type": "module",
   "scripts": { "fetch": "node fetch-upstream.mjs", "build": "node build.mjs", "check": "node build.mjs --check", "pretest": "node build-client.mjs", "test": "node --test tests/*.test.mjs" },
   "dependencies": {
-    "effect": "4.0.0-rc.115",
-    "@effect/platform-node": "4.0.0-rc.115",
-    "@effect/platform-node-shared": "4.0.0-rc.115",
+    "effect": "4.0.1",
+    "@effect/platform-node": "4.0.1",
+    "@effect/platform-node-shared": "4.0.1",
     "jose": "6.2.2",
     "yaml": "2.9.0",
     "@noble/curves": "1.9.1",

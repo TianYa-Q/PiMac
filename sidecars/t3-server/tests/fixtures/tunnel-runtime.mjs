@@ -7,7 +7,7 @@ import * as Stream from 'effect/Stream';
 import * as Sink from 'effect/Sink';
 import * as Logger from 'effect/Logger';
 import * as RelayClient from '@t3tools/shared/relayClient';
-import * as ChildProcessSpawner from 'effect/unstable/process/ChildProcessSpawner';
+import * as ChildProcessSpawner from 'effect/process/ChildProcessSpawner';
 import { make } from '../../upstream/apps/server/src/cloud/ManagedEndpointRuntime.ts';
 import { configureNative } from '../../native.mjs';
 

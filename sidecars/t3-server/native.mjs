@@ -18,6 +18,9 @@ const methods = new Set(['server.probe', 'server.getConfig', 'server.getSettings
   // Mobile refreshes the authoritative projection after submitting a message.
   // The official read scope still applies; do not open the whole namespace.
   'orchestration.getThreadProjection', 'auth.subscribeAccess',
+  // New mobile clients lazily fetch full tool details omitted from wire projections.
+  // The official read scope and thread/item lookup remain upstream-owned.
+  'orchestration.getTurnItem',
   // Mobile archive uses its own snapshot and stream; upstream still enforces read scope.
   'orchestration.getArchivedShellSnapshot', 'orchestration.subscribeArchivedShell',
   // Stock mobile liveness feeds upstream's background subscription policy.

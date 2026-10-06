@@ -146,21 +146,27 @@ enum T3V2Presentation {
       })
     let outputUsage = latest?["turnTokenUsage"] as? JSON
     let output = outputUsage?["outputTokens"] as? Int ?? 0
-    // Use only upstream timing fields; Pi may not supply per-turn output usage.
-    var duration: Double = 0
-    if let started = latest?["startedAt"] as? String,
+    // Pi measures individual model responses, excluding tool execution. Never
+    // divide cumulative session output by the current run's duration.
+    let piMetrics = latest?["piMetrics"] as? JSON
+    var duration = (piMetrics?["outputDurationMs"] as? Double ?? 0) / 1000
+    if piMetrics == nil, let started = latest?["startedAt"] as? String,
       let completed = latest?["completedAt"] as? String
     {
       duration = T3DesktopClient.date(completed).timeIntervalSince(T3DesktopClient.date(started))
     }
-    guard usage != nil || (output > 0 && duration > 0) else { return nil }
+    guard usage != nil || outputUsage != nil else { return nil }
     let used = usage?["usedTokens"] as? Int ?? 0
     let max = usage?["maxTokens"] as? Int ?? 0
-    let input = usage?["inputTokens"] as? Int ?? 0
-    let cached = usage?["cachedInputTokens"] as? Int ?? 0
+    let cached = outputUsage?["cachedInputTokens"] as? Int ?? usage?["cachedInputTokens"] as? Int ?? 0
+    let creation = outputUsage?["cacheCreationTokens"] as? Int ?? 0
+    // Normalized turn input includes cache reads/writes; SessionStats does not.
+    let input = (outputUsage?["inputTokens"] as? Int)
+      .map { Swift.max(0, $0 - cached - creation) } ?? usage?["inputTokens"] as? Int ?? 0
     return SessionStats(
-      cost: nil, contextPercent: max > 0 ? Double(used) / Double(max) * 100 : nil,
-      totalTokens: used, inputTokens: input, cacheReadTokens: cached, cacheWriteTokens: 0,
+      cost: piMetrics?["totalCostUsd"] as? Double,
+      contextPercent: max > 0 ? Double(used) / Double(max) * 100 : nil,
+      totalTokens: used, inputTokens: input, cacheReadTokens: cached, cacheWriteTokens: creation,
       outputTokensPerSecond: output > 0 && duration > 0 ? Double(output) / duration : nil,
       contextWindow: max > 0 ? max : nil)
   }

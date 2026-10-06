@@ -3,7 +3,7 @@ import * as Layer from 'effect/Layer';
 import * as Option from 'effect/Option';
 import * as DateTime from 'effect/DateTime';
 import * as Fiber from 'effect/Fiber';
-import { HttpRouter, HttpServerRequest, HttpServerResponse, HttpServer } from 'effect/unstable/http';
+import { HttpRouter, HttpServerRequest, HttpServerResponse, HttpServer } from 'effect/http';
 import { AuthStandardClientScopes, AuthAdministrativeScopes } from '@t3tools/contracts';
 import { EnvironmentAuth } from './upstream/apps/server/src/auth/EnvironmentAuth.ts';
 import { ServerSecretStore } from './upstream/apps/server/src/auth/ServerSecretStore.ts';
@@ -11,7 +11,7 @@ import { CloudCliTokenManager } from './upstream/apps/server/src/cloud/CliTokenM
 import { CloudManagedEndpointRuntime } from './upstream/apps/server/src/cloud/ManagedEndpointRuntime.ts';
 import { AgentAwarenessRelay } from './upstream/apps/server/src/relay/AgentAwarenessRelay.ts';
 import { ServerConfig } from './upstream/apps/server/src/config.ts';
-import { reconcileDesiredCloudLink } from './upstream/apps/server/src/cloud/http.ts';
+import { CloudLink } from './upstream/apps/server/src/cloud/CloudLink.ts';
 import { setCliDesiredCloudLink } from './upstream/apps/server/src/cloud/CliState.ts';
 import * as CloudConfig from './upstream/apps/server/src/cloud/config.ts';
 import { RelayClient } from '@t3tools/shared/relayClient';
@@ -24,7 +24,7 @@ import { connectionRoute } from './connection-diagnostics.mjs';
 import { setModelPreferences } from './model-preferences.mjs';
 import { ServerSettingsService } from './upstream/apps/server/src/serverSettings.ts';
 
-import { ProviderRegistry } from './upstream/apps/server/src/provider/Services/ProviderRegistry.ts';
+import { ProviderRegistry } from './upstream/apps/server/src/provider/ProviderRegistry.ts';
 
 export const NativeHttpPolicy = HttpRouter.middleware(effect => Effect.flatMap(HttpServerRequest.HttpServerRequest, request => {
   const broker = getNative();
@@ -101,7 +101,8 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
       yield* relayClient.install;
     }
     yield* setCliDesiredCloudLink(true, 'managed');
-    yield* reconcileDesiredCloudLink(localURL);
+    const cloudLink = yield* CloudLink;
+    yield* cloudLink.reconcileDesiredLink(localURL);
     yield* secrets.set(CloudConfig.PUBLISH_AGENT_ACTIVITY_SECRET, new TextEncoder().encode('true'));
     yield* awareness.requestCatchUp();
     broker.message = '官方 T3 Server 已绑定账号并请求托管 Cloudflare Tunnel；连接状态及实机通知仍需验收。';

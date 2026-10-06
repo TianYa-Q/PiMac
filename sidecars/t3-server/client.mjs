@@ -3,10 +3,10 @@ import * as Effect from 'effect/Effect';
 import * as Layer from 'effect/Layer';
 import * as Logger from 'effect/Logger';
 import * as Stream from 'effect/Stream';
-import * as Socket from 'effect/unstable/socket/Socket';
+import * as Socket from 'effect/socket/Socket';
 import { WsRpcGroup as group } from '@t3tools/contracts';
-import * as RpcClient from 'effect/unstable/rpc/RpcClient';
-import * as RpcSerialization from 'effect/unstable/rpc/RpcSerialization';
+import * as RpcClient from 'effect/rpc/RpcClient';
+import * as RpcSerialization from 'effect/rpc/RpcSerialization';
 
 
 export function call(url, method, input = {}) {

@@ -1,8 +1,11 @@
 # Official T3 Server sidecar
 
-Pinned upstream: `pingdotgg/t3code@8d846660cecfc69ef4e192322fced29fa07f374c`.
+Pinned upstream: `pingdotgg/t3code@442735897f6f92af33798075baa12d4fd4d710dd`.
 This uses upstream orchestrator V2 and its official `PiDriver`, `PiAdapterV2`,
-and `PiRpc`, without modifying those implementations. The former custom Pi
+and `PiRpc`. A telemetry-only PiAdapter patch records per-message usage and
+model-response duration (excluding tools), exposing normalized turn usage and
+optional `piMetrics` through the V2 contract. Lifecycle remains upstream-owned.
+The former custom Pi
 adapter, transport, runtime controls, and their tests have been removed.
 
 Pi Mac retains only host policy and management: loopback Server/administration,
@@ -15,7 +18,8 @@ Provider subprocesses must not inherit supervisor secrets.
 ## Reproducible build
 
 Commit host sources, patches, tests, dependency locks, and `upstream-pin.json`.
-The manifest hashes 1,745 upstream files. `upstream/`, `node_modules/`,
+The manifest hashes 1,798 upstream files. Effect and its Node platform packages
+are pinned together at `4.0.1`. `upstream/`, `node_modules/`,
 `generated/` and the app's generated `vendor/t3-server.mjs` are build artifacts.
 The upstream MIT license is copied to `vendor/T3-SERVER-LICENSE.txt`.
 
@@ -36,7 +40,11 @@ When deliberately changing the pin, archive the existing cache first.
 
 ## Protocol / upgrade
 
-Clients require orchestration protocol **2**. Project mutations and orchestration
+Target mobile client: T3 iOS build **109** (physical-device acceptance pending).
+The EAS build number is remotely managed, not a Server version or a verified
+mapping to this commit. Clients require orchestration protocol **2**.
+The host explicitly allows `orchestration.getTurnItem` for upstream's lazy
+full-tool-detail fetch, retaining official read scope and thread/item isolation. Project mutations and orchestration
 commands use official Effect RPC; HTTP serves V2 shell/thread projections.
 `settings-migration.mjs` backs up obsolete launch settings and converts only
 legacy `binaryArgs`, removing old host-injected extensions. Upstream owns

@@ -2,7 +2,7 @@
 
 ## 固定版本与所有权
 
-当前使用 `pingdotgg/t3code` 官方 main 提交 **`cc1e634bfa62edd56ff792eea666e436fdef788f`**（2026-10-02 UTC），包含 #2829 的 orchestrator V2 和官方 Pi Provider。
+当前使用 `pingdotgg/t3code` 官方 main 提交 **`442735897f6f92af33798075baa12d4fd4d710dd`**（2026-10-06 UTC），使用 orchestrator V2、官方 Pi Provider 和 Effect/platform **4.0.1**。本轮升级目标为 T3 iOS **build 109**；手机构建号由 EAS 远程管理，不等于 Server 版本，尚未验证其与上游提交的精确对应及实机兼容性。新增放行官方 `orchestration.getTurnItem`，用于手机按需读取工具详情，保留官方只读权限和线程隔离。
 
 ```text
 SwiftUI / Telegram / T3 iOS（需要支持 orchestration protocol 2）

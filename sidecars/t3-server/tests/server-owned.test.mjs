@@ -128,6 +128,12 @@ test('official V2 owns receipts, settlement, transcript, restart and native Pi r
   let projection = await f.snapshot(threadId);
   assert(projection.visibleTurnItems.some(row => row.item.text === 'Reply: 你好\u2028world'));
   assert(projection.providerThreads[0].nativeThreadRef.nativeId.endsWith('.jsonl'));
+  const usage = projection.providerTurns.at(-1);
+  assert.equal(usage.turnTokenUsage.outputTokens, 20);
+  assert.equal(usage.turnTokenUsage.inputTokens, 190);
+  assert.equal(usage.turnTokenUsage.cacheCreationTokens, 10);
+  assert.equal(usage.piMetrics.totalCostUsd, 0.012);
+  assert(usage.piMetrics.outputDurationMs >= 0);
   await f.dispatch(command);
   let records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(records.filter(r => r.command === 'prompt').length, 1);
@@ -185,6 +191,13 @@ test('official Pi tools, model selection, steering and cancellation', async t =>
   const nested = tools.find(item => item.input?.path === 'nested.txt');
   assert(code);
   assert(nested);
+  // Build 109-era clients fetch full tool details through the official lazy RPC.
+  const detail = await f.rpc('orchestration.getTurnItem', { threadId, itemId: code.id, revision: code.updatedAt });
+  assert.equal(detail.item.id, code.id);
+  assert.equal(detail.item.toolName, 'codemode');
+  assert.equal((await f.rpc('orchestration.getTurnItem', { threadId, itemId: randomUUID() })).item, null);
+  const otherThreadId = await f.create();
+  assert.equal((await f.rpc('orchestration.getTurnItem', { threadId: otherThreadId, itemId: code.id })).item, null);
   // Upstream Pi currently emits flat tool items; do not add host-owned nesting.
   assert.equal(nested.parentItemId, null);
   assert.equal(tools.find(item => item.input?.path === 'fixture.txt').parentItemId, null);

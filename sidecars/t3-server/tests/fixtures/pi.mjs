@@ -104,7 +104,7 @@ process.stdin.on('data', chunk => {
         send({ type: 'message_start', message: { role: 'assistant', content: [] } });
         const text = 'Reply: ' + command.message;
         send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text } });
-        send({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { output: 20 }, stopReason: 'stop' } });
+        send({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 100, output: 20, cacheRead: 80, cacheWrite: 10, cost: { total: 0.012 } }, stopReason: 'stop' } });
         send({ type: 'agent_end', willRetry: true, messages: [] });
         completion = setTimeout(() => { running = false; send({ type: 'agent_settled' }); }, command.message === 'slow' ? 1500 : 80);
         break;

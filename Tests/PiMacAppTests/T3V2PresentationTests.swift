@@ -195,6 +195,34 @@ struct T3V2PresentationTests {
     #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == nil)
   }
 
+  @Test func piMetricsUseModelDurationAndNormalizedTurnCache() {
+    let native: [String: Any] = ["projection": ["providerTurns": [[
+      "startedAt": "2026-01-01T00:00:00Z",
+      "completedAt": "2026-01-01T00:01:00Z",
+      "tokenUsage": ["usedTokens": 200, "maxTokens": 1000,
+                     "outputTokens": 99999, "inputTokens": 99999],
+      "turnTokenUsage": ["inputTokens": 400, "outputTokens": 150,
+                         "cachedInputTokens": 250, "cacheCreationTokens": 50],
+      "piMetrics": ["outputDurationMs": 3000, "totalCostUsd": 0.02],
+    ]]]]
+    let stats = T3V2Presentation.stats(native)
+    #expect(stats?.outputTokensPerSecond == 50)
+    #expect(stats?.inputTokens == 100)
+    #expect(stats?.cacheWriteTokens == 50)
+    #expect(stats?.cacheHitPercent == 62.5)
+    #expect(stats?.cost == 0.02)
+    #expect(stats?.contextPercent == 20)
+  }
+
+  @Test func legacyPiCumulativeUsageDoesNotBecomeTurnSpeed() {
+    let native: [String: Any] = ["projection": ["providerTurns": [[
+      "startedAt": "2026-01-01T00:00:00Z",
+      "completedAt": "2026-01-01T00:00:03Z",
+      "tokenUsage": ["usedTokens": 200, "outputTokens": 99999],
+    ]]]]
+    #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == nil)
+  }
+
   @Test func missingUsageNeverInventsCostOrThroughput() {
     #expect(T3V2Presentation.stats([:]) == nil)
     let detail: [String: Any] = [

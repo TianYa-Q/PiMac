@@ -5,6 +5,10 @@ import { httpAllowed, rpcAllowed } from '../native.mjs';
 test('mobile dispatch and projection refresh are allowed narrowly', () => {
   assert.equal(rpcAllowed('orchestration.dispatchCommand'), true);
   assert.equal(rpcAllowed('orchestration.getThreadProjection'), true);
+  assert.equal(rpcAllowed('orchestration.getTurnItem'), true);
+  assert.equal(rpcAllowed('orchestration.getTurnItems'), false);
+  assert.equal(rpcAllowed('secrets.answerRequest'), false);
+  assert.equal(rpcAllowed('scheduledTasks.rotateWebhookToken'), false);
   assert.equal(rpcAllowed('orchestration.getUnknownProjection'), false);
 });
 

@@ -23,10 +23,19 @@ test('every pinned upstream file is pristine and every host patch still matches'
   }
 });
 
-test('official Pi adapter, transport and wire contracts have no host enhancements', () => {
+test('Pi lifecycle stays upstream-owned with a bounded telemetry-only exception', () => {
+  const adapter = 'apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts';
+  const contract = 'packages/contracts/src/orchestrationV2.ts';
   for (const file of Object.keys(patches)) {
-    assert(!file.startsWith('packages/contracts/'), file);
-    assert(!/\/Pi(?:AdapterV2|Rpc|Driver)\.ts$/.test(file), file);
+    assert(!file.startsWith('packages/contracts/') || file === contract, file);
+    assert(!/\/Pi(?:AdapterV2|Rpc|Driver)\.ts$/.test(file) || file === adapter, file);
+  }
+  assert.equal(patches[adapter].length, 5);
+  assert.equal(patches[contract].length, 1);
+  assert(patches[contract][0].newText.includes('piMetrics: Schema.optional'));
+  for (const entry of patches[adapter]) {
+    assert(/pi-turn-usage|startPiMessage|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage/.test(entry.newText));
+    assert(!/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText));
   }
   // The host allowlist supplements the official connection-scoped middleware;
   // it must not resurrect ws.ts's retired per-handler scope checks.

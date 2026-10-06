@@ -1,4 +1,32 @@
 {
+  "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts": [
+  {
+    "oldText": "import { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";",
+    "newText": "import { startPiMessage, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";"
+  },
+  {
+    "oldText": "              turn.messageOrdinal += 1;",
+    "newText": "              turn.messageOrdinal += 1;\n              startPiMessage(turn);"
+  },
+  {
+    "oldText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            yield* completeOpenStreamItems(turn);",
+    "newText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            endPiMessage(turn, message);\n            yield* completeOpenStreamItems(turn);"
+  },
+  {
+    "oldText": "        const failure = turn.interrupted ? null : turn.failure;",
+    "newText": "        const metrics = piTurnMetrics(turn);\n        const failure = turn.interrupted ? null : turn.failure;"
+  },
+  {
+    "oldText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),",
+    "newText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),\n            ...(metrics.turnTokenUsage ? { turnTokenUsage: metrics.turnTokenUsage, piMetrics: metrics.telemetry } : {}),"
+  }
+],
+  "packages/contracts/src/orchestrationV2.ts": [
+  {
+    "oldText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),",
+    "newText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),\n  piMetrics: Schema.optional(Schema.Struct({\n    outputDurationMs: NonNegativeInt,\n    totalCostUsd: Schema.optional(Schema.Number),\n  })),"
+  }
+],
   "apps/server/src/orchestration-v2/Orchestrator.ts": [
     {
       "oldText": "((command.titleSeed !== undefined &&\n          (yield* projectionStore",
@@ -126,8 +154,8 @@
   ],
   "apps/server/src/server.ts": [
     {
-      "oldText": "              registerManagedCloudTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }),",
-      "newText": "              registerManagedCloudTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }).pipe(Effect.tapError(() => Effect.sync(() => PiNative.getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: \"registration-failed\" })))),"
+      "oldText": "              cloudLink.registerManagedTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }),",
+      "newText": "              cloudLink.registerManagedTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }).pipe(Effect.tapError(() => Effect.sync(() => PiNative.getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: \"registration-failed\" })))),"
     },
     {
       "oldText": "              yield* Effect.sleep(Duration.millis(jitter));",
@@ -138,8 +166,8 @@
       "newText": "            PiNative.getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: registration.status });\n            const startupAction = managedTunnelStartupAction({ wantsCliLink, registration });"
     },
     {
-      "oldText": "const ReviewLayerLive = ReviewService.layer.pipe(\n  Layer.provideMerge(GitVcsDriver.layer),",
-      "newText": "const ReviewLayerLive = ReviewService.layer.pipe(\n  Layer.provide(Layer.merge(ProjectStore.layer, ProjectionStoreV2.layer)),\n  Layer.provideMerge(GitVcsDriver.layer),"
+      "oldText": "const layerReview = ReviewService.layer.pipe(\n  Layer.provideMerge(GitVcsDriver.layer),",
+      "newText": "const layerReview = ReviewService.layer.pipe(\n  Layer.provide(Layer.merge(ProjectStore.layer, ProjectionStoreV2.layer)),\n  Layer.provideMerge(GitVcsDriver.layer),"
     },
     {
       "oldText": "import * as NodeHttp from \"node:http\";",
@@ -147,23 +175,23 @@
       "count": 1
     },
     {
-      "oldText": "const ProviderInstallationRefreshLive = Layer.effectDiscard(\n  Effect.gen(function* () {\n    const antigravity = yield* AntigravityInstallation.AntigravityInstallation;\n    const codex = yield* CodexInstallation.CodexInstallation;\n    const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;\n    const providers = yield* ProviderRegistry.ProviderRegistry;\n    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(\n      Stream.runForEach((state) =>\n        instances.listInstances.pipe(\n          Effect.flatMap((entries) =>\n            Effect.forEach(\n              entries.filter((instance) => instance.driverKind === state.driver),\n              (instance) => providers.refreshInstance(instance.instanceId),\n              { discard: true },\n            ),\n          ),\n        ),\n      ),\n      Effect.forkScoped,\n    );\n  }),\n);\n",
-      "newText": "const ProviderInstallationRefreshLive = Layer.empty;\n",
+      "oldText": "const layerProviderInstallationRefresh = Layer.effectDiscard(\n  Effect.gen(function* () {\n    const antigravity = yield* AntigravityInstallation.AntigravityInstallation;\n    const codex = yield* CodexInstallation.CodexInstallation;\n    const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;\n    const providers = yield* ProviderRegistry.ProviderRegistry;\n    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(\n      Stream.runForEach((state) =>\n        instances.listInstances.pipe(\n          Effect.flatMap((entries) =>\n            Effect.forEach(\n              entries.filter((instance) => instance.driverKind === state.driver),\n              (instance) => providers.refreshInstance(instance.instanceId),\n              { discard: true },\n            ),\n          ),\n        ),\n      ),\n      Effect.forkScoped,\n    );\n  }),\n);\n",
+      "newText": "const layerProviderInstallationRefresh = Layer.empty;\n",
       "count": 1
     },
     {
-      "oldText": "  Layer.provide(httpCompressionLayer),",
-      "newText": "  Layer.provide(httpCompressionLayer),\n  Layer.provide(NativeHttpPolicy),",
+      "oldText": "  Layer.provide(ServerHttp.layerHttpCompression),",
+      "newText": "  Layer.provide(ServerHttp.layerHttpCompression),\n  Layer.provide(NativeHttpPolicy),",
       "count": 1
     },
     {
-      "oldText": "const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(",
-      "newText": "const NativeRuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(",
+      "oldText": "const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(",
+      "newText": "const layerNativeRuntimeDependencies = layerRuntimeCoreDependencies.pipe(",
       "count": 1
     },
     {
-      "oldText": "const commandReadinessLayer = HttpRouter.middleware(\n  (httpEffect) =>\n    Effect.flatMap(ServerRuntimeStartup.ServerRuntimeStartup, (startup) =>\n      startup.awaitCommandReady.pipe(Effect.orDie, Effect.andThen(httpEffect)),\n    ),",
-      "newText": "const RuntimeDependenciesLive = NativeManagementLayer.pipe(Layer.provideMerge(NativeRuntimeDependenciesLive));\n\nconst commandReadinessLayer = HttpRouter.middleware(\n  (httpEffect) => oauthAwareCommandReadiness(httpEffect,\n    Effect.flatMap(ServerRuntimeStartup.ServerRuntimeStartup, (startup) =>\n      startup.awaitCommandReady.pipe(Effect.orDie),\n    )),",
+      "oldText": "const layerCommandReadiness = HttpRouter.middleware(\n  (httpEffect) =>\n    Effect.flatMap(ServerRuntimeStartup.ServerRuntimeStartup, (startup) =>\n      startup.awaitCommandReady.pipe(Effect.orDie, Effect.andThen(httpEffect)),\n    ),",
+      "newText": "const layerRuntimeDependencies = NativeManagementLayer.pipe(Layer.provideMerge(layerNativeRuntimeDependencies));\n\nconst layerCommandReadiness = HttpRouter.middleware(\n  (httpEffect) => oauthAwareCommandReadiness(httpEffect,\n    Effect.flatMap(ServerRuntimeStartup.ServerRuntimeStartup, (startup) =>\n      startup.awaitCommandReady.pipe(Effect.orDie),\n    )),",
       "count": 1
     }
   ],

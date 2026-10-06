@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as Effect from 'effect/Effect';
-import { HttpServerRequest } from 'effect/unstable/http';
+import { HttpServerRequest } from 'effect/http';
 import { oauthAwareCommandReadiness } from '../oauth-readiness.mjs';
 
 const request = {

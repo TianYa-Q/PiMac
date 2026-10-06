@@ -3,12 +3,23 @@
 ## Current upgrade
 
 - Repository: https://github.com/pingdotgg/t3code, branch `main`.
-- Previous pin: `cc1e634bfa62edd56ff792eea666e436fdef788f`.
-- New pin: `8d846660cecfc69ef4e192322fced29fa07f374c`.
-- SHA-256 manifest: 1,745 pristine upstream files, including newly added server
-  modules. Generated caches and bundles are not source-controlled.
-- Upstream Effect/platform dependencies remain `4.0.0-rc.115`; no dependency
-  version override was needed. Orchestration protocol remains 2.
+- Previous pin: `8d846660cecfc69ef4e192322fced29fa07f374c`.
+- New pin: `442735897f6f92af33798075baa12d4fd4d710dd` (2026-10-06 UTC).
+- Target client: T3 iOS build **109**. EAS manages build numbers remotely;
+  this is an upgrade target, not a verified build-to-commit mapping.
+- SHA-256 manifest: 1,798 pristine upstream files, including the workspace
+  dependency catalog. Generated caches and bundles are not source-controlled.
+- Effect/platform dependencies advance together to `4.0.1`, following upstream.
+  Host/test imports use the stable `effect/http`, `effect/rpc`, `effect/socket`
+  and `effect/process` paths. Orchestration protocol remains 2.
+- Server composition patches follow the renamed upstream layers. Connect
+  reconciliation now calls the official `CloudLink` service rather than a
+  retired HTTP-module helper.
+- Explicitly allow `orchestration.getTurnItem` for lazy full-tool-detail reads;
+  tests cover successful retrieval, missing items and cross-thread isolation.
+  New secret/webhook administration methods remain denied by default.
+- Archive the previous upstream cache before restoring the new pin; do not
+  bypass fetcher's hash checks or restart an active production Server.
 
 ## Official implementations, not local enhancements
 
@@ -52,6 +63,15 @@ covers PiMac's requirement; do not transplant the old enhancement onto the new
 implementation.
 
 ## Validation
+
+For the build-109 upgrade: reproducible bundle check and all 88 Server tests
+pass, including lazy tool retrieval and thread isolation. Swift runs 294 tests;
+293 pass and the desktop fixture's old `cost == nil` assertion fails because
+concurrent Pi telemetry work now supplies `0.012`. That separate work must align
+its desktop expectation before claiming a fully green Swift suite. No running
+application or production state was restarted/migrated during this upgrade.
+Physical iPhone build-109 connection, sending, tool-detail expansion and
+reconnection remain acceptance tasks.
 
 ```sh
 ./scripts/prepare-t3-server.sh
