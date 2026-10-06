@@ -158,7 +158,7 @@ struct T3V2PresentationTests {
     #expect(metrics["contextWindow"] as? Int == 1000)
   }
 
-  @Test func outputSpeedUsesOfficialTurnTimingWithoutRequiringContextUsage() {
+  @Test func officialTurnTimingAloneIsNotAAGenerationSpeed() {
     let usage: [String: Any] = ["outputTokens": 150]
     let native: [String: Any] = [
       "projection": [
@@ -172,7 +172,7 @@ struct T3V2PresentationTests {
         ],
       ]
     ]
-    #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == 50)
+    #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == nil)
     #expect(T3V2Presentation.detail(native)["sessionStats"] != nil)
   }
 
@@ -203,7 +203,8 @@ struct T3V2PresentationTests {
                      "outputTokens": 99999, "inputTokens": 99999],
       "turnTokenUsage": ["inputTokens": 400, "outputTokens": 150,
                          "cachedInputTokens": 250, "cacheCreationTokens": 50],
-      "piMetrics": ["outputDurationMs": 3000, "totalCostUsd": 0.02],
+      "piMetrics": ["outputDurationMs": 60000, "totalCostUsd": 0.02,
+                    "speedMethod": "aa-approx-v1", "speedTokens": 100, "speedDurationMs": 2000],
     ]]]]
     let stats = T3V2Presentation.stats(native)
     #expect(stats?.outputTokensPerSecond == 50)
@@ -212,6 +213,33 @@ struct T3V2PresentationTests {
     #expect(stats?.cacheHitPercent == 62.5)
     #expect(stats?.cost == 0.02)
     #expect(stats?.contextPercent == 20)
+  }
+
+  @Test func piSpeedUpdatesBeforeRunCompletionWithoutContextUsage() {
+    let native: [String: Any] = ["projection": [
+      "runs": [["id": "run", "status": "running"]],
+      "attempts": [["id": "attempt", "runId": "run"]],
+      "providerTurns": [[
+        "runAttemptId": "attempt", "status": "running", "completedAt": NSNull(),
+        "turnTokenUsage": ["outputTokens": 150],
+        "piMetrics": ["outputDurationMs": 60000, "speedMethod": "aa-approx-v1",
+                      "speedTokens": 100, "speedDurationMs": 2000],
+      ]],
+    ]]
+    #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == 50)
+  }
+
+  @Test func legacyAndInsufficientPiMetricsDoNotDisplayNonAASpeed() {
+    for metrics: [String: Any] in [
+      ["outputDurationMs": 3000],
+      ["outputDurationMs": 3000, "speedMethod": "aa-approx-v1"],
+      ["speedMethod": "aa-approx-v1", "speedTokens": 100, "speedDurationMs": 0],
+    ] {
+      let native: [String: Any] = ["projection": ["providerTurns": [[
+        "turnTokenUsage": ["outputTokens": 150], "piMetrics": metrics,
+      ]]]]
+      #expect(T3V2Presentation.stats(native)?.outputTokensPerSecond == nil)
+    }
   }
 
   @Test func legacyPiCumulativeUsageDoesNotBecomeTurnSpeed() {

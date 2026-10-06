@@ -2,15 +2,19 @@
   "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts": [
   {
     "oldText": "import { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";",
-    "newText": "import { startPiMessage, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";"
+    "newText": "import { startPiMessage, recordPiDelta, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";"
   },
+  {
+    "oldText": "            const delta = event[\"assistantMessageEvent\"];",
+    "newText": "            const delta = event[\"assistantMessageEvent\"];\n            recordPiDelta(turn, delta);"
+},
   {
     "oldText": "              turn.messageOrdinal += 1;",
     "newText": "              turn.messageOrdinal += 1;\n              startPiMessage(turn);"
   },
   {
     "oldText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            yield* completeOpenStreamItems(turn);",
-    "newText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            endPiMessage(turn, message);\n            yield* completeOpenStreamItems(turn);"
+    "newText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            endPiMessage(turn, message);\n            const metrics = piTurnMetrics(turn);\n            if (metrics.turnTokenUsage) {\n              // Retain completed-response metrics across subsequent streaming\n              // updates while tools or another model response are running.\n              Object.assign(turn.providerTurn, {\n                turnTokenUsage: metrics.turnTokenUsage,\n                piMetrics: metrics.telemetry,\n              });\n              yield* emit({\n                type: \"provider_turn.updated\",\n                driver: PI_PROVIDER,\n                threadId: turn.turnInput.threadId,\n                providerTurn: { ...turn.providerTurn },\n              });\n            }\n            yield* completeOpenStreamItems(turn);"
   },
   {
     "oldText": "        const failure = turn.interrupted ? null : turn.failure;",
@@ -24,7 +28,7 @@
   "packages/contracts/src/orchestrationV2.ts": [
   {
     "oldText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),",
-    "newText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),\n  piMetrics: Schema.optional(Schema.Struct({\n    outputDurationMs: NonNegativeInt,\n    totalCostUsd: Schema.optional(Schema.Number),\n  })),"
+    "newText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),\n  piMetrics: Schema.optional(Schema.Struct({\n    outputDurationMs: NonNegativeInt,\n    speedMethod: Schema.optional(Schema.Literal(\"aa-approx-v1\")),\n    speedTokens: Schema.optional(Schema.Number),\n    speedDurationMs: Schema.optional(NonNegativeInt),\n    totalCostUsd: Schema.optional(Schema.Number),\n  })),"
   }
 ],
   "apps/server/src/orchestration-v2/Orchestrator.ts": [

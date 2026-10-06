@@ -1558,16 +1558,16 @@ struct ContentView: View {
   private var sessionMetrics: some View {
     HStack(spacing: 12) {
       if let speed = app.outputTokensPerSecond {
-        Text("输出 \(speed, specifier: "%.1f") tokens/s")
+        Text("生成 ≈\(speed, specifier: "%.1f") tokens/s")
           .font(.caption)
           .monospacedDigit()
           .foregroundStyle(.secondary)
-          .help("当前任务输出 tokens ÷ 模型请求耗时（含思考与首字等待，不含工具执行）。每次模型响应结束更新。")
+          .help("AA 近似口径：排除首个输出分块前的等待和最后分块后的收尾。完整思考流计入；隐藏思考时测可见输出后约 80%。按实际输出用量校准分块，任务内有效样本加权平均，每次响应结束更新；短响应或缓冲输出不测速。")
       } else {
-        Text("输出 -- tokens/s")
+        Text("生成 -- tokens/s")
           .font(.caption)
           .foregroundStyle(.secondary)
-          .help("等待模型返回实际 token 用量")
+          .help("等待足够的流式分块和实际 token 用量；过短、缓冲或无法校准的响应不显示速度。")
       }
       Divider().frame(height: 12)
       if let stats = app.stats {

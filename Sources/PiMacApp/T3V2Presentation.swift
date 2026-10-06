@@ -145,16 +145,16 @@ enum T3V2Presentation {
         return attemptIDs.contains(id)
       })
     let outputUsage = latest?["turnTokenUsage"] as? JSON
-    let output = outputUsage?["outputTokens"] as? Int ?? 0
-    // Pi measures individual model responses, excluding tool execution. Never
-    // divide cumulative session output by the current run's duration.
+    // Only display calibrated streaming measurements. Legacy whole-request
+    // timing is not comparable to AA, so do not silently fall back to it.
     let piMetrics = latest?["piMetrics"] as? JSON
-    var duration = (piMetrics?["outputDurationMs"] as? Double ?? 0) / 1000
-    if piMetrics == nil, let started = latest?["startedAt"] as? String,
-      let completed = latest?["completedAt"] as? String
-    {
-      duration = T3DesktopClient.date(completed).timeIntervalSince(T3DesktopClient.date(started))
-    }
+    let measuredTokens = piMetrics?["speedTokens"] as? Double
+      ?? (piMetrics?["speedTokens"] as? Int).map(Double.init) ?? 0
+    let durationMs = piMetrics?["speedDurationMs"] as? Double
+      ?? (piMetrics?["speedDurationMs"] as? Int).map(Double.init) ?? 0
+    let measuredSpeed = measuredTokens * 1000 / durationMs
+    let validSpeed = piMetrics?["speedMethod"] as? String == "aa-approx-v1"
+      && measuredTokens > 0 && durationMs > 0 && measuredSpeed.isFinite
     guard usage != nil || outputUsage != nil else { return nil }
     let used = usage?["usedTokens"] as? Int ?? 0
     let max = usage?["maxTokens"] as? Int ?? 0
@@ -167,7 +167,7 @@ enum T3V2Presentation {
       cost: piMetrics?["totalCostUsd"] as? Double,
       contextPercent: max > 0 ? Double(used) / Double(max) * 100 : nil,
       totalTokens: used, inputTokens: input, cacheReadTokens: cached, cacheWriteTokens: creation,
-      outputTokensPerSecond: output > 0 && duration > 0 ? Double(output) / duration : nil,
+      outputTokensPerSecond: validSpeed ? measuredSpeed : nil,
       contextWindow: max > 0 ? max : nil)
   }
 

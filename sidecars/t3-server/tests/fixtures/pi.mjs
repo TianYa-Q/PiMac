@@ -89,6 +89,21 @@ process.stdin.on('data', chunk => {
           }
           running = false; send({ type: 'agent_settled' }); break;
         }
+        if (command.message === 'aa-codex') {
+          send({ type: 'message_start', message: { role: 'assistant', api: 'openai-codex-responses', content: [] } });
+          send({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'A reasoning summary, not full reasoning tokens' } });
+          let chunk = 0;
+          const stream = () => {
+            send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 1, delta: '0123456789' } });
+            if (++chunk < 10) { completion = setTimeout(stream, 100); return; }
+            send({ type: 'message_end', message: { role: 'assistant', api: 'openai-codex-responses',
+              content: [{ type: 'text', text: '0123456789'.repeat(10) }],
+              usage: { input: 100, output: 600, reasoning: 500, cacheRead: 80, cacheWrite: 10, cost: { total: 0.012 } }, stopReason: 'stop' } });
+            completion = setTimeout(() => { running = false; send({ type: 'agent_settled' }); }, 1500);
+          };
+          completion = setTimeout(stream, 500);
+          break;
+        }
         if (command.message === 'tools') {
           send({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'fixture.txt' } });
           send({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'read', partialResult: { content: [{ type: 'text', text: 'partial' }] } });

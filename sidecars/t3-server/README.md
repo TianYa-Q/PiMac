@@ -4,7 +4,17 @@ Pinned upstream: `pingdotgg/t3code@442735897f6f92af33798075baa12d4fd4d710dd`.
 This uses upstream orchestrator V2 and its official `PiDriver`, `PiAdapterV2`,
 and `PiRpc`. A telemetry-only PiAdapter patch records per-message usage and
 model-response duration (excluding tools), exposing normalized turn usage and
-optional `piMetrics` through the V2 contract. Lifecycle remains upstream-owned.
+optional `piMetrics` through the V2 contract after each assistant `message_end`,
+without waiting for task settlement or context statistics. The displayed speed uses an AA approximation (`speedMethod: aa-approx-v1`):
+streamed first-to-last chunk timing, excluding the boundary chunk's estimated
+share. Per-chunk character weights are calibrated against actual output usage,
+not a fixed characters-per-token guess. Codex/Responses thinking is a summary,
+so hidden reasoning tokens are subtracted (not double-counted), and the final
+~80% of visible chunks is measured. Full reasoning streams are included for
+other APIs. Only valid samples contribute to the task's time-weighted average;
+short/buffered streams, missing reasoning counts on Responses, and unstreamed
+tool-call payloads do not manufacture a speed. Billing/context remain separate.
+Lifecycle remains upstream-owned.
 The former custom Pi
 adapter, transport, runtime controls, and their tests have been removed.
 

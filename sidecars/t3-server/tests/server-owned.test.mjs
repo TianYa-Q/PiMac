@@ -149,6 +149,49 @@ test('official V2 owns receipts, settlement, transcript, restart and native Pi r
   assert(records.some(r => r.command === 'switch_session'));
 });
 
+test('model response metrics arrive before task settlement and survive completion', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-response-usage-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const threadId = await f.create();
+  // Fixture finishes its model response immediately, then settles 1.5s later.
+  await f.dispatch(f.message(threadId, 'slow'));
+  const live = await eventually(async () => {
+    const projection = await f.snapshot(threadId);
+    return projection.providerTurns.at(-1)?.piMetrics ? projection : null;
+  });
+  const turn = live.providerTurns.at(-1);
+  assert.equal(turn.status, 'running');
+  assert.equal(turn.completedAt, null);
+  assert(!live.runs.some(run => run.status === 'completed'));
+  assert.equal(turn.turnTokenUsage.outputTokens, 20);
+  assert.equal(turn.piMetrics.totalCostUsd, 0.012);
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(run => run.status === 'completed'));
+  const settled = (await f.snapshot(threadId)).providerTurns.at(-1);
+  assert.deepEqual(settled.piMetrics, turn.piMetrics);
+  assert.deepEqual(settled.turnTokenUsage, turn.turnTokenUsage);
+});
+
+test('T3 Pi Codex-shaped stream preserves AA speed fields on the official wire', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-aa-codex-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const threadId = await f.create();
+  await f.dispatch(f.message(threadId, 'aa-codex'));
+  const turn = await eventually(async () => {
+    const projection = await f.snapshot(threadId);
+    const turn = projection.providerTurns.at(-1);
+    return turn?.piMetrics?.speedTokens ? turn : null;
+  });
+  assert.equal(turn.status, 'running');
+  assert.equal(turn.piMetrics.speedMethod, 'aa-approx-v1');
+  assert.equal(turn.piMetrics.speedTokens, 80);
+  assert(turn.piMetrics.speedDurationMs >= 500);
+  assert.equal(turn.turnTokenUsage.outputTokens, 600);
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(run => run.status === 'completed'));
+  assert.deepEqual((await f.snapshot(threadId)).providerTurns.at(-1).piMetrics, turn.piMetrics);
+});
+
 test('official scheduler dispatches into Pi and persists across server restart', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-official-schedule-'));
   let f;
