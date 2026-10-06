@@ -65,11 +65,11 @@ implementation.
 ## Validation
 
 For the build-109 upgrade: reproducible bundle check and all 88 Server tests
-pass, including lazy tool retrieval and thread isolation. Swift runs 294 tests;
-293 pass and the desktop fixture's old `cost == nil` assertion fails because
-concurrent Pi telemetry work now supplies `0.012`. That separate work must align
-its desktop expectation before claiming a fully green Swift suite. No running
-application or production state was restarted/migrated during this upgrade.
+pass, including lazy tool retrieval and thread isolation. All 294 Swift tests
+pass. The desktop fixture now asserts its reported Pi telemetry cost (`0.012`)
+instead of the obsolete `cost == nil` expectation; missing-cost coverage remains
+in the presentation tests. No running application or production state was
+restarted/migrated during this upgrade.
 Physical iPhone build-109 connection, sending, tool-detail expansion and
 reconnection remain acceptance tasks.
 

@@ -281,10 +281,11 @@ struct T3DesktopTests {
     }
     #expect(model.stats?.contextPercent == 2)
     #expect(model.stats?.totalTokens == 200)
-    #expect(model.stats?.cost == nil)  // Upstream V2 does not report Pi cost.
+    // Pi telemetry preserves the assistant message's reported USD cost.
+    #expect(model.stats?.cost == 0.012)
     #expect(defaults.data(forKey: "t3DesktopShellCache") != nil)
     #expect(defaults.data(forKey: "t3DesktopV2Metrics.\(model.threadID!)") != nil)
-    // Stock Pi Adapter does not supply per-turn output usage; do not invent speed.
+    // The fixture emits its response immediately; zero measured duration must not invent speed.
     #expect(model.outputTokensPerSecond == nil)
     let beforeCompact = model.lastSettledTurnID
     model.compact()
