@@ -215,6 +215,52 @@ struct T3V2PresentationTests {
     #expect(stats?.contextPercent == 20)
   }
 
+  @Test func sessionCacheAndCostAccumulateAcrossRunsWhileContextAndSpeedStayCurrent() throws {
+    let native: [String: Any] = ["projection": [
+      "runs": [["id": "new", "status": "running"]],
+      "attempts": [["id": "a1", "runId": "old"], ["id": "a2", "runId": "new"]],
+      "providerTurns": [
+        ["runAttemptId": "a1",
+         "turnTokenUsage": ["inputTokens": 100, "cachedInputTokens": 0],
+         "piMetrics": ["totalCostUsd": 0.1]],
+        ["runAttemptId": "a2",
+         "tokenUsage": ["usedTokens": 200, "maxTokens": 1000],
+         "turnTokenUsage": ["inputTokens": 400, "cachedInputTokens": 250,
+                            "cacheCreationTokens": 50],
+         "piMetrics": ["totalCostUsd": 0.2, "speedMethod": "aa-approx-v1",
+                       "speedTokens": 100, "speedDurationMs": 2000]],
+      ],
+    ]]
+    for _ in 0..<2 {
+      let stats = try #require(T3V2Presentation.stats(native))
+      #expect(stats.inputTokens == 200)
+      #expect(stats.cacheReadTokens == 250)
+      #expect(stats.cacheWriteTokens == 50)
+      #expect(stats.cacheHitPercent == 50)
+      #expect(abs((stats.cost ?? 0) - 0.3) < 0.000001)
+      #expect(stats.totalTokens == 200)
+      #expect(stats.contextPercent == 20)
+      #expect(stats.outputTokensPerSecond == 50)
+    }
+  }
+
+  @Test func pendingRunRetainsSessionTotalsWithoutReusingSpeedOrContextCounters() {
+    let native: [String: Any] = ["projection": ["providerTurns": [
+      ["turnTokenUsage": ["inputTokens": 100, "cachedInputTokens": 75],
+       "piMetrics": ["totalCostUsd": 0.1, "speedMethod": "aa-approx-v1",
+                     "speedTokens": 100, "speedDurationMs": 2000]],
+      ["tokenUsage": ["usedTokens": 200, "maxTokens": 1000,
+                      "inputTokens": 99999, "cachedInputTokens": 99999]],
+      ["status": "running"],
+    ]]]
+    let stats = T3V2Presentation.stats(native)
+    #expect(stats?.cost == 0.1)
+    #expect(stats?.inputTokens == 25)
+    #expect(stats?.cacheHitPercent == 75)
+    #expect(stats?.contextPercent == 20)
+    #expect(stats?.outputTokensPerSecond == nil)
+  }
+
   @Test func piSpeedUpdatesBeforeRunCompletionWithoutContextUsage() {
     let native: [String: Any] = ["projection": [
       "runs": [["id": "run", "status": "running"]],

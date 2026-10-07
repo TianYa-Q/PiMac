@@ -34,6 +34,34 @@ test('Pi scanner reads only sessions, ignores symlinks and preserves fork entry 
   assert.equal(new Set(sources[0].files.flatMap(file => file.records.map(row => row.dedupeKey))).size, 1);
   assert.equal(sources[0].dir, join(directory, 'sessions'));
 });
+test('Pi scanner preserves Unicode separators across chunks, CRLF and final unterminated records', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-usage-unicode-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, 'sessions'));
+  const withText = (id, text) => ({ ...entry, id, message: { ...entry.message,
+    content: [{ type: 'text', text }] } });
+  const records = [
+    { type: 'session', id: 'unicode-session' },
+    withText('large', 'x'.repeat(128 * 1024) + '第一段\u2028第二段\u2029第三段'),
+    withText('final', '末尾\u2028记录'),
+  ];
+  await writeFile(join(directory, 'sessions', 'unicode.jsonl'), records.map(JSON.stringify).join('\r\n'));
+  const sources = await collectPiUsage({ agentDirectory: directory });
+  assert.equal(sources.length, 1);
+  assert.equal(sources[0].status, 'ok');
+  assert.equal(sources[0].files[0].records.length, 2);
+  assert(sources[0].files[0].records.every(record => record.sessionId === 'unicode-session'));
+});
+test('Pi scanner still flags malformed JSON and retains valid records after it', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-usage-malformed-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  await mkdir(join(directory, 'sessions'));
+  await writeFile(join(directory, 'sessions', 'broken.jsonl'),
+    '{"unfinished":\n' + JSON.stringify(entry) + '\n');
+  const sources = await collectPiUsage({ agentDirectory: directory });
+  assert.equal(sources[0].status, 'partial');
+  assert.equal(sources[0].files[0].records.length, 1);
+});
 test('Pi limits converts remaining to used and seconds/ms resets without exposing credentials', async () => {
   const secret = 'private-token';
   const sources = await readPiLimitSources({ accountStatus: async ({ provider }) => provider === 'antigravity'

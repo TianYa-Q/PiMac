@@ -41,6 +41,7 @@ struct UsageSnapshot: Sendable {
   var days: [UsageDay] = []
   var models: [ModelUsage] = []
   var projects: [ProjectUsage] = []
+  var coverageWarnings: [String] = []
 
   var cacheHitPercent: Double? {
     let promptTokens = Double(inputTokens) + Double(cacheReadTokens) + Double(cacheWriteTokens)
@@ -76,31 +77,61 @@ enum UsagePeriod: String, CaseIterable, Identifiable {
 }
 
 @MainActor
-private final class UsageDashboardModel: ObservableObject {
+final class UsageDashboardModel: ObservableObject {
   @Published var period: UsagePeriod = .month
   @Published var snapshot = UsageSnapshot()
   @Published var isLoading = false
+  @Published var error: String?
+  @Published var startedAt = Date.now
   private var generation = UUID()
+  private var loadTask: Task<Void, Never>?
+  private let load: (UsagePeriod) async throws -> UsageSnapshot
+
+  init(load: @escaping (UsagePeriod) async throws -> UsageSnapshot) { self.load = load }
+
+  func cancel() {
+    loadTask?.cancel()
+    loadTask = nil
+    generation = UUID()
+    isLoading = false
+    error = "请求已取消，可点击刷新重新获取。"
+  }
 
   func reload() {
+    loadTask?.cancel()
     let nextGeneration = UUID()
     generation = nextGeneration
     let period = period
+    let load = load
+    snapshot = UsageSnapshot()
+    error = nil
+    startedAt = .now
     isLoading = true
-    Task { [weak self] in
-      let result = await Task.detached(priority: .utility) {
-        UsageScanner.scan(period: period)
-      }.value
+    loadTask = Task { [weak self] in
+      do {
+        let result = try await load(period)
+        guard let self, self.generation == nextGeneration, !Task.isCancelled else { return }
+        self.snapshot = result
+      } catch {
+        guard let self, self.generation == nextGeneration, !Task.isCancelled else { return }
+        self.error = "无法获取 T3 Server 用量汇总，请确认连接后重试。"
+      }
       guard let self, self.generation == nextGeneration else { return }
-      self.snapshot = result
       self.isLoading = false
+      self.loadTask = nil
     }
   }
 }
 
 struct UsageDashboardView: View {
-  @StateObject private var model = UsageDashboardModel()
+  @StateObject private var model: UsageDashboardModel
   @State private var exportError: String?
+
+  init(server: T3DesktopClient) {
+    _model = StateObject(wrappedValue: UsageDashboardModel { period in
+      try await server.usageSummary(period: period)
+    })
+  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -108,13 +139,30 @@ struct UsageDashboardView: View {
       Divider()
       if model.isLoading, model.snapshot.requests == 0 {
         Spacer()
-        ProgressView("正在统计会话记录…")
+        VStack(spacing: 12) {
+          ProgressView("正在获取 T3 Server 用量汇总…")
+          scanStatus
+          Text("统计由 Server 执行；首次读取历史记录可能较慢。")
+            .font(.caption).foregroundStyle(.secondary)
+          Button("取消", action: model.cancel)
+        }
+        .frame(width: 380)
         Spacer()
+      } else if let error = model.error {
+        ContentUnavailableView {
+          Label("用量读取未完成", systemImage: "exclamationmark.triangle")
+        } description: {
+          Text(error)
+        } actions: {
+          Button("重试", action: model.reload)
+        }
       } else if model.snapshot.requests == 0 {
         ContentUnavailableView(
           "暂无用量记录",
           systemImage: "chart.bar.xaxis",
-          description: Text("Pi 产生模型调用后，这里会显示 Token、费用和趋势。")
+          description: Text(model.snapshot.coverageWarnings.isEmpty
+            ? "当前范围内没有 Server 用量记录。"
+            : model.snapshot.coverageWarnings.joined(separator: "\n"))
         )
       } else {
         dashboard
@@ -123,6 +171,7 @@ struct UsageDashboardView: View {
     .background(Color(nsColor: .windowBackgroundColor))
     .task { model.reload() }
     .onChange(of: model.period) { model.reload() }
+    .onDisappear { model.cancel() }
     .alert(
       "导出失败",
       isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })
@@ -137,7 +186,7 @@ struct UsageDashboardView: View {
     HStack(spacing: 12) {
       VStack(alignment: .leading, spacing: 3) {
         Text("用量看板").font(.title2.bold())
-        Text("汇总 ~/.pi/agent/sessions 中的本地会话记录")
+        Text("由 T3 Server 提供用量汇总 · 费用为 API 等效估算，非订阅账单")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
@@ -147,14 +196,17 @@ struct UsageDashboardView: View {
       }
       .pickerStyle(.segmented)
       .frame(width: 220)
-      if model.isLoading { ProgressView().controlSize(.small).accessibilityLabel("正在统计用量") }
+      if model.isLoading {
+        scanStatus.frame(width: 170)
+        Button("取消", action: model.cancel)
+      }
       Button {
         exportCSV()
       } label: {
         Label("导出", systemImage: "square.and.arrow.up")
       }
       .disabled(model.isLoading || model.snapshot.requests == 0)
-      .help("导出当前范围的模型和项目汇总 CSV，不包含消息正文")
+      .help("导出 Server 返回的当前范围模型汇总 CSV，不包含消息正文")
       Button(action: model.reload) {
         Image(systemName: "arrow.clockwise")
       }
@@ -163,6 +215,16 @@ struct UsageDashboardView: View {
     }
     .padding(.horizontal, 24)
     .padding(.vertical, 16)
+  }
+
+  private var scanStatus: some View {
+    VStack(spacing: 5) {
+      Text("等待 Server 返回…")
+      TimelineView(.periodic(from: model.startedAt, by: 1)) { context in
+        Text("已耗时 \(max(0, Int(context.date.timeIntervalSince(model.startedAt)))) 秒")
+      }
+    }
+    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
   }
 
   private func exportCSV() {
@@ -180,6 +242,10 @@ struct UsageDashboardView: View {
   private var dashboard: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
+        ForEach(model.snapshot.coverageWarnings, id: \.self) { warning in
+          Label(warning, systemImage: "exclamationmark.triangle")
+            .font(.caption).foregroundStyle(.orange)
+        }
         LazyVGrid(
           columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 12
         ) {
@@ -190,7 +256,7 @@ struct UsageDashboardView: View {
           metricCard(
             "用量记录", value: model.snapshot.requests.formatted(), icon: "sparkles", tint: .purple)
           metricCard(
-            "活跃会话", value: model.snapshot.sessions.formatted(),
+            "会话（按来源）", value: model.snapshot.sessions.formatted(),
             icon: "bubble.left.and.bubble.right", tint: .orange)
         }
 
@@ -200,10 +266,9 @@ struct UsageDashboardView: View {
             .frame(width: 250)
         }
 
-        HStack(alignment: .top, spacing: 14) {
-          modelBreakdown
-          projectBreakdown
-        }
+        modelBreakdown
+        Text("会话数为各来源的独立会话数之和，同一会话跨来源可能重复；Server 暂未提供项目维度。")
+          .font(.caption).foregroundStyle(.secondary)
       }
       .padding(24)
     }
@@ -291,7 +356,7 @@ struct UsageDashboardView: View {
   }
 
   private var modelBreakdown: some View {
-    breakdownCard(title: "模型与工具用量", icon: "cpu") {
+    breakdownCard(title: "模型用量", icon: "cpu") {
       ForEach(model.snapshot.models.prefix(6)) { item in
         breakdownRow(
           title: item.name,
@@ -300,21 +365,6 @@ struct UsageDashboardView: View {
           fraction: Double(item.tokens) / Double(max(model.snapshot.totalTokens, 1)),
           color: .purple
         )
-      }
-    }
-  }
-
-  private var projectBreakdown: some View {
-    breakdownCard(title: "项目用量", icon: "folder") {
-      ForEach(model.snapshot.projects.prefix(6)) { item in
-        breakdownRow(
-          title: item.name,
-          subtitle: "\(item.sessions) 个会话 · \(currency(item.cost))",
-          value: compact(item.tokens),
-          fraction: Double(item.tokens) / Double(max(model.snapshot.totalTokens, 1)),
-          color: .blue
-        )
-        .help(item.path)
       }
     }
   }

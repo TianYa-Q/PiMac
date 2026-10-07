@@ -155,16 +155,32 @@ enum T3V2Presentation {
     let measuredSpeed = measuredTokens * 1000 / durationMs
     let validSpeed = piMetrics?["speedMethod"] as? String == "aa-approx-v1"
       && measuredTokens > 0 && durationMs > 0 && measuredSpeed.isFinite
-    guard usage != nil || outputUsage != nil else { return nil }
+    // Session billing/cache counters come from per-turn usage, never context
+    // snapshots (which overlap across requests). Recompute from the projection
+    // so refreshes and in-progress metric updates cannot double-count a turn.
+    let turnUsages = turns.compactMap { $0["turnTokenUsage"] as? JSON }
+    guard usage != nil || outputUsage != nil || !turnUsages.isEmpty else { return nil }
     let used = usage?["usedTokens"] as? Int ?? 0
     let max = usage?["maxTokens"] as? Int ?? 0
-    let cached = outputUsage?["cachedInputTokens"] as? Int ?? usage?["cachedInputTokens"] as? Int ?? 0
-    let creation = outputUsage?["cacheCreationTokens"] as? Int ?? 0
-    // Normalized turn input includes cache reads/writes; SessionStats does not.
-    let input = (outputUsage?["inputTokens"] as? Int)
-      .map { Swift.max(0, $0 - cached - creation) } ?? usage?["inputTokens"] as? Int ?? 0
+    var input = 0
+    var cached = 0
+    var creation = 0
+    for turnUsage in turnUsages {
+      let reads = turnUsage["cachedInputTokens"] as? Int ?? 0
+      let writes = turnUsage["cacheCreationTokens"] as? Int ?? 0
+      // Normalized turn input includes cache reads/writes; SessionStats does not.
+      input += Swift.max(0, (turnUsage["inputTokens"] as? Int ?? 0) - reads - writes)
+      cached += reads
+      creation += writes
+    }
+    let costs = turns.compactMap { turn -> Double? in
+      guard let metrics = turn["piMetrics"] as? JSON,
+        let cost = metrics["totalCostUsd"] as? Double, cost.isFinite, cost >= 0
+      else { return nil }
+      return cost
+    }
     return SessionStats(
-      cost: piMetrics?["totalCostUsd"] as? Double,
+      cost: costs.isEmpty ? nil : costs.reduce(0, +),
       contextPercent: max > 0 ? Double(used) / Double(max) * 100 : nil,
       totalTokens: used, inputTokens: input, cacheReadTokens: cached, cacheWriteTokens: creation,
       outputTokensPerSecond: validSpeed ? measuredSpeed : nil,

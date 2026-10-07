@@ -404,6 +404,14 @@ final class T3DesktopClient: ObservableObject {
       return nativeProvider
     }
   }
+  func usageSummary(period: UsagePeriod) async throws -> UsageSnapshot {
+    try await waitUntilReady()
+    let summary = try await rpc(
+      "server.getUsageSummary", payload: T3UsageSummary.input(period: period), timeoutSeconds: 120)
+    try Task.checkCancellation()
+    return try T3UsageSummary.snapshot(summary, period: period)
+  }
+
   func scheduledTasksRPC(_ method: String, payload: JSON = [:]) async throws -> JSON {
     guard
       [

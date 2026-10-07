@@ -239,7 +239,7 @@ struct ContentView: View {
         .accessibilityHidden(selectedPage != .conversation)
 
         if selectedPage == .usage {
-          UsageDashboardView()
+          UsageDashboardView(server: workspace.server)
             .transition(.opacity)
         }
       }
@@ -2159,27 +2159,6 @@ private struct ActivityEntryView: View {
                       .foregroundStyle(.red)
                   }
                 }
-                if entry.kind == .tool, let toolInput = entry.toolInput, !toolInput.isEmpty {
-                  if entry.toolName == "read" {
-                    ReadToolInputView(input: toolInput)
-                  } else if entry.toolName == "codemode" {
-                    HStack(spacing: 6) {
-                      Text("JavaScript · \(toolInput.components(separatedBy: "\n").count) 行")
-                      if nestedCallCount > 0 {
-                        Text("· \(nestedCallCount) 次嵌套调用")
-                      }
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                  } else {
-                    Text(toolInput)
-                      .font(.system(.caption, design: .monospaced))
-                      .lineLimit(3)
-                      .foregroundStyle(.primary.opacity(0.88))
-                      .fixedSize(horizontal: false, vertical: true)
-                      .frame(maxWidth: .infinity, alignment: .leading)
-                  }
-                }
               }
               Spacer(minLength: 8)
               if hasVisibleDetails {
@@ -2192,6 +2171,34 @@ private struct ActivityEntryView: View {
             .contentShape(Rectangle())
           }
           .buttonStyle(.plain)
+
+          // Keep selectable input outside the disclosure button so dragging to
+          // copy a command does not toggle the tool's output.
+          if entry.kind == .tool, let toolInput = entry.toolInput, !toolInput.isEmpty {
+            Group {
+              if entry.toolName == "read" {
+                ReadToolInputView(input: toolInput)
+              } else if entry.toolName == "codemode" {
+                HStack(spacing: 6) {
+                  Text("JavaScript · \(toolInput.components(separatedBy: "\n").count) 行")
+                  if nestedCallCount > 0 {
+                    Text("· \(nestedCallCount) 次嵌套调用")
+                  }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+              } else {
+                Text(toolInput)
+                  .font(.system(.caption, design: .monospaced))
+                  .lineLimit(3)
+                  .foregroundStyle(.primary.opacity(0.88))
+                  .fixedSize(horizontal: false, vertical: true)
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .textSelection(.enabled)
+              }
+            }
+            .padding(.leading, 31)
+          }
 
           if expanded && hasVisibleDetails {
             if entry.toolName == "codemode", let code = entry.toolInput,

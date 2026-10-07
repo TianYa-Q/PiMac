@@ -3,7 +3,6 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createReadStream } from 'node:fs';
-import { createInterface } from 'node:readline';
 import { createPiAccountManagement } from '../../Sources/PiMacApp/Resources/t3-bridge/pi-account-management.mjs';
 
 const providerKinds = { anthropic: 'claude', 'openai-codex': 'codex', openai: 'codex',
@@ -23,6 +22,23 @@ export function parsePiUsage(entry, sessionId) {
     fast: false, dedupeKey: typeof entry.id === 'string' ? `pi:${entry.id}:${timestampMs}` : null };
 }
 
+// JSON strings may contain U+2028/U+2029. Node readline treats these as line
+// boundaries, but JSONL records are separated only by LF (optionally CRLF).
+async function* jsonLines(stream) {
+  let fragments = [];
+  for await (const chunk of stream) {
+    let start = 0;
+    for (let end = chunk.indexOf('\n'); end !== -1; end = chunk.indexOf('\n', start)) {
+      fragments.push(chunk.slice(start, end));
+      yield fragments.join('');
+      fragments = [];
+      start = end + 1;
+    }
+    if (start < chunk.length) fragments.push(chunk.slice(start));
+  }
+  if (fragments.length) yield fragments.join('');
+}
+
 export async function collectPiUsage({ agentDirectory = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent') } = {}) {
   const root = path.join(agentDirectory, 'sessions');
   const groups = new Map();
@@ -37,11 +53,9 @@ export async function collectPiUsage({ agentDirectory = process.env.PI_CODING_AG
       if (!item.isFile() || !item.name.endsWith('.jsonl')) continue;
       const byProvider = new Map();
       let sessionId = file;
-      const stream = createReadStream(file);
-      const lines = createInterface({ input: stream, crlfDelay: Infinity });
-      stream.on('error', () => { partial = true; lines.close(); });
+      const stream = createReadStream(file, { encoding: 'utf8' });
       try {
-        for await (const line of lines) {
+        for await (const line of jsonLines(stream)) {
           let entry;
           try { entry = JSON.parse(line); } catch { partial = true; continue; }
           if (entry.type === 'session' && typeof entry.id === 'string') sessionId = entry.id;
@@ -51,7 +65,7 @@ export async function collectPiUsage({ agentDirectory = process.env.PI_CODING_AG
           byProvider.get(record.provider).push(record);
         }
       } catch { partial = true; }
-      finally { lines.close(); stream.destroy(); }
+      finally { stream.destroy(); }
       for (const [provider, records] of byProvider) {
         if (!groups.has(provider)) groups.set(provider, []);
         groups.get(provider).push({ path: file, records });
