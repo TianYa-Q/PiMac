@@ -45,6 +45,7 @@ final class WorkspaceModel: ObservableObject {
   private var remoteSubmissionHolds: Set<ObjectIdentifier> = []
   private let persistsState: Bool
   private var shellLoaded = false
+  @Published private(set) var sessionCatalogRevision = 0
   private var projectImportTask: Task<Void, Never>?
 
   init(telegram: TelegramControl? = nil, restoreUserState: Bool = true) {
@@ -106,11 +107,16 @@ final class WorkspaceModel: ObservableObject {
   }
   var canRestartSafely: Bool { restartBlockers.isEmpty }
   private func applyShell(_ snapshot: [String: Any]) {
-    projects = (snapshot["projects"] as? [[String: Any]] ?? []).compactMap { project in
+    let nextProjects = (snapshot["projects"] as? [[String: Any]] ?? []).compactMap {
+      project -> WorkspaceProject? in
       guard let root = project["workspaceRoot"] as? String else { return nil }
       return WorkspaceProject(
         url: URL(fileURLWithPath: root), customName: project["title"] as? String)
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    if projects != nextProjects { projects = nextProjects }
+    if sessionCatalogRevision != server.sessionCatalogRevision {
+      sessionCatalogRevision = server.sessionCatalogRevision
+    }
     for tab in tabs {
       tab.model.refreshCodexAccounts()
       if let project = tab.model.projectURL { tab.model.updateCatalog(sessions(in: project)) }
@@ -212,7 +218,7 @@ final class WorkspaceModel: ObservableObject {
   func isLoadingSessions(in projectURL: URL) -> Bool { !server.isConnected }
   func sessions(in projectURL: URL) -> [SessionItem] {
     guard let project = server.projectID(for: projectURL) else { return [] }
-    return Self.sessionCatalog(threads: server.threads, projectID: project)
+    return server.sessions(projectID: project)
   }
 
   static func sessionCatalog(threads: [[String: Any]], projectID: String) -> [SessionItem] {

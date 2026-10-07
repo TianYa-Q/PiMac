@@ -485,7 +485,9 @@ final class AppModel: ObservableObject {
       $0["id"] as? String == "fastMode"
     } == true
   }
-  func updateCatalog(_ values: [SessionItem]) { sessions = values }
+  func updateCatalog(_ values: [SessionItem]) {
+    if sessions != values { sessions = values }
+  }
   private func apply(_ detail: [String: Any]) {
     guard let thread = detail["thread"] as? [String: Any], thread["id"] as? String == threadID
     else { return }
@@ -763,7 +765,8 @@ final class AppModel: ObservableObject {
       extensionUISerial = 0
       answeredDialogIDs.removeAll()
     }
-    isManagingAccounts = snapshot["busy"] as? Bool ?? false
+    let busy = snapshot["busy"] as? Bool ?? false
+    if isManagingAccounts != busy { isManagingAccounts = busy }
     let requests = snapshot["requests"] as? [[String: Any]] ?? []
     let ids = Set(requests.compactMap { $0["id"] as? String })
     answeredDialogIDs.formIntersection(ids)

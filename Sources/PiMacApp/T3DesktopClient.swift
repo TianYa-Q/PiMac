@@ -24,6 +24,17 @@ final class T3DesktopClient: ObservableObject {
   private var threadRevisions: [String: Int] = [:]
   private let searchIndex = ServerSessionSearchIndex()
   private var hasDeliveredShell = false
+  private let sessionCatalog = SessionCatalogCache()
+
+  static func pollIntervalMilliseconds(hasRunningThread: Bool) -> Int {
+    hasRunningThread ? 500 : 2000
+  }
+
+  var sessionCatalogRevision: Int { sessionCatalog.rebuildCount }
+
+  func sessions(projectID: String) -> [SessionItem] {
+    sessionCatalog.sessions(projectID: projectID)
+  }
   private var syncedModelPreferences: Data?
   private let session: URLSession = {
     let config = URLSessionConfiguration.ephemeral
@@ -40,6 +51,7 @@ final class T3DesktopClient: ObservableObject {
       let snapshot = try? JSONSerialization.jsonObject(with: data) as? JSON
     {
       shell = snapshot
+      sessionCatalog.update(threads: threads)
     }
   }
 
@@ -81,7 +93,9 @@ final class T3DesktopClient: ObservableObject {
           if self.status != status { self.status = status }
           if (error as? ClientError) == .unauthorized { self.token = "" }
         }
-        try? await Task.sleep(for: .milliseconds(self.hasRunningThread ? 250 : 1000))
+        try? await Task.sleep(
+          for: .milliseconds(Self.pollIntervalMilliseconds(hasRunningThread: self.hasRunningThread))
+        )
       }
     }
   }
@@ -231,6 +245,10 @@ final class T3DesktopClient: ObservableObject {
       let escaped = id.addingPercentEncoding(
         withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
       let nativeDetail = try await request("/api/orchestration/threads/\(escaped)")
+      guard generation == current else { return }
+      // Check the native revision before traversing the full transcript or writing metrics.
+      let revision = nativeDetail["snapshotSequence"] as? Int ?? -1
+      if revision >= 0, threadRevisions[id] == revision { continue }
       if let stats = T3V2Presentation.stats(nativeDetail),
         let data = try? JSONEncoder().encode(stats)
       {
@@ -239,11 +257,9 @@ final class T3DesktopClient: ObservableObject {
       let detail = T3V2Presentation.detail(nativeDetail)
       let ui = T3V2Presentation.requests(nativeDetail)
       for callback in watches.values.filter({ $0.0 == id }).map({ $0.2 }) { callback(ui) }
-      let revision = detail["snapshotSequence"] as? Int ?? -1
-      if threadRevisions[id] == revision { continue }
       let (hydrated, complete) = await hydrateImages(detail)
       guard generation == current else { return }
-      if complete { threadRevisions[id] = revision }
+      if complete, revision >= 0 { threadRevisions[id] = revision }
       let callbacks = watches.values.filter { $0.0 == id }.map { $0.1 }
       for callback in callbacks { callback(hydrated) }
     }
@@ -254,6 +270,7 @@ final class T3DesktopClient: ObservableObject {
     guard !hasDeliveredShell || !NSDictionary(dictionary: shell).isEqual(to: next) else { return }
     hasDeliveredShell = true
     shell = next
+    sessionCatalog.update(threads: threads)
     for event in taskStatusTracker.consume(threads) { onTaskStatus?(event) }
     if let data = try? JSONSerialization.data(withJSONObject: next) {
       defaults.set(data, forKey: "t3DesktopShellCache")
