@@ -252,6 +252,67 @@ test('quota HTTP failures do not await a hanging response cleanup', { timeout: 2
   assert.equal(result.gemini.capturedAt, undefined);
 });
 
+test('failed refreshes retain last successful windows and sample time, then recover', async t => {
+  let fail = false, used = 25;
+  const f = fixture(t, { response: url => fail
+    ? new Response('secret-error', { status: 503 })
+    : new Response(JSON.stringify(url.endsWith('/usage')
+      ? { rate_limit: { primary_window: { used_percent: used } } }
+      : { available_count: 2 })) });
+  const first = await f.manager.accountStatus({ provider: 'openai' });
+  fail = true;
+  for (let i = 0; i < 2; i++) {
+    f.advance();
+    const result = await f.manager.accountStatus({ provider: 'openai', force: true });
+    assert.deepEqual(result.accounts[0].primary, first.accounts[0].primary);
+    assert.deepEqual(result.accounts[0].resetCredits, first.accounts[0].resetCredits);
+    assert.equal(result.accounts[0].capturedAt, first.accounts[0].capturedAt);
+    assert.match(result.accounts[0].error, /查询失败/);
+    assert.doesNotMatch(JSON.stringify(result), /secret/);
+  }
+  fail = false; used = 50; f.advance();
+  const recovered = await f.manager.accountStatus({ provider: 'openai', force: true });
+  assert.equal(recovered.accounts[0].primary.remainingPercent, 50);
+  assert.equal(recovered.accounts[0].error, undefined);
+  assert.ok(recovered.accounts[0].capturedAt > first.accounts[0].capturedAt);
+});
+
+test('old quota cannot transfer to a replacement identity, hidden or removed account', async t => {
+  let fail = false;
+  const f = fixture(t, { response: () => fail ? new Response('', { status: 503 }) : undefined });
+  await f.manager.accountStatus({ provider: 'openai' });
+  fail = true;
+  f.write('auth.json', { openai: { ...f.credential, accountId: 'replacement' } });
+  const replaced = await f.manager.accountStatus({ provider: 'openai', force: true });
+  assert.equal(replaced.accounts[0].primary, undefined);
+  f.write('auth.json', { openai: f.credential });
+  const restored = await f.manager.accountStatus({ provider: 'openai', force: true });
+  assert.equal(restored.accounts[0].primary, undefined);
+  fail = false;
+  await f.manager.accountStatus({ provider: 'openai', force: true });
+  f.write('openai-chatgpt-account-usage.json', { hiddenAccounts: ['Pi 已保存授权'] });
+  const hidden = await f.manager.accountStatus({ provider: 'openai', force: true });
+  assert.equal(hidden.accounts[0].primary, undefined);
+  f.write('auth.json', {});
+  assert.deepEqual((await f.manager.accountStatus({ provider: 'openai', force: true })).accounts, []);
+});
+
+test('Gemini failures keep the original sample but never cross grants', async t => {
+  let fail = false;
+  const f = fixture(t, { response: () => fail ? new Response('', { status: 503 })
+    : new Response(JSON.stringify({ models: { gemini: { quotaInfo: { remainingFraction: 0.5 } } } })) });
+  f.write('auth.json', { antigravity: f.credential });
+  const first = await f.manager.accountStatus({ provider: 'antigravity' });
+  fail = true; f.advance();
+  const stale = await f.manager.accountStatus({ provider: 'antigravity', force: true });
+  assert.deepEqual(stale.gemini.quotas, first.gemini.quotas);
+  assert.equal(stale.gemini.capturedAt, first.gemini.capturedAt);
+  assert.equal(stale.gemini.kind, 'failed');
+  f.write('auth.json', { antigravity: { ...f.credential, access: 'secret-access', projectId: 'new-project' } });
+  const replaced = await f.manager.accountStatus({ provider: 'antigravity', force: true });
+  assert.deepEqual(replaced.gemini.quotas, []);
+});
+
 test('unsupported providers and closed managers reject without network', async t => {
   const f = fixture(t); await assert.rejects(f.manager.accountStatus({ provider: 'unsupported' }));
   f.manager.close(); await assert.rejects(f.manager.accountStatus({ provider: 'openai' })); assert.equal(f.calls(), 0);

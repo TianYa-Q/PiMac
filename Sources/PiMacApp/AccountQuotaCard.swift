@@ -181,7 +181,8 @@ private struct CodexAccountsCard: View, Equatable {
           if !snapshot.message.isEmpty {
             Text(snapshot.message)
               .font(.caption2)
-              .foregroundStyle(.red)
+              .foregroundStyle(snapshot.accounts.contains { $0.primary != nil || $0.secondary != nil }
+                || snapshot.gemini?.quotas.isEmpty == false ? Color.orange : Color.red)
               .lineLimit(1)
               .truncationMode(.tail)
               .help(snapshot.message)
@@ -292,10 +293,16 @@ private struct CodexAccountsCard: View, Equatable {
       // The hover card extends over the quota rows, so its source row must paint above them.
       .zIndex(1)
       if let error = account.error {
-        Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2).help(error)
-      } else if account.primary == nil && account.secondary == nil {
+        let hasCachedQuota = account.primary != nil || account.secondary != nil
+        Text(hasCachedQuota ? "刷新失败，显示上次额度" : error)
+          .font(.caption2).foregroundStyle(hasCachedQuota ? Color.orange : Color.red)
+          .lineLimit(2).help(error)
+      }
+      if account.primary == nil && account.secondary == nil {
+        if account.error == nil {
         Text(account.isHidden ? "额度已隐藏" : "暂无额度数据，可刷新重试")
           .font(.caption2).foregroundStyle(.secondary)
+        }
       } else {
         if let window = account.primary { usageRow(window, label: windowLabel(window)) }
         if let window = account.secondary { usageRow(window, label: windowLabel(window)) }
@@ -321,9 +328,14 @@ private struct CodexAccountsCard: View, Equatable {
         Spacer()
       }
       if let error = status.error {
-        Text(error).font(.caption2).foregroundStyle(.red).lineLimit(2).help(error)
-      } else if status.quotas.isEmpty {
-        Text("暂无额度数据").font(.caption2).foregroundStyle(.secondary)
+        Text(status.quotas.isEmpty ? error : "刷新失败，显示上次额度")
+          .font(.caption2).foregroundStyle(status.quotas.isEmpty ? Color.red : Color.orange)
+          .lineLimit(2).help(error)
+      }
+      if status.quotas.isEmpty {
+        if status.error == nil {
+          Text("暂无额度数据").font(.caption2).foregroundStyle(.secondary)
+        }
       } else {
         ForEach(status.quotas) { quota in
           HStack(spacing: 4) {

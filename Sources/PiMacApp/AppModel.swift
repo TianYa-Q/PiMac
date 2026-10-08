@@ -838,6 +838,15 @@ final class AppModel: ObservableObject {
     queuedPrompts.swapAt(from, to)
   }
   func editMessage(_ text: String) { composerText = text }
+  func replyImage(for url: URL) async throws -> PromptAttachment {
+    guard let path = T3ReplyImageLinks.path(for: url), let id = threadID, let server else {
+      throw T3DesktopClient.ClientError.rejected
+    }
+    let image = try await server.replyImage(path: path, threadID: id)
+    guard threadID == id else { throw CancellationError() }
+    return image
+  }
+
   func removeAttachment(_ attachment: PromptAttachment) {
     attachments.removeAll { $0.id == attachment.id }
   }

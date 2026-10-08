@@ -22,6 +22,9 @@ final class T3DesktopClient: ObservableObject {
   private var watches: [UUID: (String, (JSON) -> Void, (JSON) -> Void)] = [:]
   private var imageCache: [String: PromptAttachment] = [:]
   private var threadRevisions: [String: Int] = [:]
+  private var replyImageCache: [String: [PromptAttachment]] = [:]
+  private var toolDetailCache: [String: JSON] = [:]
+  private var imageFailures: [String: Int] = [:]
   private let searchIndex = ServerSessionSearchIndex()
   private var hasDeliveredShell = false
   private let sessionCatalog = SessionCatalogCache()
@@ -114,6 +117,10 @@ final class T3DesktopClient: ObservableObject {
     isConnected = false
     watches.removeAll()
     threadRevisions.removeAll()
+    imageCache.removeAll()
+    replyImageCache.removeAll()
+    toolDetailCache.removeAll()
+    imageFailures.removeAll()
     hasDeliveredShell = false
     taskStatusTracker = TaskStatusTracker()
   }
@@ -136,6 +143,12 @@ final class T3DesktopClient: ObservableObject {
     receive: @escaping (JSON) -> Void
   ) {
     watches[owner] = (id, receive, receiveUI)
+    // Reopening a thread retries failed images without re-downloading successful ones.
+    for key in imageFailures.keys {
+      toolDetailCache.removeValue(forKey: key)
+      replyImageCache.removeValue(forKey: key)
+    }
+    imageFailures.removeAll()
     threadRevisions.removeValue(forKey: id)
     requestRefresh()
   }
@@ -254,12 +267,14 @@ final class T3DesktopClient: ObservableObject {
       {
         defaults.set(data, forKey: "t3DesktopV2Metrics.\(id)")
       }
-      let detail = T3V2Presentation.detail(nativeDetail)
+      let (richNative, toolsComplete) = await hydrateToolImages(nativeDetail, threadID: id)
+      let detail = T3V2Presentation.detail(richNative)
       let ui = T3V2Presentation.requests(nativeDetail)
       for callback in watches.values.filter({ $0.0 == id }).map({ $0.2 }) { callback(ui) }
-      let (hydrated, complete) = await hydrateImages(detail)
+      let (withReplies, repliesComplete) = await hydrateReplyImages(detail, threadID: id)
+      let (hydrated, complete) = await hydrateImages(withReplies)
       guard generation == current else { return }
-      if complete, revision >= 0 { threadRevisions[id] = revision }
+      if complete, repliesComplete, toolsComplete, revision >= 0 { threadRevisions[id] = revision }
       let callbacks = watches.values.filter { $0.0 == id }.map { $0.1 }
       for callback in callbacks { callback(hydrated) }
     }
@@ -516,6 +531,197 @@ final class T3DesktopClient: ObservableObject {
     }
   }
 
+  /// Timeline snapshots deliberately omit output. Use official lazy detail reads,
+  /// then download raster images through signed assets without putting bytes in chat text.
+  private func hydrateToolImages(_ native: JSON, threadID: String) async -> (JSON, Bool) {
+    var native = native
+    guard var projection = native["projection"] as? JSON,
+      var rows = projection["visibleTurnItems"] as? [JSON], let base = service?.serverURL
+    else { return (native, true) }
+    let current = generation
+    var complete = true
+    var reads = 0
+    var downloads = 0
+    itemLoop: for index in rows.indices {
+      guard var item = rows[index]["item"] as? JSON,
+        item["type"] as? String == "dynamic_tool",
+        !T3V2Presentation.active.contains(item["status"] as? String ?? ""),
+        let id = item["id"] as? String, let revision = item["updatedAt"] as? String
+      else { continue }
+      let ownerThreadID = item["threadId"] as? String ?? threadID
+      let key = "\(base.absoluteString)|\(ownerThreadID)|\(id)|\(revision)"
+      if let cached = toolDetailCache[key] {
+        rows[index]["item"] = cached
+        continue
+      }
+      guard reads < 8 else {
+        complete = false
+        continue
+      }
+      reads += 1
+      var images: [PromptAttachment] = []
+      do {
+        let response = try await rpc(
+          "orchestration.getTurnItem",
+          payload: [
+            "threadId": ownerThreadID, "itemId": id, "revision": revision,
+          ])
+        guard let detail = response["item"] as? JSON else {
+          toolDetailCache[key] = item
+          continue
+        }
+        for (imageIndex, mime) in T3ToolOutputImages.mimeTypes(detail["output"]).enumerated() {
+          let imageKey = "\(key)|\(imageIndex)"
+          if let cached = imageCache[imageKey] {
+            images.append(cached)
+            continue
+          }
+          guard downloads < 8 else {
+            complete = false
+            item["localImages"] = images
+            rows[index]["item"] = item
+            continue itemLoop
+          }
+          downloads += 1
+          let signed = try await rpc(
+            "assets.createUrl",
+            payload: [
+              "resource": [
+                "_tag": "tool-output-image", "threadId": ownerThreadID, "itemId": id,
+                "index": imageIndex,
+              ]
+            ])
+          let image = try await downloadReplyImage(signed, key: imageKey, mime: mime)
+          guard generation == current else { return (native, false) }
+          imageCache[imageKey] = image
+          images.append(image)
+        }
+        item["localImages"] = images
+      } catch {
+        item["localImages"] = images
+        let attempts = (imageFailures[key] ?? 0) + 1
+        imageFailures[key] = attempts
+        if attempts < 3 {
+          complete = false
+          rows[index]["item"] = item
+          continue
+        }
+      }
+      guard generation == current else { return (native, false) }
+      toolDetailCache[key] = item
+      rows[index]["item"] = item
+    }
+    projection["visibleTurnItems"] = rows
+    native["projection"] = projection
+    return (native, complete)
+  }
+
+  /// Reply file links use the same official media assets as the iOS client.
+  private func hydrateReplyImages(_ detail: JSON, threadID: String) async -> (JSON, Bool) {
+    var detail = detail
+    guard var thread = detail["thread"] as? JSON,
+      var messages = thread["messages"] as? [JSON], let base = service?.serverURL
+    else { return (detail, true) }
+    let current = generation
+    var complete = true
+    var downloads = 0
+    for index in messages.indices {
+      guard messages[index]["role"] as? String == "assistant",
+        messages[index]["streaming"] as? Bool != true,
+        let text = messages[index]["text"] as? String,
+        let id = messages[index]["id"] as? String
+      else { continue }
+      let paths = T3ReplyImageLinks.paths(in: text)
+      guard !paths.isEmpty else { continue }
+      let digest = SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+      let key = "\(base.absoluteString)|\(threadID)|\(id)|\(digest)"
+      if let cached = replyImageCache[key] {
+        messages[index]["localImages"] = cached
+        continue
+      }
+      var images: [PromptAttachment] = []
+      var messageComplete = true
+      for path in paths {
+        let imageKey = "\(base.absoluteString)|\(threadID)|\(id)|\(path)"
+        if let cached = imageCache[imageKey] {
+          images.append(cached)
+          continue
+        }
+        guard downloads < 8 else {
+          messageComplete = false
+          break
+        }
+        downloads += 1
+        do {
+          let signed = try await rpc(
+            "assets.createUrl",
+            payload: [
+              "resource": [
+                "_tag": "media-file", "threadId": threadID, "path": path,
+              ]
+            ])
+          let image = try await downloadReplyImage(
+            signed, key: imageKey,
+            mime: T3ReplyImageLinks.mimeType(path)!)
+          guard generation == current else { return (detail, false) }
+          imageCache[imageKey] = image
+          images.append(image)
+        } catch {
+          // Retry transient errors, but missing/invalid files cannot cause endless polls.
+          let attempts = (imageFailures[key] ?? 0) + 1
+          imageFailures[key] = attempts
+          if attempts < 3 { messageComplete = false }
+          continue
+        }
+      }
+      guard generation == current else { return (detail, false) }
+      messages[index]["localImages"] = images
+      if messageComplete { replyImageCache[key] = images } else { complete = false }
+    }
+    thread["messages"] = messages
+    detail["thread"] = thread
+    return (detail, complete)
+  }
+
+  func replyImage(path: String, threadID: String) async throws -> PromptAttachment {
+    guard let mime = T3ReplyImageLinks.mimeType(path), let base = service?.serverURL else {
+      throw ClientError.rejected
+    }
+    let signed = try await rpc(
+      "assets.createUrl",
+      payload: [
+        "resource": [
+          "_tag": "media-file", "threadId": threadID, "path": path,
+        ]
+      ])
+    return try await downloadReplyImage(
+      signed,
+      key: "\(base.absoluteString)|\(threadID)|\(path)", mime: mime)
+  }
+
+  private func downloadReplyImage(_ signed: JSON, key: String, mime: String) async throws
+    -> PromptAttachment
+  {
+    guard let base = service?.serverURL,
+      let relative = signed["relativeUrl"] as? String, relative.hasPrefix("/api/assets/"),
+      let url = URL(string: base.absoluteString + relative), url.host == base.host,
+      url.port == base.port, url.scheme == base.scheme
+    else { throw ClientError.rejected }
+    let current = generation
+    let (bytes, response) = try await session.bytes(from: url)
+    guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+      response.expectedContentLength <= T3ToolImageCache.maxBytes,
+      response.mimeType?.lowercased() == mime
+    else { throw ClientError.rejected }
+    var data = Data()
+    for try await byte in bytes {
+      guard data.count < T3ToolImageCache.maxBytes else { throw ClientError.rejected }
+      data.append(byte)
+    }
+    guard generation == current else { throw CancellationError() }
+    return try T3ToolImageCache.store(data, key: key, mimeType: mime)
+  }
+
   private func hydrateImages(_ detail: JSON) async -> (JSON, Bool) {
     var detail = detail
     guard var thread = detail["thread"] as? JSON else { return (detail, true) }
@@ -557,8 +763,11 @@ final class T3DesktopClient: ObservableObject {
     var messages = thread["messages"] as? [JSON] ?? []
     for index in messages.indices {
       if let images = messages[index]["attachments"] as? [JSON], !images.isEmpty {
-        messages[index]["localImages"] = await attachments(
-          images.filter { $0["type"] as? String == "image" })
+        let existing = messages[index]["localImages"] as? [PromptAttachment] ?? []
+        messages[index]["localImages"] =
+          existing
+          + (await attachments(
+            images.filter { $0["type"] as? String == "image" }))
       }
     }
     thread["messages"] = messages

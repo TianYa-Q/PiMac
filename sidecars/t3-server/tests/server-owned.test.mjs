@@ -279,6 +279,35 @@ test('official extension dialogs respond through runtime requests and /compact u
   assert(!records.some(r => r.command === 'prompt' && r.message === '/compact'));
 });
 
+test('Pi tool images survive lazy reads, signed downloads and server restart', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-tool-images-'));
+  let f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const threadId = await f.create();
+  await f.dispatch(f.message(threadId, 'tool-image'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+  const item = (await f.snapshot(threadId)).turnItems.find(item => item.toolName === 'generate_image');
+  assert(item);
+  const otherThreadId = await f.create();
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1cAAAAASUVORK5CYII=', 'base64');
+  for (const restart of [false, true]) {
+    if (restart) { await f.close(); f = await open(directory); }
+    const detail = await f.rpc('orchestration.getTurnItem', { threadId, itemId: item.id, revision: item.updatedAt });
+    const blocks = Array.isArray(detail.item.output) ? detail.item.output : detail.item.output.content;
+    const image = blocks.find(block => block.type === 'image');
+    assert.equal(image.mimeType, 'image/png');
+    assert.equal(image.data, undefined);
+    const resource = { _tag: 'tool-output-image', threadId, itemId: item.id, index: 0 };
+    const signed = await f.rpc('assets.createUrl', { resource });
+    const asset = await fetch(f.gateway.serverURL + signed.relativeUrl);
+    assert.equal(asset.status, 200);
+    assert.equal(asset.headers.get('content-type'), 'image/png');
+    assert.deepEqual(Buffer.from(await asset.arrayBuffer()), bytes);
+    await assert.rejects(f.rpc('assets.createUrl', { resource: { ...resource, threadId: otherThreadId } }));
+    await assert.rejects(f.rpc('assets.createUrl', { resource: { ...resource, index: 8 } }));
+  }
+});
+
 test('official attachment persistence, signed asset access and Pi image delivery', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-official-images-'));
   const f = await open(directory);

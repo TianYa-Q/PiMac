@@ -16,7 +16,7 @@ Pi runtime：原生认证、模型、扩展、skills、上下文和 session 文�
 - 桌面写入走官方 `projects.mutate` 和 `orchestration.dispatchCommand`。消息、模型、取消、扩展回答分别使用 `message.dispatch`、`thread.model-selection.set`、`run.interrupt` 和 `runtime-request.respond`。
 - HTTP 快照读取必须带 `x-t3-orchestration-protocol: 2`；WebSocket 必须带 `orchestrationProtocol=2`。旧客户端不兼容，不绕过服务端版本检查。
 - `T3V2Presentation.swift` 只将官方 V2 快照映射为既有 SwiftUI 展示结构，不写入第二套投影或回执。桌面仍轮询快照（运行中 250ms，空闲 1000ms）；手机使用官方订阅。
-- `native.mjs` / `management.mjs` 仅提供 Mac 宿主访问策略、桌面凭据和 T3 Connect 管理。上游源码通过 SHA-256 manifest 固定，构建补丁仅保留宿主所需的 loopback/auth/Connect 和未打包其他 provider/native dependency 的策略；PiDriver、PiAdapterV2、PiRpc 本身不打补丁。
+- `native.mjs` / `management.mjs` 仅提供 Mac 宿主访问策略、桌面凭据和 T3 Connect 管理。上游源码通过 SHA-256 manifest 固定，构建补丁仅保留宿主所需的 loopback/auth/Connect 和未打包其他 provider/native dependency 的策略；PiDriver、PiRpc 本身不打补丁；PiAdapterV2 的构建补丁保留逐轮 usage 遥测，并仅在工具结果包含官方支持的栅格图片块时保留原结果，供官方签名资源读取。
 
 ## 已接入
 
@@ -39,7 +39,8 @@ Pi runtime：原生认证、模型、扩展、skills、上下文和 session 文�
 
 ## 明确的功能差异
 
-- 官方 V2 的 wire projection 会移除任意工具输出、完整 diff 和工具生成图片；当前桌面保留工具名称/输入/状态，不恢复旧私有富输出链路。
+- 官方 V2 的 wire projection 仍移除任意工具输出、完整 diff 和图片字节。桌面对已完成 dynamic_tool 使用官方 `orchestration.getTurnItem` 发现图片元数据，再通过 `assets.createUrl` 的 `tool-output-image` 签名资源下载；生成图片作为独立回复附件展示，不受工具组折叠影响。没有恢复旧私有富输出链路。
+- 回复中的显式 Markdown 本地图片链接通过官方 `media-file` 资源解析（相对路径遵循线程 workspace/worktree），自动显示缩略图，点击链接或缩略图均可预览。支持 PNG/JPEG/WebP/GIF，最多每条 8 张、每张 20 MB；验证 MIME 与图片尺寸，不自动抓取远程 URL、代码示例或 SVG。失败有限重试，重新打开线程可再次尝试。
 - codemode 的嵌套调用按上游提供的独立工具项展示，不再自研聚合 runtime 事件。
 - Pi 的 setStatus/title/widget 等终端装饰上游忽略。账户额度现在由独立的本机只读管理模块查询，不依赖 runtime status：支持 openai/openai-codex 的原生 OAuth 和 account-usage 多账户存储，按 Provider 隔离，缓存一分钟，手动刷新绕过缓存。读取仅接受当前用户的私有普通文件，返回字段白名单，不返回凭据、不写 auth/session、不触发付费 warm-up。过期授权明确报错，刷新授权仍由 Pi/扩展负责。Gemini 额度、reset credits 和线程授权绑定尚未补齐。
 - 原生 auth 与多账户列表按稳定 ChatGPT account ID（含 token 内的身份信息）合并，不因 token 刷新重复显示。匹配后保留用户账户名称，只为本次查询选用更新的授权，不改写存储；未匹配项标为“Pi 已保存授权”，不标为默认或当前线程账户。Telegram 未确认线程绑定时明确显示“未确认”，只读列表不提供切换按钮。

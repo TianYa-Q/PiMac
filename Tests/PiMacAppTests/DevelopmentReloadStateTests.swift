@@ -19,6 +19,23 @@ struct DevelopmentReloadStateTests {
     #expect(settledAgain)
   }
 
+  @Test func unfinishedBatchesBlockReloadUntilExplicitlyCompleted() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    #expect(!DevelopmentReloadState.editsPending(directory: directory))
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let first = directory.appendingPathComponent("first.json")
+    let second = directory.appendingPathComponent("second.json")
+    try Data("unfinished".utf8).write(to: first)
+    try Data("unfinished".utf8).write(to: second)
+    #expect(DevelopmentReloadState.editsPending(directory: directory))
+    try FileManager.default.removeItem(at: first)
+    #expect(DevelopmentReloadState.editsPending(directory: directory))
+    try FileManager.default.removeItem(at: second)
+    #expect(!DevelopmentReloadState.editsPending(directory: directory))
+    #expect(!DevelopmentReloadState.editsPending(directory: nil))
+  }
+
   @Test func neverPublishesIdleDuringShutdownOrAfterFailure() {
     for phase in [DevelopmentReloadState.Phase.draining, .exiting, .failed] {
       var state = DevelopmentReloadState()

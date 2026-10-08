@@ -16,6 +16,20 @@ struct DevelopmentReloadState {
     return now.timeIntervalSince(idleSince!) >= 2
   }
 
+  /// Explicit coding batches are a safety barrier, not a timeout-based heuristic.
+  static func editsPending(directory: URL?) -> Bool {
+    guard let directory else { return false }
+    do {
+      return try FileManager.default.contentsOfDirectory(
+        at: directory, includingPropertiesForKeys: nil
+      ).contains { $0.pathExtension == "json" }
+    } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+      return false
+    } catch {
+      return true  // An unreadable barrier cannot authorize a restart.
+    }
+  }
+
   mutating func begin() { phase = .draining }
   mutating func readyToExit() { phase = .exiting }
   mutating func fail() { phase = .failed }

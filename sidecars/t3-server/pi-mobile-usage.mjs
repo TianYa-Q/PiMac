@@ -88,6 +88,40 @@ function quotaWindow(value, id, label, milliseconds = false) {
     ...(Number.isFinite(reset) && reset > 0 && reset <= 8640000000000000 ? { resetsAt: new Date(reset).toISOString() } : {}),
     ...(Number.isFinite(duration) && duration > 0 ? { windowDurationMins: Math.floor(duration / 60) } : {}) };
 }
+function resetCreditExpirations(value) {
+  if (!Array.isArray(value?.credits) || !(value.availableCount > 0)) return [];
+  // Keep duplicate dates: separate credits may expire at the same instant.
+  return value.credits.flatMap(credit => {
+    const seconds = credit?.expiresAt;
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return [];
+    const milliseconds = seconds * 1000;
+    return milliseconds > 0 && milliseconds <= 8640000000000000 ? [milliseconds] : [];
+  }).sort((a, b) => a - b);
+}
+function resetCreditsSummary(value, expirations) {
+  if (!Number.isSafeInteger(value?.availableCount) || value.availableCount < 0) return null;
+  // The standard mobile contract supports only the next expiry, in ISO UTC.
+  return { availableCount: value.availableCount,
+    ...(expirations.length ? { nextExpiresAt: new Date(expirations[0]).toISOString() } : {}) };
+}
+const beijingTime = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+});
+function formatBeijingTime(milliseconds) {
+  const parts = Object.fromEntries(beijingTime.formatToParts(milliseconds).map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+}
+function mobileResetCreditsDetail(credits, expirations) {
+  if (!credits) return undefined;
+  // Compatibility with stock mobile: it hides the dedicated credits card when
+  // no redemption input exists, but already renders `plan` as account detail.
+  // Explicitly label this display-only fallback; never invent a credit ID.
+  const count = credits.availableCount;
+  const expiry = expirations.length
+    ? ` · 到期（北京时间 UTC+8）：${expirations.map(formatBeijingTime).join('；')}` : '';
+  return `${count} reset ${count === 1 ? 'credit' : 'credits'}${expiry} (read-only)`;
+}
 export async function readPiLimitSources(accounts, now = Date.now) {
   const checkedAt = new Date(now()).toISOString();
   const rows = [], errors = [];
@@ -97,8 +131,13 @@ export async function readPiLimitSources(accounts, now = Date.now) {
       for (const account of result.accounts ?? []) {
         if (account.hidden) continue;
         const windows = [quotaWindow(account.primary, 'primary', 'Session'), quotaWindow(account.secondary, 'secondary', 'Weekly')].filter(Boolean);
+        const expirations = resetCreditExpirations(account.resetCredits);
+        const resetCredits = resetCreditsSummary(account.resetCredits, expirations);
+        const resetDetail = mobileResetCreditsDetail(resetCredits, expirations);
         rows.push({ id: `${provider}:${account.name}`, driver: 'codex', email: account.name,
-          usageLimits: { checkedAt, windows, ...(account.error ? { unavailable: { reason: 'probeFailed', message: account.error } } : {}) } });
+          ...(resetDetail ? { plan: resetDetail } : {}),
+          usageLimits: { checkedAt, windows, ...(resetCredits ? { resetCredits } : {}),
+            ...(account.error ? { unavailable: { reason: 'probeFailed', message: account.error } } : {}) } });
       }
       if (provider === 'antigravity' && result.gemini?.kind !== 'unconfigured') {
         const windows = (result.gemini?.quotas ?? []).map((value, index) => quotaWindow(value, `gemini-${index}`, 'Gemini', true)).filter(Boolean);

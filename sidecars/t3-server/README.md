@@ -50,6 +50,24 @@ When deliberately changing the pin, archive the existing cache first.
 
 ## Protocol / upgrade
 
+Pi account Limits also project Codex/OpenAI banked resets to the stock mobile
+`usageLimits.resetCredits` contract: available count and earliest reported expiry
+(normalized from Unix seconds to ISO). Missing/invalid metadata is omitted without
+hiding quota windows; zero remains zero. Credit IDs, titles and redemption inputs
+are not published, and reset redemption remains blocked by host read-only policy.
+The stock mobile UI gates its dedicated credit card on redemption capability.
+For compatibility without rebuilding iOS, Pi accounts additionally put an
+explicitly labeled read-only reset summary in the existing account `plan`
+display field (not an actual subscription-plan assertion). Mobile already
+renders that field in account details and composer usage cards. This fallback
+shows count and all valid reported credit expiries, sorted chronologically and
+formatted in Beijing time (`Asia/Shanghai`, labeled UTC+8), retaining duplicate
+expiries for separate credits. Unknown expiries are not invented. The standard
+`nextExpiresAt` remains the earliest expiry in ISO UTC. This display fallback
+does not add a redeem button or a live countdown. No fabricated credit IDs
+or redemption capability are introduced. Restart the updated Server and refresh
+mobile Limits; mobile rendering still requires physical-device acceptance.
+
 Target mobile client: T3 iOS build **109** (physical-device acceptance pending).
 The EAS build number is remotely managed, not a Server version or a verified
 mapping to this commit. Clients require orchestration protocol **2**.

@@ -1,6 +1,14 @@
 {
   "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts": [
   {
+    "oldText": "import { mcpToolPresentation } from \"../../provider/McpToolPresentation.ts\";",
+    "newText": "import { toolOutputImages } from \"@t3tools/shared/toolOutput\";\nimport { mcpToolPresentation } from \"../../provider/McpToolPresentation.ts\";"
+  },
+  {
+    "oldText": "            input: args ?? {},\n            ...(outputText.length > 0 ? { output: outputText } : {}),",
+    "newText": "            input: args ?? {},\n            // Preserve raster image blocks for official lazy detail/signed asset reads.\n            ...(toolOutputImages(resultRecord).length > 0\n              ? { output: resultRecord }\n              : outputText.length > 0 ? { output: outputText } : {}),"
+  },
+  {
     "oldText": "import { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";",
     "newText": "import { startPiMessage, recordPiDelta, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";"
   },

@@ -68,6 +68,13 @@ enum T3V2Presentation {
           item["toolName"] as? String ?? item["title"] as? String
           ?? (type == "file_change" ? "edit" : type == "command_execution" ? "bash" : type)
         var data: JSON = ["toolName": name, "input": item["input"] ?? [:]]
+        if let images = item["localImages"] as? [PromptAttachment], !images.isEmpty {
+          // Keep generated images visible even when the work/tool group is collapsed.
+          messages.append([
+            "id": "\(item["id"] as? String ?? "")-images", "role": "assistant",
+            "text": "", "streaming": false, "localImages": images, "createdAt": date,
+          ])
+        }
         if let parent = item["parentItemId"] as? String {
           data["parentToolCallId"] = parent
         }
@@ -148,12 +155,15 @@ enum T3V2Presentation {
     // Only display calibrated streaming measurements. Legacy whole-request
     // timing is not comparable to AA, so do not silently fall back to it.
     let piMetrics = latest?["piMetrics"] as? JSON
-    let measuredTokens = piMetrics?["speedTokens"] as? Double
+    let measuredTokens =
+      piMetrics?["speedTokens"] as? Double
       ?? (piMetrics?["speedTokens"] as? Int).map(Double.init) ?? 0
-    let durationMs = piMetrics?["speedDurationMs"] as? Double
+    let durationMs =
+      piMetrics?["speedDurationMs"] as? Double
       ?? (piMetrics?["speedDurationMs"] as? Int).map(Double.init) ?? 0
     let measuredSpeed = measuredTokens * 1000 / durationMs
-    let validSpeed = piMetrics?["speedMethod"] as? String == "aa-approx-v1"
+    let validSpeed =
+      piMetrics?["speedMethod"] as? String == "aa-approx-v1"
       && measuredTokens > 0 && durationMs > 0 && measuredSpeed.isFinite
     // Session billing/cache counters come from per-turn usage, never context
     // snapshots (which overlap across requests). Recompute from the projection

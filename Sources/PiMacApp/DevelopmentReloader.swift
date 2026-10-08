@@ -9,6 +9,7 @@ final class DevelopmentReloader: ObservableObject {
   private let revisionFile: URL?
   private let stateFile: URL?
   private let requestFile: URL?
+  private let editDirectory: URL?
   private var reload = DevelopmentReloadState()
   private let restartFile: URL?
   private var lastStatus = ""
@@ -28,6 +29,9 @@ final class DevelopmentReloader: ObservableObject {
     requestFile = ProcessInfo.processInfo.environment["PIMAC_DEV_REQUEST_PATH"].map {
       URL(fileURLWithPath: $0)
     }
+    editDirectory = ProcessInfo.processInfo.environment["PIMAC_DEV_EDIT_DIRECTORY"].map {
+      URL(fileURLWithPath: $0)
+    }
     restartFile = ProcessInfo.processInfo.environment["PIMAC_DEV_RESTART_PATH"].map {
       URL(fileURLWithPath: $0)
     }
@@ -42,7 +46,10 @@ final class DevelopmentReloader: ObservableObject {
       publishHeartbeat(idle: false)
       return
     }
-    let blockers = workspace.restartBlockers
+    var blockers = workspace.restartBlockers
+    if DevelopmentReloadState.editsPending(directory: editDirectory) {
+      blockers.append("代码修改批次尚未完成")
+    }
     let idle = reload.observeIdle(blockers.isEmpty, now: .now)
     // Publish a fresh, atomic heartbeat. The watcher never builds based on a
     // missing/stale heartbeat, and waits for two seconds of continuous idle.

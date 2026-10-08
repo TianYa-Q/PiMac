@@ -104,6 +104,13 @@ process.stdin.on('data', chunk => {
           completion = setTimeout(stream, 500);
           break;
         }
+        if (command.message === 'tool-image') {
+          send({ type: 'tool_execution_start', toolCallId: 'image-1', toolName: 'generate_image', args: { prompt: 'fixture' } });
+          send({ type: 'tool_execution_end', toolCallId: 'image-1', toolName: 'generate_image', result: { content: [
+            { type: 'text', text: 'Generated image' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1cAAAAASUVORK5CYII=' },
+          ] }, isError: false });
+        }
         if (command.message === 'tools') {
           send({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'fixture.txt' } });
           send({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'read', partialResult: { content: [{ type: 'text', text: 'partial' }] } });

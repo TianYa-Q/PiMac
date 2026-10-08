@@ -297,6 +297,17 @@ struct ContentView: View {
     .sheet(item: $previewedAttachment) { attachment in
       ImageAttachmentPreview(attachment: attachment)
     }
+    .environment(
+      \.openURL,
+      OpenURLAction { url in
+        guard T3ReplyImageLinks.path(for: url) != nil else { return .systemAction }
+        Task { @MainActor in
+          do { previewedAttachment = try await app.replyImage(for: url) } catch {
+            app.statusText = "无法打开回复中的图片：\(error.localizedDescription)"
+          }
+        }
+        return .handled
+      })
     .sheet(
       item: Binding(
         get: { extensionUI.dialog.map { ExtensionDialogPresentation(dialog: $0) } },

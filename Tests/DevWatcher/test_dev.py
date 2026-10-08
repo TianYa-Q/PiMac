@@ -283,6 +283,7 @@ else:
             first = ((str(dev.root / 'a.swift'), 1, 1),)
             latest = ((str(dev.root / 'a.swift'), 2, 1),)
             with patch.object(dev, 'snapshot', return_value=first) as snapshot, \
+                    patch.object(dev, 'development_blockers', return_value=[]), \
                     patch.object(dev, 'app_is_idle', return_value=False) as idle, \
                     patch.object(dev, 'build', return_value=Path('PiMac')) as build, \
                     patch.object(dev.time, 'monotonic', return_value=10) as clock:
@@ -312,6 +313,7 @@ else:
             pending.observe(current)
             pending.changed_at = time.monotonic() - 1
             with patch.object(dev, 'snapshot', return_value=current), \
+                    patch.object(dev, 'development_blockers', return_value=[]), \
                     patch.object(dev, 'app_is_idle', return_value=True), \
                     patch.object(dev, 'build', return_value=None) as build:
                 pending.tick(None)
@@ -319,6 +321,7 @@ else:
                 build.assert_called_once()
                 self.assertFalse(revision.exists())
                 self.assertFalse(pending.dirty)
+                self.assertTrue(request.exists())  # suppress a previously published stale revision
 
     def test_edits_during_build_defer_reload(self):
         dev = self.load_dev()
@@ -331,6 +334,7 @@ else:
             pending.observe(first)
             pending.changed_at = time.monotonic() - 1
             with patch.object(dev, 'snapshot', side_effect=[first, latest]), \
+                    patch.object(dev, 'development_blockers', return_value=[]), \
                     patch.object(dev, 'app_is_idle', return_value=True), \
                     patch.object(dev, 'build', return_value=Path('PiMac')):
                 pending.tick(None)
@@ -416,6 +420,166 @@ else:
             108: (1, 108, '/bin/bash -c echo ' + str(dev.root / 'Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs')),
         }
         self.assertEqual(dev.owned_processes(table, {99}), {101, 102, 103, 104, 105})
+
+    def test_content_snapshot_ignores_tests_tooling_and_identical_saves(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.root = Path(directory)
+            source = dev.root / 'Sources/App.swift'
+            source.parent.mkdir()
+            source.write_text('a')
+            before = dev.snapshot()
+            source.touch()
+            self.assertEqual(dev.snapshot(), before)
+            for name in ['Tests/A.swift', 'scripts/dev.py', 'sidecars/t3-server/tests/a.mjs']:
+                path = dev.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('test only')
+            self.assertEqual(dev.snapshot(), before)
+            source.write_text('b')  # same length, different contents
+            self.assertNotEqual(dev.snapshot(), before)
+
+    def test_edit_batches_are_independent_and_do_not_expire(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.root = Path(directory)
+            with patch.object(dev.time, 'time', return_value=0):
+                first, second = dev.begin_edit('first'), dev.begin_edit('second')
+            self.assertEqual(set(dev.edit_blockers()), {first, second})
+            dev.end_edit(first)
+            self.assertEqual(dev.edit_blockers(), [second])
+            with self.assertRaises(ValueError):
+                dev.end_edit('../invalid')
+            with self.assertRaises(ValueError):
+                dev.end_edit(first)
+            self.assertEqual(dev.edit_blockers(), [second])
+            dev.end_edit(second)
+            self.assertEqual(dev.edit_blockers(), [])
+
+    def test_build_and_publication_require_closed_edit_batch(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.root = Path(directory)
+            pending = dev.PendingBuild((), dev.root / 'request', dev.root / 'revision', 123)
+            current = ((str(dev.root / 'a.swift'), 'hash', 1),)
+            pending.observe(current)
+            token = dev.begin_edit('work')
+            with patch.object(dev, 'snapshot', return_value=current), \
+                    patch.object(dev, 'active_development_processes', return_value=[]), \
+                    patch.object(dev, 'app_is_idle', return_value=True), \
+                    patch.object(dev, 'build', return_value=Path('PiMac')) as build:
+                pending.tick(None)
+                build.assert_not_called()
+                dev.end_edit(token)
+                pending.tick(None)
+                build.assert_called_once()
+                self.assertTrue(pending.revision.exists())
+
+    def test_new_edit_batch_during_build_blocks_publication_without_rebuild(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.root = Path(directory)
+            pending = dev.PendingBuild((), dev.root / 'request', dev.root / 'revision', 123)
+            current = ((str(dev.root / 'a.swift'), 'hash', 1),)
+            pending.observe(current)
+            tokens = []
+            def build_once():
+                tokens.append(dev.begin_edit('more work'))
+                return Path('PiMac')
+            with patch.object(dev, 'snapshot', return_value=current), \
+                    patch.object(dev, 'active_development_processes', return_value=[]), \
+                    patch.object(dev, 'app_is_idle', return_value=True), \
+                    patch.object(dev, 'build', side_effect=build_once) as build, \
+                    patch.object(dev, 'publish_artifact', return_value=Path('PiMac')) as publish:
+                pending.tick(None)
+                publish.assert_not_called()
+                self.assertFalse(pending.revision.exists())
+                dev.end_edit(tokens[0])
+                pending.tick(None)
+                build.assert_called_once()
+                publish.assert_called_once()
+                self.assertTrue(pending.revision.exists())
+
+    def test_reverted_runtime_changes_cancel_reload(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            initial = ((str(dev.root / 'a.swift'), 'a', 1),)
+            pending = dev.PendingBuild(initial, Path(directory) / 'request', Path(directory) / 'revision')
+            pending.observe(((str(dev.root / 'a.swift'), 'b', 1),))
+            self.assertTrue(pending.request.exists())
+            pending.observe(initial)
+            self.assertFalse(pending.dirty)
+            self.assertFalse(pending.request.exists())
+            self.assertFalse(pending.revision.exists())
+
+    def test_idle_requires_current_owner_and_watching_phase(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'state'
+            for pid, phase, expected in [(122, 'watching', False), (123, 'draining', False),
+                                          (123, 'exiting', False), (123, 'watching', True)]:
+                state.write_text(json.dumps({'pid': pid, 'phase': phase, 'timestamp': time.time(), 'idle': True}))
+                self.assertEqual(dev.app_is_idle(state, 123), expected)
+
+    def test_only_project_build_test_processes_block_reload(self):
+        dev = self.load_dev()
+        table = {10: (1, 10, '/bin/swift-test'), 11: (1, 11, '/bin/swift-build'),
+                 12: (os.getpid(), 12, '/bin/swift-test'),
+                 13: (1, 13, 'node --test tests/a.mjs'),
+                 14: (1, 14, '/bin/xctest ' + str(dev.root / '.build/old.xctest')),
+                 15: (1, 15, 'node build.mjs')}
+        def cwd(command, **kwargs):
+            pid = command[command.index('-p') + 1]
+            return 'p' + pid + '\nn' + (str(dev.root) if pid in {'10', '13', '15'} else '/other/project') + '\n'
+        with patch.object(dev, 'process_table', return_value=table), \
+                patch.object(dev.subprocess, 'check_output', side_effect=cwd):
+            self.assertEqual(dev.active_development_processes(), [10, 13, 15])
+
+    def test_staged_bundle_does_not_modify_running_bundle(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.root = Path(directory)
+            live = dev.root / '.build/Pi Mac Dev.app/Contents/MacOS/PiMac'
+            live.parent.mkdir(parents=True)
+            live.write_text('running')
+            staged = dev.root / '.build/Pi Mac Dev Staged.app/Contents/MacOS/PiMac'
+            staged.parent.mkdir(parents=True)
+            staged.write_text('new')
+            self.assertEqual(live.read_text(), 'running')
+            with patch.object(dev, 'run_build_command', return_value=(0, '')):
+                self.assertEqual(dev.publish_artifact(staged), live)
+            self.assertEqual(live.read_text(), 'new')
+            self.assertEqual((dev.root / '.build/Pi Mac Dev Previous.app/Contents/MacOS/PiMac').read_text(), 'running')
+
+    def test_idle_owner_change_during_build_defers_reload(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            pending = dev.PendingBuild((), Path(directory) / 'request', Path(directory) / 'revision', 123)
+            current = ((str(dev.root / 'a.swift'), 'hash', 1),)
+            pending.observe(current)
+            with patch.object(dev, 'snapshot', return_value=current), \
+                    patch.object(dev, 'development_blockers', return_value=[]), \
+                    patch.object(dev, 'app_is_idle', side_effect=[True, False]), \
+                    patch.object(dev, 'build', return_value=Path('PiMac')), \
+                    patch.object(dev, 'publish_artifact') as publish:
+                pending.tick(None)
+                publish.assert_not_called()
+                self.assertTrue(pending.request.exists())
+                self.assertFalse(pending.revision.exists())
+
+    def test_failed_registration_restores_previous_bundle(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory() as directory:
+            dev.root = Path(directory)
+            live = dev.root / '.build/Pi Mac Dev.app/Contents/MacOS/PiMac'
+            staged = dev.root / '.build/Pi Mac Dev Staged.app/Contents/MacOS/PiMac'
+            for binary, content in [(live, 'old'), (staged, 'new')]:
+                binary.parent.mkdir(parents=True)
+                binary.write_text(content)
+            with patch.object(dev, 'run_build_command', return_value=(1, '')):
+                self.assertIsNone(dev.publish_artifact(staged))
+            self.assertEqual(live.read_text(), 'old')
+            self.assertEqual(staged.read_text(), 'new')
 
     def test_snapshot_excludes_dependencies_and_includes_backend(self):
         spec = importlib.util.spec_from_file_location('dev', SCRIPT)

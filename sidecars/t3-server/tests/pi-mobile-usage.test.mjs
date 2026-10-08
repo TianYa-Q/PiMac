@@ -78,6 +78,54 @@ test('Pi limits converts remaining to used and seconds/ms resets without exposin
   assert.equal(rows[1].usageLimits.windows[0].resetsAt, rows[0].usageLimits.windows[0].resetsAt);
   assert.equal(JSON.stringify(sources).includes(secret), false);
 });
+test('banked resets reach mobile for both ChatGPT providers with only display metadata', async () => {
+  const sources = await readPiLimitSources({ accountStatus: async ({ provider }) =>
+    provider === 'antigravity' ? { gemini: { kind: 'unconfigured' } } : { accounts: [
+      { name: provider, resetCredits: { availableCount: 2, nextCreditId: 'private-id',
+        credits: [{ expiresAt: 1767398400, title: 'private-title' }, { expiresAt: 1767312000 },
+          { expiresAt: '1767225600' }, { expiresAt: true }, { expiresAt: Infinity },
+          { expiresAt: -1 }, { expiresAt: 8640000000001 }, null] } },
+      { name: 'hidden', hidden: true, resetCredits: { availableCount: 99 } },
+    ] } }, () => 1767225600000);
+  assert.deepEqual(sources[0].accounts.map(row => row.usageLimits.resetCredits), [
+    { availableCount: 2, nextExpiresAt: '2026-01-02T00:00:00.000Z' },
+    { availableCount: 2, nextExpiresAt: '2026-01-02T00:00:00.000Z' },
+  ]);
+  assert(sources[0].accounts.every(row => row.usageLimits.windows.length === 0));
+  // Stock mobile displays plan in account details/composer even when redeem is null.
+  assert(sources[0].accounts.every(row =>
+    row.plan === '2 reset credits · 到期（北京时间 UTC+8）：2026-01-02 08:00:00；2026-01-03 08:00:00 (read-only)'));
+  assert.equal(JSON.stringify(sources).includes('private-'), false);
+  assert.equal(JSON.stringify(sources).includes('resetCreditInput'), false);
+});
+test('mobile expiry details retain duplicate credits and use Beijing time across date boundaries', async () => {
+  const seconds = Date.parse('2026-01-01T20:30:45Z') / 1000;
+  const sources = await readPiLimitSources({ accountStatus: async ({ provider }) =>
+    provider === 'openai-codex' ? { accounts: [{ name: 'work', resetCredits: {
+      availableCount: 3, credits: [{ expiresAt: seconds }, {}, { expiresAt: seconds }],
+    } }] } : { accounts: [], gemini: { kind: 'unconfigured' } } });
+  const row = sources[0].accounts[0];
+  assert.equal(row.usageLimits.resetCredits.nextExpiresAt, '2026-01-01T20:30:45.000Z');
+  assert.equal(row.plan, '3 reset credits · 到期（北京时间 UTC+8）：2026-01-02 04:30:45；2026-01-02 04:30:45 (read-only)');
+});
+test('missing, zero and invalid mobile reset counts do not invent credits or hide quotas', async () => {
+  const values = [undefined, null, { availableCount: 0, credits: [{ expiresAt: 1767312000 }] },
+    { availableCount: 3 }, { availableCount: 1, credits: [null, {}] },
+    ...[-1, 1.5, true, '2', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(availableCount => ({ availableCount }))];
+  const sources = await readPiLimitSources({ accountStatus: async ({ provider }) =>
+    provider === 'openai-codex' ? { accounts: values.map((resetCredits, index) => ({
+      name: `account-${index}`, resetCredits, primary: { remainingPercent: 75 },
+    })) } : { accounts: [], gemini: { kind: 'unconfigured' } } });
+  assert.deepEqual(sources[0].accounts.map(row => row.usageLimits.resetCredits), [
+    undefined, undefined, { availableCount: 0 }, { availableCount: 3 }, { availableCount: 1 },
+    ...Array(7).fill(undefined),
+  ]);
+  assert.deepEqual(sources[0].accounts.map(row => row.plan), [
+    undefined, undefined, '0 reset credits (read-only)', '3 reset credits (read-only)',
+    '1 reset credit (read-only)', ...Array(7).fill(undefined),
+  ]);
+  assert(sources[0].accounts.every(row => row.usageLimits.windows[0].usedPercent === 25));
+});
 test('missing or failed Pi quotas stay visible as notices instead of invented bars', async () => {
   const empty = await readPiLimitSources({ accountStatus: async () => ({ accounts: [], gemini: { kind: 'unconfigured' } }) });
   assert.match(empty[0].error, /No Pi OAuth/);

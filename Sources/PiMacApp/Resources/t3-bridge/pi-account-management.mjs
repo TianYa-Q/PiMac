@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
 import { boundedJSON, discardBody } from './bounded-json.mjs';
 
 const providers = new Set(['openai', 'openai-codex', 'antigravity']);
@@ -41,9 +42,26 @@ function window(value) {
     ...(Number.isFinite(value.limit_window_seconds) && value.limit_window_seconds > 0 ? { windowSeconds: value.limit_window_seconds } : {}) };
 }
 export function createPiAccountManagement({ agentDirectory = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent'), fetchImpl = fetch, now = Date.now } = {}) {
-  const cache = new Map(), pending = new Map();
+  const cache = new Map(), pending = new Map(), successfulAccounts = new Map();
+  let successfulGemini;
   const controller = new AbortController();
+  // Private identity digests never cross IPC. Names alone cannot identify a login.
+  const identity = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
   async function queryGemini(auth, provider) {
+    const credential = auth.antigravity;
+    const key = credential?.type === 'oauth'
+      ? identity([credential.access, credential.projectId]) : undefined;
+    if (successfulGemini?.key !== key) successfulGemini = undefined;
+    const previous = successfulGemini;
+    const result = await queryGeminiUncached(auth, provider);
+    if (result.kind === 'loaded') successfulGemini = { key, result };
+    else if (result.error && previous) {
+      return { ...result, quotas: previous.result.quotas,
+        capturedAt: previous.result.capturedAt };
+    }
+    return result;
+  }
+  async function queryGeminiUncached(auth, provider) {
     const credential = auth.antigravity;
     const status = { kind: 'unconfigured', isActive: provider === 'antigravity', quotas: [] };
     if (credential?.type !== 'oauth') return status;
@@ -161,6 +179,8 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
       }
     }
     const rows = [];
+    const previousAccounts = successfulAccounts.get(provider) ?? new Map();
+    const nextAccounts = new Map();
     const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(12000)]);
     for (const [name, credential] of accounts) {
       controller.signal.throwIfAborted();
@@ -188,8 +208,23 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
           row.error = '额度查询失败，请检查网络和账户授权。';
         }
       }
-      row.capturedAt = now(); rows.push(row);
+      row.capturedAt = now();
+      const key = identity([provider, name, id || credential?.access]);
+      if (row.error) {
+        const previous = previousAccounts.get(key);
+        if (previous) {
+          row.primary = previous.primary;
+          row.secondary = previous.secondary;
+          row.resetCredits = previous.resetCredits;
+          row.capturedAt = previous.capturedAt;
+          nextAccounts.set(key, previous);
+        }
+      } else if (row.primary || row.secondary) {
+        nextAccounts.set(key, { ...row });
+      }
+      rows.push(row);
     }
+    successfulAccounts.set(provider, nextAccounts);
     return { version: 2, provider, supportsAccountSwitch: false, managesSelectedAuth: false,
       updatedAt: now(), accounts: rows, gemini: await geminiTask, source: 'host-query',
       message: rows.length ? '只读额度查询；不代表当前线程的授权绑定。' : '未找到可查询的 OAuth 账户；API key 不提供订阅额度。' };
@@ -204,6 +239,6 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
       const task = query(provider).then(value => { cache.set(provider, value); return { ...value, cached: false }; }).finally(() => pending.delete(provider));
       pending.set(provider, task); return task;
     },
-    close() { controller.abort(); cache.clear(); },
+    close() { controller.abort(); cache.clear(); successfulAccounts.clear(); successfulGemini = undefined; },
   };
 }

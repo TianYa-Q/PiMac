@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import signal
 import sys
+import uuid
 import tempfile
 import time
 
@@ -43,21 +44,22 @@ def changed_files(previous, current):
 
 
 def snapshot():
+    """Fingerprint runtime inputs, not save times, tests or development tooling."""
     paths = [root / "Package.swift"]
-    excluded = {"node_modules", "upstream", "generated", "vendor", "__pycache__"}
-    for directory in ("Sources", "Tests", "sidecars/t3-server", "extensions", "scripts"):
+    excluded = {"node_modules", "upstream", "generated", "vendor", "__pycache__", "tests"}
+    for directory in ("Sources", "sidecars/t3-server", "extensions"):
         # Prune before descending, not after rglob has traversed dependencies.
         for base, directories, files in os.walk(root / directory):
             directories[:] = [name for name in directories if name not in excluded]
             for name in files:
                 path = Path(base) / name
-                if path.suffix in {".swift", ".mjs", ".js", ".ts", ".json", ".py", ".sh", ".png", ".icns"}:
+                if path.suffix in {".swift", ".mjs", ".js", ".ts", ".json", ".png", ".icns"}:
                     paths.append(path)
     result = []
     for path in set(paths):
         try:
-            stat = path.stat()
-            result.append((str(path), stat.st_mtime_ns, stat.st_size))
+            content = path.read_bytes()
+            result.append((str(path), hashlib.sha256(content).hexdigest(), len(content)))
         except FileNotFoundError:
             pass  # An editor can replace a file during a scan.
     return tuple(sorted(result))
@@ -152,19 +154,112 @@ class AppSupervisor:
                 self.recover(f"New app heartbeat timed out; see {app_log}")
 
 
-def app_is_idle(state):
+def atomic_write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        temporary.write_text(text)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def edit_directory():
+    return root / '.build' / 'dev-edits'
+
+
+def edit_blockers():
+    # Explicit transactions do not expire merely because the editor/agent went quiet.
+    try:
+        return sorted(path.stem for path in edit_directory().iterdir() if path.suffix == '.json')
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return ['unreadable-edit-barrier']  # Fail closed instead of silently ignoring it.
+
+
+def begin_edit(label):
+    token = uuid.uuid4().hex
+    atomic_write(edit_directory() / (token + '.json'), json.dumps({
+        'label': label, 'startedAt': time.time(), 'token': token,
+    }))
+    return token
+
+
+def end_edit(token):
+    if len(token) != 32 or any(char not in '0123456789abcdef' for char in token):
+        raise ValueError('Invalid edit token')
+    path = edit_directory() / (token + '.json')
+    if not path.exists():
+        raise ValueError('Unknown edit token; no other edit batches were changed')
+    path.unlink()
+
+
+def active_development_processes():
+    """External builds/tests are real work, even if the app currently looks idle."""
+    table = process_table()
+    candidates = []
+    for pid, (_, _, command) in table.items():
+        executable = Path(command.split(' ', 1)[0]).name
+        swift_work = executable in {'swift-build', 'swift-test', 'swiftpm-testing-helper'}
+        node_work = (executable == 'node' and (' --test' in command
+                     or any(part.endswith(('build.mjs', 'build-client.mjs'))
+                            for part in command.split()[1:])))
+        if not (swift_work or node_work):
+            continue
+        # Own build descendants are excluded; the watcher serializes those itself.
+        parent = pid
+        visited = set()
+        while parent in table and parent not in visited and parent != os.getpid():
+            visited.add(parent)
+            parent = table[parent][0]
+        if parent == os.getpid():
+            continue
+        try:
+            output = subprocess.check_output(
+                ['lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn'],
+                text=True, stderr=subprocess.DEVNULL, timeout=2)
+            cwd = next((Path(line[1:]) for line in output.splitlines() if line.startswith('n')), None)
+        except subprocess.CalledProcessError:
+            # The process may have exited between ps and lsof.
+            continue
+        except (OSError, subprocess.TimeoutExpired):
+            # An unresolved candidate must not authorize a reload.
+            candidates.append(pid)
+            continue
+        if cwd is not None and (cwd == root or root in cwd.parents):
+            candidates.append(pid)
+    return candidates
+
+
+def development_blockers():
+    edits = edit_blockers()
+    if edits:
+        return ['unfinished edit batches: ' + ', '.join(edits)]
+    work = active_development_processes()
+    return ['external build/test processes: ' + ', '.join(map(str, work))] if work else []
+
+
+def app_is_idle(state, expected_pid=None):
     """Fail closed if the app heartbeat is missing, stale, or malformed."""
     try:
         data = json.loads(state.read_text())
         age = time.time() - data["timestamp"]
-        return data["idle"] is True and 0 <= age <= 3
+        return (data["idle"] is True and 0 <= age <= 3
+                and (expected_pid is None or data.get('pid') == expected_pid)
+                and (data.get('phase') == 'watching' if expected_pid is not None
+                     else data.get('phase', 'watching') == 'watching'))
     except (OSError, ValueError, KeyError, TypeError):
         return False
 
 
 class PendingBuild:
-    def __init__(self, previous, request, revision):
+    def __init__(self, previous, request, revision, expected_pid=None):
+        self.expected_pid = expected_pid
+        self.blocked_reason = None
+        self.ready = None
         self.previous = previous
+        self.applied = previous
         self.request = request
         self.revision = revision
         self.dirty = False
@@ -175,9 +270,15 @@ class PendingBuild:
             return
         changes = changed_files(self.previous, current)
         self.previous = current
+        self.ready = None
+        if current == self.applied:
+            self.dirty = False
+            self.request.unlink(missing_ok=True)
+            status('Runtime changes reverted · no build or reload needed')
+            return
         self.dirty = True
         self.changed_at = time.monotonic()
-        self.request.write_text(str(time.time_ns()))
+        atomic_write(self.request, str(time.time_ns()))
         preview = ", ".join(changes[:3])
         if len(changes) > 3:
             preview += f" (+{len(changes) - 3} more)"
@@ -185,20 +286,46 @@ class PendingBuild:
 
     def tick(self, state):
         self.observe(snapshot())
-        if not self.dirty or time.monotonic() - self.changed_at < 0.7 or not app_is_idle(state):
+        if not self.dirty:
             return
-        built = build()
+        blockers = development_blockers()
+        if blockers:
+            reason = '; '.join(blockers)
+            if reason != self.blocked_reason:
+                status('Reload blocked · ' + reason)
+                self.blocked_reason = reason
+            return
+        self.blocked_reason = None
+        if not app_is_idle(state, self.expected_pid):
+            return
+        built = self.ready if self.ready is not None else build()
         current = snapshot()
         if current != self.previous:
             self.observe(current)
             status("Sources changed during build · defer reload and build again when idle")
             return
+        # A build is not permission to reload: revalidate development work and
+        # the SAME app owner after the potentially long build.
+        self.ready = built
+        if built is not None and (development_blockers()
+                                  or not app_is_idle(state, self.expected_pid)):
+            status('Build ready but reload blocked · revalidate on next idle check')
+            return
         # A failed build is retried only after another edit, not every idle tick.
         self.dirty = False
+        self.ready = None
+        if built is None:
+            # Keep suppressing any older revision still awaiting app-idle approval.
+            status('Build failed · request barrier retained until correction or revert')
+            return
+        if publish_artifact(built) is None:
+            status('Build publication failed · request barrier retained; no reload')
+            return
+        # Keep the request barrier up until both artifact and revision are published.
+        atomic_write(self.revision, str(time.time_ns()))
+        self.applied = current
         self.request.unlink(missing_ok=True)
-        if built is not None:
-            self.revision.write_text(str(time.time_ns()))
-            status("Reload requested · Pi Mac rechecks that all sessions are idle")
+        status("Reload requested · Pi Mac rechecks that all sessions are idle")
 
 
 def running_apps(binary):
@@ -284,7 +411,9 @@ def build():
         print(output, end="", file=sys.stderr, flush=True)
         status(f"Build #{build_number} failed (binary path); no restart.")
         return None
-    binary = bundle_development_app(Path(output.strip()))
+    # Build into a staging bundle: a build can become obsolete while compiling.
+    # Never replace the running application's resources until PendingBuild validates it.
+    binary = bundle_development_app(Path(output.strip()), root / '.build' / 'Pi Mac Dev Staged.app')
     if binary is None:
         status(f"Build #{build_number} failed (development app); no restart. Details: {build_log.relative_to(root)}")
         return None
@@ -292,14 +421,41 @@ def build():
     return binary
 
 
-def bundle_development_app(binary_dir):
+def publish_artifact(binary):
+    staged = root / '.build' / 'Pi Mac Dev Staged.app'
+    if binary != staged / 'Contents' / 'MacOS' / 'PiMac':
+        return binary  # Supports prebuilt binaries and transport fixtures.
+    live = root / '.build' / 'Pi Mac Dev.app'
+    previous = root / '.build' / 'Pi Mac Dev Previous.app'
+    if previous.exists():
+        shutil.rmtree(previous)
+    try:
+        if live.exists():
+            live.rename(previous)
+        staged.rename(live)
+        register = Path('/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister')
+        if run_build_command([str(register), '-f', str(live)])[0] != 0:
+            live.rename(staged)
+            if previous.exists():
+                previous.rename(live)
+            status('Cannot register published app · restored previous bundle')
+            return None
+    except OSError as error:
+        if previous.exists() and not live.exists():
+            previous.rename(live)
+        status(f'Cannot publish staged app: {error}')
+        return None
+    return live / 'Contents' / 'MacOS' / 'PiMac'
+
+
+def bundle_development_app(binary_dir, destination=None):
     """Give debug builds a real application identity for macOS notifications.
 
     Keep the executable path stable for DevelopmentReloader; replace the file
     atomically so an already running process keeps its original executable.
     The dev identity is separate from the release app's permissions/defaults.
     """
-    app = root / ".build" / "Pi Mac Dev.app"
+    app = destination or root / ".build" / "Pi Mac Dev.app"
     contents = app / "Contents"
     macos = contents / "MacOS"
     resources = contents / "Resources"
@@ -332,7 +488,7 @@ def bundle_development_app(binary_dir):
                           os.environ.get("CODE_SIGN_IDENTITY", "-"), str(app)])[0] != 0:
         return None
     register = Path("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
-    if run_build_command([str(register), "-f", str(app)])[0] != 0:
+    if destination is None and run_build_command([str(register), "-f", str(app)])[0] != 0:
         return None
     return binary
 
@@ -434,14 +590,19 @@ def watch(app_groups):
     binary = build()
     if binary is None:
         sys.exit(1)
-    existing = running_apps(binary)
+    live_binary = root / '.build' / 'Pi Mac Dev.app' / 'Contents' / 'MacOS' / 'PiMac'
+    existing = running_apps(live_binary)
     if existing:
         sys.exit(
             f"Pi Mac is already running (PID {', '.join(map(str, existing))}). "
             "Stopping this project's instances and services on exit; "
             "run the watcher again after cleanup."
         )
+    binary = publish_artifact(binary)
+    if binary is None:
+        sys.exit(1)
     env = os.environ.copy()
+    env["PIMAC_DEV_EDIT_DIRECTORY"] = str(edit_directory())
     env["PIMAC_DEV_RELOAD_PATH"] = str(binary.resolve())
     revision = root / ".build" / "pimac-dev-revision"
     revision.write_text(str(time.time_ns()))
@@ -461,10 +622,11 @@ def watch(app_groups):
         status(f"Build log: {build_log.relative_to(root)} · App logs: terminal")
     else:
         status(f"Logs: {build_log.relative_to(root)} (latest build), {app_log.relative_to(root)} (app), .build/dev-watch.log (lifecycle)")
-    pending = PendingBuild(snapshot(), request, revision)
+    pending = PendingBuild(snapshot(), request, revision, supervisor.app.pid)
     while True:
         time.sleep(1)
         supervisor.tick()
+        pending.expected_pid = supervisor.app.pid
         pending.tick(state)
 
 
@@ -472,7 +634,25 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="show build output and live app logs in the terminal")
-    verbose = parser.parse_args().verbose
+    controls = parser.add_mutually_exclusive_group()
+    controls.add_argument('--begin-edit', action='store_true', help='begin an explicit edit batch; print its token')
+    controls.add_argument('--end-edit', metavar='TOKEN', help='complete only the named edit batch')
+    controls.add_argument('--status', action='store_true', help='show unfinished edit batches without launching/stopping the app')
+    parser.add_argument('--label', default='coding work', help='label for --begin-edit')
+    arguments = parser.parse_args()
+    verbose = arguments.verbose
+    if arguments.begin_edit:
+        print(begin_edit(arguments.label))
+        sys.exit(0)
+    if arguments.end_edit:
+        try:
+            end_edit(arguments.end_edit)
+        except ValueError as error:
+            sys.exit(str(error))
+        sys.exit(0)
+    if arguments.status:
+        print(json.dumps([read_state(edit_directory() / (token + '.json')) for token in edit_blockers()], ensure_ascii=False))
+        sys.exit(0)
     # Explicitly restore Ctrl-C even if the invoking environment ignored SIGINT.
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
