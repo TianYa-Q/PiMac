@@ -368,14 +368,16 @@ enum MarkdownInlineCache {
 struct MarkdownView: View, Equatable {
   let source: String
   let document: MarkdownDocument
+  let attachments: [PromptAttachment]
 
-  init(_ source: String) {
+  init(_ source: String, attachments: [PromptAttachment] = []) {
     self.source = source
+    self.attachments = attachments
     document = MarkdownDocumentCache.document(for: source)
   }
 
   static func == (lhs: Self, rhs: Self) -> Bool {
-    lhs.source == rhs.source
+    lhs.source == rhs.source && lhs.attachments == rhs.attachments
   }
 
   var body: some View {
@@ -389,6 +391,8 @@ struct MarkdownView: View, Equatable {
             // Measure the selectable renderer at its final wrapping width, not
             // the plain Text before macOS installs its selection presentation.
             .fixedSize(horizontal: false, vertical: true)
+        case .image(let attachment, let caption):
+          InlineReplyImageView(attachment: attachment, caption: caption)
         case .table(let headers, let rows, let alignments):
           MarkdownTableView(headers: headers, rows: rows, alignments: alignments)
         }
@@ -413,6 +417,16 @@ struct MarkdownView: View, Equatable {
       if case .table(let headers, let rows, let alignments) = block {
         flushText()
         result.append(.table(headers: headers, rows: rows, alignments: alignments))
+      } else if case .paragraph(let text) = block {
+        for part in MarkdownReplyImages.parts(in: text, attachments: attachments) {
+          switch part {
+          case .text(let blocks): textBlocks.append(contentsOf: blocks)
+          case .image:
+            flushText()
+            result.append(part)
+          case .table: break
+          }
+        }
       } else {
         textBlocks.append(block)
       }
@@ -488,7 +502,8 @@ struct MarkdownView: View, Equatable {
   }
 }
 
-private enum MarkdownSection {
+enum MarkdownSection {
+  case image(PromptAttachment, caption: String)
   case text([MarkdownBlock])
   case table(headers: [String], rows: [[String]], alignments: [MarkdownAlignment])
 }

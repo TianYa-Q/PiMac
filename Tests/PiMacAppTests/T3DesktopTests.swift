@@ -311,6 +311,9 @@ struct T3DesktopTests {
     #expect(model.isStreaming)
     model.composerText = "queued-followup"
     model.sendPrompt(delivery: .followUp)
+    for _ in 0..<100 where model.queuedPrompts.isEmpty {
+      try await Task.sleep(for: .milliseconds(10))
+    }
     #expect(model.queuedPrompts.count == 1)
     #expect(model.composerText.isEmpty)
     #expect(!model.canRestartSafely)

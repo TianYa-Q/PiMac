@@ -20,9 +20,12 @@ struct ProjectStatusOverviewTests {
     let desktop = model(in: first)
     desktop.isStreaming = true
     desktop.sessionName = "桌面任务"
-    desktop.queuedPrompts = [
-      try #require(AppModel.makePrompt("next", attachments: [], delivery: .followUp))
-    ]
+    desktop.currentSessionPath = "t3:status-thread"
+    desktop.apply(["thread": [
+      "id": "status-thread", "title": "桌面任务",
+      "latestTurn": ["turnId": "active", "state": "running"],
+      "queuedMessages": [["runId": "queued", "text": "next"]],
+    ]])
     let telegram = model(in: second)
     telegram.isStreaming = true
     let ready = model(in: second)

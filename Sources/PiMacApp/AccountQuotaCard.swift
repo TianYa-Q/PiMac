@@ -129,10 +129,11 @@ struct CodexAccountsView: View {
   @EnvironmentObject private var extensionUI: ExtensionUIModel
 
   var body: some View {
+    let usage = extensionUI.usage(for: app)
     CodexAccountsCard(
       snapshot: .init(
-        sourceID: ObjectIdentifier(app), accounts: extensionUI.codexAccounts,
-        gemini: extensionUI.geminiUsage,
+        sourceID: ObjectIdentifier(app), accounts: usage.accounts,
+        gemini: usage.gemini,
         emptyStatus: extensionUI.statuses["account-usage"], message: app.accountQuotaMessage,
         canRefresh: app.isProcessRunning && !app.isRefreshingAccountQuota,
         isRefreshing: app.isRefreshingAccountQuota,
@@ -231,8 +232,15 @@ private struct CodexAccountsCard: View, Equatable {
       let accounts = AccountQuotaPresentation.accounts(snapshot.accounts)
       ScrollView {
         LazyVStack(spacing: 7) {
+          if AccountQuotaPresentation.showsGeminiFirst(snapshot.gemini),
+            let gemini = snapshot.gemini
+          {
+            geminiRow(gemini)
+          }
           ForEach(accounts) { account in accountRow(account) }
-          if let gemini = snapshot.gemini, gemini.isConfigured {
+          if let gemini = snapshot.gemini, gemini.isConfigured,
+            !AccountQuotaPresentation.showsGeminiFirst(gemini)
+          {
             geminiRow(gemini)
           }
         }

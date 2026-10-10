@@ -300,6 +300,19 @@ struct ContentView: View {
     .environment(
       \.openURL,
       OpenURLAction { url in
+        if T3ReplyDocumentLinks.path(for: url) != nil {
+          Task { @MainActor in
+            do {
+              let documentURL = try await app.replyDocumentURL(for: url)
+              if !NSWorkspace.shared.open(documentURL) {
+                app.statusText = "无法打开回复中的文档，请检查默认浏览器。"
+              }
+            } catch {
+              app.statusText = "无法打开回复中的文档：\(error.localizedDescription)"
+            }
+          }
+          return .handled
+        }
         guard T3ReplyImageLinks.path(for: url) != nil else { return .systemAction }
         Task { @MainActor in
           do { previewedAttachment = try await app.replyImage(for: url) } catch {
@@ -323,7 +336,7 @@ struct ContentView: View {
         composerFocused = true
       }
     }
-    .onChange(of: app.projectURL?.standardizedFileURL.path) {
+    .onChange(of: workspace.projectFilterPath) {
       visibleSessionCount = 10
       sessionSearchText = ""
       sessionSearchResults = []
@@ -493,10 +506,9 @@ struct ContentView: View {
           }
         }
 
-        if app.projectURL != nil {
+        if !workspace.projects.isEmpty {
           Button {
-            guard let projectURL = app.projectURL else { return }
-            workspace.newSession(in: projectURL)
+            workspace.newSessionInLastProject()
           } label: {
             HStack(spacing: 9) {
               Image(systemName: "square.and.pencil")
@@ -515,15 +527,21 @@ struct ContentView: View {
             .contentShape(RoundedRectangle(cornerRadius: 10))
           }
           .buttonStyle(.plain)
-          .help("在当前项目新建聊天")
+          .help("在上次使用的项目中新建聊天")
           .padding(.top, 8)
           .padding(.bottom, 10)
 
           HStack {
-            Text("会话")
+            Text(workspace.projectFilterPath == nil ? "全部会话" : "会话")
               .font(.caption.bold())
               .foregroundStyle(.secondary)
             Spacer()
+            if workspace.projectFilterPath != nil {
+              Button("全部") { workspace.clearProjectFilter() }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .help("取消项目筛选")
+            }
             Button {
               if sessionSearchExpanded {
                 closeSessionSearch()
@@ -549,7 +567,7 @@ struct ContentView: View {
               onClose: closeSessionSearch,
               onSubmit: {
                 guard !isSearchingSessions, let result = sessionSearchResults.first,
-                  let projectURL = app.projectURL
+                  let projectURL = workspace.project(forSessionPath: result.session.path)?.url
                 else { return }
                 workspace.openSession(path: result.session.path, in: projectURL)
               }
@@ -593,9 +611,7 @@ struct ContentView: View {
                 .padding(.vertical, 6)
               }
             }
-          } else if visibleSessions.isEmpty, let projectURL = app.projectURL,
-            workspace.isLoadingSessions(in: projectURL)
-          {
+          } else if visibleSessions.isEmpty, !workspace.server.isConnected {
             HStack(spacing: 8) {
               ProgressView().controlSize(.small)
               Text("正在读取会话…")
@@ -679,9 +695,9 @@ struct ContentView: View {
   }
 
   private func compactProjectButton(_ project: WorkspaceProject) -> some View {
-    let selected = workspace.selectedProject?.id == project.id
+    let selected = workspace.projectFilterPath == project.id
     return Button {
-      workspace.selectProject(project)
+      workspace.toggleProjectFilter(project)
     } label: {
       projectIcon(project, size: 30)
         .padding(3)
@@ -723,9 +739,9 @@ struct ContentView: View {
   }
 
   private func projectRow(_ project: WorkspaceProject) -> some View {
-    let selected = workspace.selectedProject?.id == project.id
+    let selected = workspace.projectFilterPath == project.id
     return Button {
-      workspace.selectProject(project)
+      workspace.toggleProjectFilter(project)
     } label: {
       HStack(spacing: 8) {
         projectIcon(project, size: 29)
@@ -762,7 +778,7 @@ struct ContentView: View {
   private var sessionSearchKey: String {
     let sessions = allSessions
     return
-      "\(app.projectURL?.standardizedFileURL.path ?? "")|\(sessionSearchText)|\(sessionSearchRetry)|"
+      "\(workspace.projectFilterPath ?? "")|\(sessionSearchText)|\(sessionSearchRetry)|"
       + sessions.map { "\($0.path)|\($0.title)|\($0.modifiedAt.timeIntervalSince1970)" }
       .joined(separator: "\n")
   }
@@ -770,10 +786,12 @@ struct ContentView: View {
   private func redesignedSessionRow(_ session: SessionItem, snippet: String? = nil) -> some View {
     let selected = workspace.isSelectedSession(path: session.path)
     let running = workspace.model(forSessionPath: session.path)?.isBusy == true
+    let unreadDone = AppModel.threadID(from: session.path).flatMap { workspace.server.thread($0) }
+      .map { T3V2Presentation.hasUnreadCompletion($0) } ?? false
     return SidebarHoverRegion { hovered in
       ZStack(alignment: .trailing) {
         Button {
-          guard let projectURL = app.projectURL else { return }
+          guard let projectURL = workspace.project(forSessionPath: session.path)?.url else { return }
           workspace.openSession(path: session.path, in: projectURL)
         } label: {
           HStack(spacing: 9) {
@@ -793,9 +811,25 @@ struct ContentView: View {
                   .foregroundStyle(.secondary)
                   .lineLimit(2)
               }
-              SessionRelativeTime(date: session.modifiedAt)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+              if workspace.projectFilterPath == nil,
+                let project = workspace.project(forSessionPath: session.path)
+              {
+                HStack(spacing: 4) {
+                  projectIcon(project, size: 14)
+                  Text(project.name).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                .help(project.url.path)
+              }
+              HStack(spacing: 6) {
+                SessionRelativeTime(date: session.modifiedAt)
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+                if unreadDone {
+                  Text("Done")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.green)
+                }
+              }
             }
           }
           .padding(.leading, 9)
@@ -807,7 +841,7 @@ struct ContentView: View {
 
         if hovered {
           Button {
-            guard let projectURL = app.projectURL else { return }
+            guard let projectURL = workspace.project(forSessionPath: session.path)?.url else { return }
             workspace.archiveSession(path: session.path, in: projectURL)
           } label: {
             Image(systemName: "archivebox")
@@ -958,8 +992,7 @@ struct ContentView: View {
   }
 
   private var allSessions: [SessionItem] {
-    guard let projectURL = app.projectURL else { return app.sessions }
-    return workspace.sessions(in: projectURL)
+    workspace.filteredSessions
   }
 
   private func loadMoreSessionsButton(totalCount: Int) -> some View {
@@ -1201,8 +1234,33 @@ struct ContentView: View {
 
   private var composer: some View {
     VStack(spacing: 8) {
+      HStack {
+        if !app.hasUserMessage, !app.isBusy, !app.isLoadingConfiguration,
+          app.queuedPrompts.isEmpty
+        {
+          ProjectSwitcher(
+            projects: workspace.projects,
+            selectedProject: workspace.selectedProject,
+            onSelect: { workspace.switchNewChatProject(to: $0) }
+          )
+          .help("切换项目；保留未发送内容")
+        } else {
+          Label(workspace.selectedProject?.name ?? "项目", systemImage: "folder")
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 10)
+            .frame(height: ProjectSwitcher.triggerHeight)
+        }
+        Spacer()
+      }
+      .frame(height: ProjectSwitcher.triggerHeight)
       if !app.queuedPrompts.isEmpty {
         VStack(spacing: 5) {
+          if app.queueHeld {
+            Button("恢复 Server 队列") { app.resumeQueue() }
+          }
           ForEach(app.queuedPrompts) { prompt in
             queuedPromptRow(prompt)
           }
@@ -1373,17 +1431,9 @@ struct ContentView: View {
     .padding(12)
   }
 
-  private func queuedPromptRow(_ prompt: QueuedPrompt) -> some View {
+  private func queuedPromptRow(_ prompt: ServerQueuedPrompt) -> some View {
     HStack(spacing: 7) {
-      Group {
-        if prompt.waitsForCompaction {
-          Text("压缩完成后").foregroundStyle(.secondary)
-        } else if prompt.delivery == .steer {
-          Text(prompt.delivery.label).foregroundStyle(.orange)
-        } else {
-          Text(prompt.delivery.label).foregroundStyle(.blue)
-        }
-      }
+      Text("Server 队列").foregroundStyle(.blue)
       .font(.caption2.weight(.medium))
       .padding(.horizontal, 6)
       .padding(.vertical, 2)
@@ -1583,7 +1633,9 @@ struct ContentView: View {
       Divider().frame(height: 12)
       if let stats = app.stats {
         HStack(spacing: 12) {
-          Text(stats.contextPercent.map { "上下文 \(Int($0))%" } ?? "上下文 --")
+          Text(stats.contextPercent.map {
+            "上下文 \(stats.contextIsEstimated == true ? "≈" : "")\(Int($0))%"
+          } ?? "上下文 --")
             .foregroundStyle(contextUsageColor(stats.contextPercent))
           Text(
             stats.contextWindow.map {
@@ -1594,6 +1646,9 @@ struct ContentView: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
+        .help(stats.contextIsEstimated == true
+          ? "压缩后的上下文估算值；收到更新的 token 用量后自动替换。"
+          : "Provider 返回的上下文和 token 用量")
       } else {
         Text("上下文 -- · -- / -- tokens · 缓存命中 --")
           .font(.caption)
@@ -2557,8 +2612,13 @@ private struct ChatEntryView: View, Equatable {
             .help("重新编辑这条消息")
           }
         }
-        if !entry.attachments.isEmpty {
-          MessageAttachmentsView(attachments: entry.attachments)
+        let remainingAttachments = entry.attachments.filter {
+          entry.isRunning || $0.replyImagePath == nil
+            || !MarkdownReplyImages.renderedPaths(in: entry.text, attachments: entry.attachments)
+              .contains($0.replyImagePath!)
+        }
+        if !remainingAttachments.isEmpty {
+          MessageAttachmentsView(attachments: remainingAttachments)
         }
         if entry.kind == .tool || entry.kind == .thinking || entry.kind == .compaction {
           DisclosureGroup(isExpanded: $expanded) {
@@ -2587,7 +2647,7 @@ private struct ChatEntryView: View, Equatable {
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
     } else {
-      MarkdownView(entry.text)
+      MarkdownView(entry.text, attachments: entry.attachments)
         .equatable()
         .font(.body)
     }
@@ -2685,7 +2745,7 @@ private struct MessageAttachmentsView: View {
   }
 }
 
-private struct ImageAttachmentPreview: View {
+struct ImageAttachmentPreview: View {
   @Environment(\.dismiss) private var dismiss
   let attachment: PromptAttachment
 
@@ -2704,11 +2764,7 @@ private struct ImageAttachmentPreview: View {
       Divider()
 
       if let image = NSImage(contentsOf: attachment.url) {
-        Image(nsImage: image)
-          .resizable()
-          .scaledToFit()
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .padding(16)
+        ZoomableImagePreview(image: image)
           .background(Color(nsColor: .windowBackgroundColor))
       } else {
         ContentUnavailableView("无法预览图片", systemImage: "photo.badge.exclamationmark")

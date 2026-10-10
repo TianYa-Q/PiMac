@@ -14,6 +14,13 @@ enum T3V2Presentation {
     return status
   }
 
+  static func hasUnreadCompletion(_ thread: JSON) -> Bool {
+    guard thread["status"] as? String == "completed" else { return false }
+    let completed = T3DesktopClient.date(thread["latestRunCompletedAt"])
+    guard completed != .distantPast else { return false }
+    return completed > T3DesktopClient.date(thread["lastVisitedAt"])
+  }
+
   static func thread(_ native: JSON, run: JSON? = nil) -> JSON {
     var result = native
     let status = run?["status"] as? String ?? native["status"] as? String ?? "idle"
@@ -133,6 +140,25 @@ enum T3V2Presentation {
       default: break
       }
     }
+    // The queue comes from runs/messages, not visible timeline items.
+    let sourceMessages = projection["messages"] as? [JSON] ?? []
+    result["queueHeld"] = runs.contains {
+      $0["status"] as? String == "queued" && $0["queueHeld"] as? Bool == true
+    }
+    result["queuedMessages"] = runs.filter { $0["status"] as? String == "queued" }
+      .sorted {
+        let left = $0["queuePosition"] as? Int ?? $0["ordinal"] as? Int ?? 0
+        let right = $1["queuePosition"] as? Int ?? $1["ordinal"] as? Int ?? 0
+        return left == right
+          ? ($0["ordinal"] as? Int ?? 0) < ($1["ordinal"] as? Int ?? 0) : left < right
+      }.compactMap { run -> JSON? in
+        guard let message = sourceMessages.first(where: {
+          $0["id"] as? String == run["userMessageId"] as? String
+        }) else { return nil }
+        var queued = message
+        queued["runId"] = run["id"]
+        return queued
+      }
     result["messages"] = messages
     result["activities"] = activities
     var detail: JSON = ["snapshotSequence": native["snapshotSequence"] ?? -1, "thread": result]
@@ -144,12 +170,52 @@ enum T3V2Presentation {
     return detail
   }
 
+  private static func contextTimestamp(_ value: Any?) -> Date? {
+    guard let text = value as? String else { return nil }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.date(from: text) ?? ISO8601DateFormatter().date(from: text)
+  }
+
+  /// Compaction is an official context observation too. Older Pi versions only
+  /// publish tokenUsage when the task settles, even after many tool/model calls.
+  /// Use the local main-agent compaction estimate until a newer usage arrives.
+  private static func contextMetrics(_ projection: JSON, turns: [JSON])
+    -> (used: Int, window: Int, estimated: Bool)?
+  {
+    let usageTurn = turns.last(where: { $0["tokenUsage"] is JSON })
+    let usage = usageTurn?["tokenUsage"] as? JSON
+    let usageDate = contextTimestamp(usage?["updatedAt"])
+      ?? contextTimestamp(usageTurn?["completedAt"])
+      ?? contextTimestamp(usageTurn?["startedAt"])
+    let turnIDs = Set(turns.compactMap { $0["id"] as? String })
+    // Deliberately exclude inherited visible history and child tool/subagent items.
+    let compaction = (projection["turnItems"] as? [JSON] ?? []).filter { item in
+      guard item["type"] as? String == "compaction",
+        item["status"] as? String == "completed",
+        item["parentItemId"] == nil || item["parentItemId"] is NSNull,
+        let turnID = item["providerTurnId"] as? String, turnIDs.contains(turnID),
+        let after = item["afterTokenCount"] as? Int, after >= 0,
+        let date = contextTimestamp(item["completedAt"] ?? item["updatedAt"])
+      else { return false }
+      // Without a timestamp on existing usage, prefer it rather than risk
+      // replacing a newer measurement with an old estimate.
+      return usage == nil || usageDate.map { date > $0 } == true
+    }.max {
+      (contextTimestamp($0["completedAt"] ?? $0["updatedAt"]) ?? .distantPast)
+        < (contextTimestamp($1["completedAt"] ?? $1["updatedAt"]) ?? .distantPast)
+    }
+    if let compaction, let after = compaction["afterTokenCount"] as? Int {
+      return (after, usage?["maxTokens"] as? Int ?? 0, true)
+    }
+    guard let usage else { return nil }
+    return (usage["usedTokens"] as? Int ?? 0, usage["maxTokens"] as? Int ?? 0, false)
+  }
+
   static func stats(_ native: JSON) -> SessionStats? {
     let projection = native["projection"] as? JSON ?? [:]
     let turns = projection["providerTurns"] as? [JSON] ?? []
-    // A newly started turn may not have usage yet. Keep the latest known context
-    // instead of hiding all metrics until that turn finishes.
-    let usage = turns.last(where: { $0["tokenUsage"] is JSON })?["tokenUsage"] as? JSON
+    let context = contextMetrics(projection, turns: turns)
     let runs = projection["runs"] as? [JSON] ?? []
     let run = runs.last(where: { active.contains($0["status"] as? String ?? "") }) ?? runs.last
     let attempts = projection["attempts"] as? [JSON] ?? []
@@ -181,9 +247,9 @@ enum T3V2Presentation {
     // snapshots (which overlap across requests). Recompute from the projection
     // so refreshes and in-progress metric updates cannot double-count a turn.
     let turnUsages = turns.compactMap { $0["turnTokenUsage"] as? JSON }
-    guard usage != nil || outputUsage != nil || !turnUsages.isEmpty else { return nil }
-    let used = usage?["usedTokens"] as? Int ?? 0
-    let max = usage?["maxTokens"] as? Int ?? 0
+    guard context != nil || outputUsage != nil || !turnUsages.isEmpty else { return nil }
+    let used = context?.used ?? 0
+    let max = context?.window ?? 0
     var input = 0
     var cached = 0
     var creation = 0
@@ -206,7 +272,8 @@ enum T3V2Presentation {
       contextPercent: max > 0 ? Double(used) / Double(max) * 100 : nil,
       totalTokens: used, inputTokens: input, cacheReadTokens: cached, cacheWriteTokens: creation,
       outputTokensPerSecond: validSpeed ? measuredSpeed : nil,
-      contextWindow: max > 0 ? max : nil)
+      contextWindow: max > 0 ? max : nil,
+      contextIsEstimated: context?.estimated == true ? true : nil)
   }
 
   static func requests(_ native: JSON) -> JSON {

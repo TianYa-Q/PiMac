@@ -25,6 +25,46 @@ final class WorkspaceModel: ObservableObject {
   @Published private(set) var projects: [WorkspaceProject] = []
   @Published private(set) var loadingSessionCatalogs: Set<String> = []
   @Published var selectedTabID: UUID?
+  @Published private(set) var projectFilterPath: String?
+
+  /// Sidebar selection filters the catalog; it never changes the active conversation.
+  func toggleProjectFilter(_ project: WorkspaceProject) {
+    projectFilterPath = projectFilterPath == project.id ? nil : project.id
+  }
+
+  func clearProjectFilter() { projectFilterPath = nil }
+
+  var filteredSessions: [SessionItem] {
+    let projectID = projectFilterPath.flatMap {
+      server.projectID(for: URL(fileURLWithPath: $0))
+    }
+    if projectFilterPath != nil && projectID == nil { return [] }
+    return Self.sessionCatalog(threads: server.threads, projectID: projectID)
+  }
+
+  func project(forSessionPath path: String) -> WorkspaceProject? {
+    guard let id = AppModel.threadID(from: path),
+      let projectID = server.thread(id)?["projectId"] as? String,
+      let project = server.projects.first(where: { $0["id"] as? String == projectID }),
+      let root = project["workspaceRoot"] as? String
+    else { return nil }
+    return WorkspaceProject(url: URL(fileURLWithPath: root), customName: project["title"] as? String)
+  }
+
+  func switchNewChatProject(to project: WorkspaceProject) {
+    guard let previous = selectedModel, !previous.hasUserMessage, !previous.isBusy,
+      !previous.isLoadingConfiguration, previous.queuedPrompts.isEmpty,
+      previous.projectURL?.standardizedFileURL != project.url.standardizedFileURL
+    else { return }
+    let text = previous.composerText
+    let attachments = previous.attachments
+    newSession(in: project.url)
+    guard let next = selectedModel, next !== previous else { return }
+    next.composerText = text
+    next.attachments = attachments
+    previous.composerText = ""
+    previous.attachments = []
+  }
   @Published var developmentReloadStatus = ""
   let extensionUI = ExtensionUIModel()
   let telegram: TelegramControl
@@ -107,6 +147,8 @@ final class WorkspaceModel: ObservableObject {
   }
   var canRestartSafely: Bool { restartBlockers.isEmpty }
   private func applyShell(_ snapshot: [String: Any]) {
+    // Read receipts can change without a title/date/catalog revision.
+    objectWillChange.send()
     let nextProjects = (snapshot["projects"] as? [[String: Any]] ?? []).compactMap {
       project -> WorkspaceProject? in
       guard let root = project["workspaceRoot"] as? String else { return nil }
@@ -114,6 +156,9 @@ final class WorkspaceModel: ObservableObject {
         url: URL(fileURLWithPath: root), customName: project["title"] as? String)
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     if projects != nextProjects { projects = nextProjects }
+    if let path = projectFilterPath, !projects.contains(where: { $0.id == path }) {
+      clearProjectFilter()
+    }
     if sessionCatalogRevision != server.sessionCatalogRevision {
       sessionCatalogRevision = server.sessionCatalogRevision
     }
@@ -153,9 +198,9 @@ final class WorkspaceModel: ObservableObject {
     let saved = UserDefaults.standard.string(forKey: "t3SelectedThread.\(project.id)")
     let catalog = sessions(in: project.url)
     if let path = saved, catalog.contains(where: { $0.path == path }) {
-      openSession(path: path, in: project.url)
+      openSession(path: path, in: project.url, markRead: false)
     } else if let recent = catalog.first {
-      openSession(path: recent.path, in: project.url)
+      openSession(path: recent.path, in: project.url, markRead: false)
     } else {
       newSession(in: project.url)
     }
@@ -186,21 +231,69 @@ final class WorkspaceModel: ObservableObject {
       } catch { selectedModel?.statusText = "移除项目未确认，请刷新 Server 状态。" }
     }
   }
+  /// 新聊天优先使用侧栏筛选项目；筛选本身不切换或修改当前会话。
+  func newSessionInLastProject() {
+    if let path = projectFilterPath {
+      newSession(in: URL(fileURLWithPath: path))
+      return
+    }
+    let savedPath = persistsState ? UserDefaults.standard.string(forKey: "t3SelectedProject") : nil
+    guard let project = selectedProject
+      ?? projects.first(where: { $0.id == savedPath })
+      ?? projects.first
+    else { return }
+    newSession(in: project.url)
+  }
+
   func newSession(in projectURL: URL) {
-    if let tab = tabs.first(where: { $0.id == selectedTabID }), tab.isDraft,
-      tab.model.projectURL == projectURL, !tab.model.hasUserMessage, !tab.model.hasUnsubmittedInput
+    // Also reuse a draft while its thread.create is still in flight, even when
+    // another tab is selected. Do not depend on a shell refresh between clicks.
+    let reusablePath = server.projectID(for: projectURL).flatMap {
+      Self.latestEmptySessionPath(threads: server.threads, projectID: $0)
+    }
+    if let tab = tabs.last(where: {
+      $0.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL
+    }), tab.isDraft,
+      (tab.model.currentSessionPath.isEmpty || tab.model.currentSessionPath == reusablePath
+        || tab.model.threadID.map({ server.thread($0) == nil }) == true),
+      !tab.model.hasUserMessage, !tab.model.hasUnsubmittedInput, !tab.model.isBusy,
+      tab.model.queuedPrompts.isEmpty
     {
+      selectTab(tab.id)
+      return
+    }
+    if let path = reusablePath,
+      model(forSessionPath: path).map({
+        !$0.hasUserMessage && !$0.hasUnsubmittedInput && !$0.isBusy && $0.queuedPrompts.isEmpty
+      }) ?? true
+    {
+      openSession(path: path, in: projectURL)
       return
     }
     let model = AppModel(startupProjectURL: projectURL, continueLastSession: false)
     addTab(model: model, path: nil, draft: true)
   }
-  func openSession(path: String, in projectURL: URL) {
+  func openSession(path: String, in projectURL: URL, markRead: Bool = true) {
     guard let id = AppModel.threadID(from: path), let thread = server.thread(id),
       thread["projectId"] as? String == server.projectID(for: projectURL)
     else {
       selectedModel?.statusText = "此历史路径尚未导入 T3；不会启动旧桌面 Pi 进程。"
       return
+    }
+    if markRead, T3V2Presentation.hasUnreadCompletion(thread),
+      let completedAt = thread["latestRunCompletedAt"] as? String
+    {
+      // Acknowledge only the completion visible at click time, never a later
+      // run that finishes while the request is waiting for Server readiness.
+      Task {
+        do {
+          try await server.dispatch([
+            "type": "thread.visit", "threadId": id, "visitedAt": completedAt,
+          ])
+        } catch {
+          selectedModel?.statusText = "已读状态同步未确认，请重新点击会话。"
+        }
+      }
     }
     if let tab = tabs.first(where: {
       $0.model.currentSessionPath == path || $0.requestedSessionPath == path
@@ -221,11 +314,28 @@ final class WorkspaceModel: ObservableObject {
     return server.sessions(projectID: project)
   }
 
-  static func sessionCatalog(threads: [[String: Any]], projectID: String) -> [SessionItem] {
+  /// Only the leading chat is reusable; an older empty chat must not replace a
+  /// new task after the latest chat has already been used.
+  static func latestEmptySessionPath(threads: [[String: Any]], projectID: String) -> String? {
+    guard let latest = sessionCatalog(threads: threads, projectID: projectID).first,
+      let id = AppModel.threadID(from: latest.path),
+      let thread = threads.first(where: { $0["id"] as? String == id }),
+      thread["title"] as? String == "新任务",
+      thread["status"] as? String == "idle",
+      thread["latestRunId"] is NSNull,
+      thread["latestVisibleMessage"] is NSNull,
+      thread["latestUserMessageAt"] is NSNull,
+      thread["activeRunId"] is NSNull,
+      thread["pendingRuntimeRequest"] is NSNull
+    else { return nil }
+    return latest.path
+  }
+
+  static func sessionCatalog(threads: [[String: Any]], projectID: String?) -> [SessionItem] {
     // Match T3 client-runtime's sortActiveThreadsByOrderKey: new/reopened
     // keyless threads lead, then manually arranged threads in saved key order.
     // Lifecycle anchors belong to Server; message/output updates never move rows.
-    return threads.filter { $0["projectId"] as? String == projectID }.compactMap {
+    return threads.filter { projectID == nil || $0["projectId"] as? String == projectID }.compactMap {
       thread
         -> (id: String, anchorAt: Date, orderKey: String?, item: SessionItem)? in
       guard let id = thread["id"] as? String else { return nil }

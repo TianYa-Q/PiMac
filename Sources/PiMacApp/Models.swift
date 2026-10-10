@@ -93,6 +93,13 @@ enum QueuedPromptDelivery: String, Sendable {
   }
 }
 
+/// Server run identity is opaque; it is not necessarily a UUID.
+struct ServerQueuedPrompt: Identifiable, Sendable {
+  let id: String
+  let text: String
+  let attachments: [PromptAttachment]
+}
+
 struct QueuedPrompt: Identifiable, Sendable {
   let id: UUID
   let text: String
@@ -108,6 +115,7 @@ struct PromptAttachment: Identifiable, Hashable, Sendable {
   let id = UUID()
   let url: URL
   let mimeType: String?
+  var replyImagePath: String? = nil
 
   var isImage: Bool { mimeType?.hasPrefix("image/") == true }
 
@@ -161,6 +169,7 @@ struct SessionStats: Codable {
   let cacheWriteTokens: Int
   var outputTokensPerSecond: Double? = nil
   var contextWindow: Int? = nil
+  var contextIsEstimated: Bool? = nil
 
   var cacheHitPercent: Double? {
     let promptTokens = inputTokens + cacheReadTokens + cacheWriteTokens

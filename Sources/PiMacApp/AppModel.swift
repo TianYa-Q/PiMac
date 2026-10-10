@@ -43,7 +43,9 @@ final class AppModel: ObservableObject {
   @Published var stats: SessionStats?
   @Published var composerText = ""
   @Published var attachments: [PromptAttachment] = []
-  @Published var queuedPrompts: [QueuedPrompt] = []
+  /// Read-only presentation of the Server-owned queue.
+  @Published private(set) var queuedPrompts: [ServerQueuedPrompt] = []
+  @Published private(set) var queueHeld = false
   @Published var statusText = "" {
     didSet {
       transientStatusTask?.cancel()
@@ -284,17 +286,6 @@ final class AppModel: ObservableObject {
     guard canSubmitPrompt,
       let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
     else { return }
-    if isStreaming && delivery == .followUp {
-      guard queuedPrompts.count < 100 else {
-        statusText = "等待队列已满，请等待任务完成。"
-        return
-      }
-      queuedPrompts.append(prompt)
-      composerText = ""
-      attachments = []
-      statusText = "已排队，当前任务完成后发送。"
-      return
-    }
     submit(prompt) { [weak self] accepted in
       guard let self, accepted else { return }
       if self.composerText.trimmingCharacters(in: .whitespacesAndNewlines) == prompt.text {
@@ -304,19 +295,6 @@ final class AppModel: ObservableObject {
       self.attachments.removeAll { ids.contains($0.id) }
     }
   }
-  private func drainQueuedPrompts() {
-    guard !isBusy, canSubmitPrompt, !queuedPrompts.isEmpty else { return }
-    let prompt = queuedPrompts.removeFirst()
-    submit(prompt) { [weak self] accepted in
-      guard let self, !accepted else { return }
-      self.statusText = "排队消息提交未确认，不会自动重发：\(prompt.text.prefix(120))"
-      if self.composerText.isEmpty {
-        self.composerText = prompt.text
-        self.attachments = prompt.attachments
-      }
-    }
-  }
-
   func sendRemotePrompt(
     _ text: String, attachments: [PromptAttachment] = [], messageID: String? = nil,
     completion: @escaping (Bool) -> Void
@@ -338,7 +316,8 @@ final class AppModel: ObservableObject {
     }
     submitting = true
     let isSteering = isStreaming && prompt.delivery == .steer
-    awaitingAgentStart = !isSteering
+    let isQueueing = prompt.delivery == .followUp
+    awaitingAgentStart = !isSteering && !isQueueing
     submittedFromTurnID = lastTurnID
     let selection = modelSelection
     let submittedMessageID = messageID ?? UUID().uuidString
@@ -362,12 +341,11 @@ final class AppModel: ObservableObject {
           "messageId": submittedMessageID, "text": prompt.rpcText,
           "attachments": try await server.persistAttachments(
             images, threadID: id, messageID: submittedMessageID),
-          "dispatchMode": isSteering
-            ? ["type": "steer_active", "targetRunId": try requireActiveRunID()]
-            : ["type": "start_immediately"],
-        ])
+          "dispatchMode": ["type": "queue_after_active"],
+        ].merging(isQueueing ? [:] : ["deliveryIntent": "steer"]) { _, new in new })
         completion(true)
-        self.statusText = isSteering ? "已提交插入消息，当前工具调用结束后处理。" : "已提交到 T3 Server"
+        self.statusText = isSteering ? "已提交插入消息，当前工具调用结束后处理。"
+          : isQueueing ? "已提交到 T3 Server 队列。" : "已提交到 T3 Server"
         // Server owns initial naming, including first messages sent from mobile.
       } catch {
         self.awaitingAgentStart = false
@@ -376,12 +354,7 @@ final class AppModel: ObservableObject {
       }
     }
   }
-  private func requireActiveRunID() throws -> String {
-    guard let id = lastTurnID else { throw T3DesktopClient.ClientError.rejected }
-    return id
-  }
   func abort() {
-    queuedPrompts.removeAll()
     guard let id = threadID, let server else { return }
     Task {
       do {
@@ -488,11 +461,18 @@ final class AppModel: ObservableObject {
   func updateCatalog(_ values: [SessionItem]) {
     if sessions != values { sessions = values }
   }
-  private func apply(_ detail: [String: Any]) {
+  func apply(_ detail: [String: Any]) {
     guard let thread = detail["thread"] as? [String: Any], thread["id"] as? String == threadID
     else { return }
     connectionState = .connected
     sessionName = thread["title"] as? String ?? ""
+    queueHeld = thread["queueHeld"] as? Bool ?? false
+    queuedPrompts = (thread["queuedMessages"] as? [[String: Any]] ?? []).compactMap {
+      guard let id = $0["runId"] as? String else { return nil }
+      return ServerQueuedPrompt(
+        id: id, text: $0["text"] as? String ?? "",
+        attachments: $0["localImages"] as? [PromptAttachment] ?? [])
+    }
     if let selection = thread["modelSelection"] as? [String: Any],
       pendingSelection == nil || NSDictionary(dictionary: pendingSelection!).isEqual(to: selection)
     {
@@ -619,7 +599,6 @@ final class AppModel: ObservableObject {
     if !isStreaming, let turnID, state != nil, lastSettledTurnID != turnID {
       lastSettledTurnID = turnID
     }
-    drainQueuedPrompts()
   }
 
   func refreshSessionMetadata() { server?.requestRefresh() }
@@ -672,7 +651,6 @@ final class AppModel: ObservableObject {
           self.isCompacting = false
           self.codexRotationInFlight = false
           self.refreshCodexAccounts()
-          self.drainQueuedPrompts()
         }
       }
       do {
@@ -807,38 +785,73 @@ final class AppModel: ObservableObject {
   private func unsupported(_ name: String) {
     statusText = "\(name)尚未接入 Pi Provider Adapter；不会回退到桌面 RPC。"
   }
-  func removeQueuedPrompt(id: UUID) { queuedPrompts.removeAll { $0.id == id } }
-  func editQueuedPrompt(id: UUID) {
-    guard let index = queuedPrompts.firstIndex(where: { $0.id == id }) else { return }
+  private func queueCommand(_ fields: [String: Any]) {
+    guard let id = threadID, let server else { return }
+    Task {
+      do {
+        try await server.dispatch(fields.merging(["threadId": id]) { _, new in new })
+      } catch {
+        statusText = "队列操作未确认；请刷新 Server 状态，不会自动重发。"
+      }
+    }
+  }
+  func resumeQueue() { queueCommand(["type": "queue.resume"]) }
+  func removeQueuedPrompt(id: String) {
+    queueCommand(["type": "queued-run.cancel", "runId": id])
+  }
+  func editQueuedPrompt(id: String) {
+    guard let prompt = queuedPrompts.first(where: { $0.id == id }),
+      let threadID, let server else { return }
     guard !hasUnsubmittedInput else {
       statusText = "请先发送或清空输入框，避免覆盖尚未提交的草稿。"
       return
     }
-    let prompt = queuedPrompts.remove(at: index)
-    composerText = prompt.text
-    attachments = prompt.attachments
-    statusText = "已移出等待队列，编辑后可重新发送。"
+    Task {
+      do {
+        try await server.dispatch([
+          "type": "queued-run.cancel", "threadId": threadID, "runId": id,
+        ])
+        guard self.threadID == threadID else { return }
+        guard !hasUnsubmittedInput else {
+          statusText = "已取消队列消息：\(prompt.text)"
+          return
+        }
+        composerText = prompt.text
+        attachments = prompt.attachments
+        statusText = "Server 已取消这条排队消息，编辑后可重新发送。"
+      } catch {
+        statusText = "取消未确认；原消息可能仍在 Server 队列中。"
+      }
+    }
   }
-  func queuedPromptMoveTarget(id: UUID, direction: Int) -> UUID? {
+  func queuedPromptMoveTarget(id: String, direction: Int) -> String? {
     guard direction == -1 || direction == 1,
-      let index = queuedPrompts.firstIndex(where: { $0.id == id })
-    else { return nil }
-    let prompt = queuedPrompts[index]
-    let candidates =
-      direction == -1
-      ? Array(queuedPrompts[..<index].reversed()) : Array(queuedPrompts.dropFirst(index + 1))
-    return candidates.first {
-      $0.delivery == prompt.delivery && $0.waitsForCompaction == prompt.waitsForCompaction
-    }?.id
+      let index = queuedPrompts.firstIndex(where: { $0.id == id }),
+      queuedPrompts.indices.contains(index + direction) else { return nil }
+    return queuedPrompts[index + direction].id
   }
-  func moveQueuedPrompt(id: UUID, direction: Int) {
+  func moveQueuedPrompt(id: String, direction: Int) {
     guard let target = queuedPromptMoveTarget(id: id, direction: direction),
-      let from = queuedPrompts.firstIndex(where: { $0.id == id }),
-      let to = queuedPrompts.firstIndex(where: { $0.id == target })
-    else { return }
-    queuedPrompts.swapAt(from, to)
+      let to = queuedPrompts.firstIndex(where: { $0.id == target }) else { return }
+    let before: Any = direction == -1 ? target
+      : (queuedPrompts.indices.contains(to + 1) ? queuedPrompts[to + 1].id as Any : NSNull())
+    queueCommand(["type": "queued-run.reorder", "runId": id, "beforeRunId": before])
   }
   func editMessage(_ text: String) { composerText = text }
+  func replyDocumentURL(for url: URL) async throws -> URL {
+    guard let path = T3ReplyDocumentLinks.path(for: url), let id = threadID, let server else {
+      throw T3DesktopClient.ClientError.rejected
+    }
+    let signed = try await server.replyDocumentURL(path: path, threadID: id)
+    guard threadID == id else { throw CancellationError() }
+    if let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment {
+      var components = URLComponents(url: signed, resolvingAgainstBaseURL: false)
+      components?.percentEncodedFragment = fragment
+      return components?.url ?? signed
+    }
+    return signed
+  }
+
   func replyImage(for url: URL) async throws -> PromptAttachment {
     guard let path = T3ReplyImageLinks.path(for: url), let id = threadID, let server else {
       throw T3DesktopClient.ClientError.rejected

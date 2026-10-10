@@ -89,6 +89,8 @@ struct ExtensionUIModelTests {
     ui.handle(
       try statusEvent(activeAccount: "Y", updatedAt: 2_000, remainingPercent: 90), from: remote)
     #expect(ui.usage(for: remote).accounts.first(where: \.isActive)?.name == "Y")
+    #expect(AccountQuotaPresentation.accounts(ui.usage(for: remote).accounts).first?.name == "Y")
+    #expect(AccountQuotaPresentation.accounts(ui.usage(for: desktop).accounts).first?.name == "X")
     #expect(
       ui.usage(for: remote).accounts.first(where: { $0.name == "X" })?.primary?.remainingPercent
         == 10)

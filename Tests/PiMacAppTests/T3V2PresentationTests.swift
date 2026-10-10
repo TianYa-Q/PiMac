@@ -5,6 +5,31 @@ import Testing
 
 @MainActor
 struct T3V2PresentationTests {
+  @Test func serverQueueUsesRunIdentityAndDeliveryOrder() throws {
+    let thread = try #require(T3V2Presentation.detail(["projection": [
+      "thread": ["id": "thread"],
+      "runs": [
+        ["id": "second", "status": "queued", "ordinal": 2, "queuePosition": 2,
+         "userMessageId": "m2", "queueHeld": true],
+        ["id": "done", "status": "completed", "ordinal": 3, "userMessageId": "m3"],
+        ["id": "first", "status": "queued", "ordinal": 4, "queuePosition": 1,
+         "userMessageId": "m1"],
+      ],
+      "messages": [
+        ["id": "m1", "text": "First", "attachments": [["id": "image", "type": "image"]]],
+        ["id": "m2", "text": "Second"],
+        ["id": "m3", "text": "Done"],
+      ],
+      "visibleTurnItems": [],
+    ]])["thread"] as? [String: Any])
+    let queue = try #require(thread["queuedMessages"] as? [[String: Any]])
+    #expect(queue.compactMap { $0["runId"] as? String } == ["first", "second"])
+    #expect(queue.first?["text"] as? String == "First")
+    #expect((queue.first?["attachments"] as? [[String: Any]])?.count == 1)
+    #expect(thread["queueHeld"] as? Bool == true)
+    #expect((thread["messages"] as? [[String: Any]])?.isEmpty == true)
+  }
+
   @Test func activeRunWinsOverLaterQueuedRun() {
     let detail: [String: Any] = [
       "snapshotSequence": 42,

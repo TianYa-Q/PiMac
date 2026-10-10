@@ -23,6 +23,17 @@ struct AccountQuotaPresentationTests {
     #expect(rows[1].isHidden)
   }
 
+  @Test func onlyConfiguredActiveGeminiIsPlacedFirst() {
+    for configured in [false, true] {
+      for active in [false, true] {
+        let gemini = GeminiUsageStatus(
+          isConfigured: configured, isActive: active, quotas: [], error: nil)
+        #expect(AccountQuotaPresentation.showsGeminiFirst(gemini) == (configured && active))
+      }
+    }
+    #expect(!AccountQuotaPresentation.showsGeminiFirst(nil))
+  }
+
   @Test func emptyAccountsRemainEmpty() {
     #expect(AccountQuotaPresentation.accounts([]).isEmpty)
   }

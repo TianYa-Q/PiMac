@@ -46,6 +46,8 @@ struct T3ImageDeliveryTests {
           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1cAAAAASUVORK5CYII="
       ))
     try bytes.write(to: root.appendingPathComponent("comparison.png"))
+    let html = "<!doctype html><h1>Before / After</h1>"
+    try html.write(to: root.appendingPathComponent("comparison.html"), atomically: true, encoding: .utf8)
     let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
       .deletingLastPathComponent().deletingLastPathComponent()
     let fixture = repository.appendingPathComponent("sidecars/t3-server/tests/fixtures/pi.mjs")
@@ -96,7 +98,17 @@ struct T3ImageDeliveryTests {
         try await Task.sleep(for: .milliseconds(100))
       }
       #expect(images.count == expectedCount)
+      #expect(images.first?.replyImagePath == "comparison.png")
       for image in images { #expect(try Data(contentsOf: image.url) == bytes) }
+    }
+    let documentURL = try await client.replyDocumentURL(path: "comparison.html", threadID: threadID)
+    #expect(documentURL.path.hasPrefix("/api/assets/"))
+    let (documentData, documentResponse) = try await URLSession.shared.data(from: documentURL)
+    #expect((documentResponse as? HTTPURLResponse)?.statusCode == 200)
+    #expect(documentResponse.mimeType == "text/html")
+    #expect(String(data: documentData, encoding: .utf8) == html)
+    await #expect(throws: (any Error).self) {
+      try await client.replyDocumentURL(path: "missing.html", threadID: threadID)
     }
     let preview = try await client.replyImage(path: "comparison.png", threadID: threadID)
     #expect(try Data(contentsOf: preview.url) == bytes)

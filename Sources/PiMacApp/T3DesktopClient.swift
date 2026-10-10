@@ -216,15 +216,7 @@ final class T3DesktopClient: ObservableObject {
   }
 
   func interrupt(threadID: String) async throws {
-    let native = try await request("/api/orchestration/threads/\(threadID)")
-    guard let projection = native["projection"] as? JSON,
-      let runs = projection["runs"] as? [JSON],
-      let run = runs.last(where: {
-        ["preparing", "starting", "running", "waiting"].contains($0["status"] as? String ?? "")
-      }),
-      let runID = run["id"] as? String
-    else { throw ClientError.rejected }
-    try await dispatch(["type": "run.interrupt", "threadId": threadID, "runId": runID])
+    try await dispatch(["type": "thread.stop", "threadId": threadID])
   }
 
   static func mutationMethod(for type: String?) -> String {
@@ -660,9 +652,10 @@ final class T3DesktopClient: ObservableObject {
                 "_tag": "media-file", "threadId": threadID, "path": path,
               ]
             ])
-          let image = try await downloadReplyImage(
+          var image = try await downloadReplyImage(
             signed, key: imageKey,
             mime: T3ReplyImageLinks.mimeType(path)!)
+          image.replyImagePath = path
           guard generation == current else { return (detail, false) }
           imageCache[imageKey] = image
           images.append(image)
@@ -681,6 +674,21 @@ final class T3DesktopClient: ObservableObject {
     thread["messages"] = messages
     detail["thread"] = thread
     return (detail, complete)
+  }
+
+  func replyDocumentURL(path: String, threadID: String) async throws -> URL {
+    guard let base = service?.serverURL else { throw ClientError.rejected }
+    let current = generation
+    let signed = try await rpc(
+      "assets.createUrl",
+      payload: ["resource": ["_tag": "media-file", "threadId": threadID, "path": path]])
+    guard generation == current else { throw CancellationError() }
+    guard let relative = signed["relativeUrl"] as? String,
+      relative.hasPrefix("/api/assets/"),
+      let url = URL(string: base.absoluteString + relative),
+      url.host == base.host, url.port == base.port, url.scheme == base.scheme
+    else { throw ClientError.rejected }
+    return url
   }
 
   func replyImage(path: String, threadID: String) async throws -> PromptAttachment {
@@ -771,6 +779,14 @@ final class T3DesktopClient: ObservableObject {
       }
     }
     thread["messages"] = messages
+    var queued = thread["queuedMessages"] as? [JSON] ?? []
+    for index in queued.indices {
+      if let images = queued[index]["attachments"] as? [JSON], !images.isEmpty {
+        queued[index]["localImages"] = await attachments(
+          images.filter { $0["type"] as? String == "image" })
+      }
+    }
+    thread["queuedMessages"] = queued
     detail["thread"] = thread
     return (detail, complete)
   }
