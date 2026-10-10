@@ -1,10 +1,29 @@
 import Foundation
 import SwiftUI
 
+/// Wall-clock gaps include system sleep. Allow both peers to resume in either order,
+/// but never indefinitely forgive a watchdog that really stopped publishing.
+struct LidSleepResumeWindow {
+  private var lastTick: Date
+  private var deadline: Date?
+
+  init(now: Date = .now) { lastTick = now }
+
+  mutating func tick(now: Date) -> Bool {
+    if now.timeIntervalSince(lastTick) > 6 {
+      deadline = now.addingTimeInterval(10)
+    }
+    lastTick = now
+    return deadline.map { now < $0 } ?? false
+  }
+}
+
 /// A session-only watchdog, optionally using two narrowly scoped sudo permissions.
 @MainActor
 final class LidSleepController: ObservableObject {
   static let shared = LidSleepController()
+  /// User permission is independent of the watchdog's current health.
+  @Published private(set) var requested: Bool
   @Published private(set) var enabled = false
   @Published private(set) var busy = false
   @Published private(set) var status = "未启用" {
@@ -16,15 +35,19 @@ final class LidSleepController: ObservableObject {
   private var sessionGeneration = UUID()
   private var directory: URL?
   private var timer: Timer?
+  private var resumeWindow = LidSleepResumeWindow()
   private let defaults: UserDefaults
   private var launchRestoreTask: Task<Void, Never>?
   private var didRestoreAtLaunch = false
   static let launchPreferenceKey = "PiMac.lidSleep.enableOnLaunch"
+  static let requestedPreferenceKey = "PiMac.lidSleep.requested"
 
   var enableOnLaunch: Bool { defaults.bool(forKey: Self.launchPreferenceKey) }
 
   init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
+    requested = defaults.object(forKey: Self.requestedPreferenceKey) as? Bool
+      ?? defaults.bool(forKey: Self.launchPreferenceKey)
     refreshPasswordlessAccess()
     Task { [weak self] in
       let available = await Task.detached {
@@ -44,8 +67,7 @@ final class LidSleepController: ObservableObject {
     guard !busy, !install || !enabled else { return }
     let needsRestore = enabled
     if !install {
-      defaults.set(false, forKey: Self.launchPreferenceKey)
-      stop()
+      setEnabled(false)
     }
     let script =
       install
@@ -76,17 +98,19 @@ final class LidSleepController: ObservableObject {
   func restoreAtLaunch() {
     guard !didRestoreAtLaunch else { return }
     didRestoreAtLaunch = true
-    guard enableOnLaunch else { return }
+    guard enableOnLaunch, requested else { return }
     // Let the previous app's watchdog restore its global switch on quick restarts.
     launchRestoreTask = Task { [weak self] in
       do { try await Task.sleep(for: .seconds(3)) } catch { return }
-      guard let self, self.enableOnLaunch, !self.enabled, !self.busy else { return }
+      guard let self, self.enableOnLaunch, self.requested, !self.enabled, !self.busy else { return }
       self.setEnabled(true)
     }
   }
 
   func setEnabled(_ value: Bool) {
     guard !busy else { return }
+    requested = value
+    defaults.set(value, forKey: Self.requestedPreferenceKey)
     if !value {
       defaults.set(false, forKey: Self.launchPreferenceKey)
       stop()
@@ -204,9 +228,11 @@ final class LidSleepController: ObservableObject {
   }
 
   private func startHeartbeat() {
+    resumeWindow = LidSleepResumeWindow()
     timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
       Task { @MainActor in
         guard let self, let directory = self.directory else { return }
+        let resuming = self.resumeWindow.tick(now: .now)
         do {
           try Data().write(to: directory.appendingPathComponent("heartbeat"), options: .atomic)
         } catch {
@@ -216,6 +242,10 @@ final class LidSleepController: ObservableObject {
         }
         if self.enabled {
           guard let state = self.readState() else {
+            if resuming {
+              self.status = "正在恢复守护连接，保留合盖运行开关…"
+              return
+            }
             self.stop()
             self.status = "守护进程失联，已停止会话；若系统仍无法休眠，请运行 sudo pmset -a disablesleep 0"
             return
@@ -311,6 +341,20 @@ final class LidSleepController: ObservableObject {
     fi
     """
 
+  /// A missing lease still exits immediately. Only a scheduling gap gets bounded
+  /// grace for an existing heartbeat; the app PID is checked by the outer loop.
+  nonisolated static let watchdogLeaseScript = """
+    stamp=$(/usr/bin/stat -f %m "$dir/heartbeat" 2>/dev/null) || break
+    now=$(/bin/date +%s)
+    if [ "$((now - lastTick))" -gt 6 ]; then
+      resumeUntil=$((now + 10))
+      # Reapply after wake rather than trusting a pre-sleep cached power setting.
+      current=unknown
+    fi
+    lastTick=$now
+    [ "$((now - stamp))" -le 10 ] || [ "$now" -lt "$resumeUntil" ] || break
+    """
+
   nonisolated static func watchdogScript(directory: String, pid: Int32, passwordless: Bool = false)
     -> String
   {
@@ -338,10 +382,10 @@ final class LidSleepController: ObservableObject {
       trap '\(powerCommand) -a disablesleep 0; \(cleanup)' EXIT
       trap 'exit' HUP INT TERM
       current=0
+      lastTick=$(/bin/date +%s)
+      resumeUntil=0
       while /bin/kill -0 \(pid) 2>/dev/null; do
-        stamp=$(/usr/bin/stat -f %m "$dir/heartbeat" 2>/dev/null) || break
-        now=$(/bin/date +%s)
-        [ "$((now - stamp))" -le 10 ] || break
+        \(watchdogLeaseScript)
         desired=0
         state=battery
         if /usr/bin/pmset -g batt | /usr/bin/grep -q "Now drawing from 'AC Power'"; then
@@ -377,7 +421,7 @@ struct LidSleepSettingsView: View {
         Toggle(
           "合盖不休眠",
           isOn: Binding(
-            get: { controller.enabled },
+            get: { controller.requested },
             set: { value in
               if value { confirming = true } else { controller.setEnabled(false) }
             })
@@ -404,13 +448,19 @@ struct LidSleepSettingsView: View {
           )
           .help("配置前请先关闭合盖运行；移除权限需要管理员授权。")
         }
+        if controller.requested && !controller.enabled && !controller.busy {
+          Text("已允许合盖不休眠，但当前未生效。")
+            .font(.caption).foregroundStyle(.orange)
+          Button("重试开启") { controller.setEnabled(true) }
+        }
         Text(controller.status).font(.caption).foregroundStyle(.secondary)
         Text("保持通风，勿放入包中。")
           .font(.caption).foregroundStyle(.orange)
         DisclosureGroup("说明") {
           VStack(alignment: .leading, spacing: 8) {
             Text("仅插电生效，无需外接显示器；拔电或退出后约 10 秒内恢复休眠。")
-            Text("开启后会记住开关，下次启动自动尝试开启；手动关闭后取消。")
+            Text("勾选表示允许合盖不休眠；运行失败不会取消勾选，是否生效请查看状态。成功开启后，下次启动自动尝试开启；手动关闭后取消。")
+            Text("拔电休眠后保留开关，系统唤醒且重新插电时恢复生效；仅插电不保证能唤醒合盖的 Mac。")
             Text("合盖约 2 秒后关闭所有屏幕，开盖后用键盘或触控板唤醒。")
             Text("修改全局休眠开关，也会阻止手动休眠；勿与其他防休眠工具同时使用。")
           }

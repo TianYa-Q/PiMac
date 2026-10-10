@@ -36,11 +36,11 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
   const originalServerURL = gateway.serverURL;
   t.after(async () => { await gateway.close(); await rm(directory, { recursive: true, force: true }); });
   assert.deepEqual(gateway.lan.status(), { endpoint: null });
-  await assert.rejects(gateway.lan.configure({ host: '0.0.0.0', port: 3773 }));
+  await assert.rejects(gateway.lan.configure({ host: '0.0.0.0', port: 1023 }));
   await assert.rejects(gateway.lan.configure({ host: '8.8.8.8', port: 3773 }));
   await assert.rejects(gateway.lan.configure({ host: '192.168.99.250', port: 3773 }));
-  const endpoint = { host: '127.0.0.1', port: await unusedPort() }; // loopback fixture, not offered in UI
-  const base = `http://${endpoint.host}:${endpoint.port}`;
+  const endpoint = { host: '0.0.0.0', port: await unusedPort() };
+  const base = `http://127.0.0.1:${endpoint.port}`;
   await new Promise(resolve => gateway.server.listen(0, '127.0.0.1', resolve));
   const supervisor = `http://127.0.0.1:${gateway.server.address().port}`;
   assert.equal((await request(supervisor, '/internal/auth/lan')).status, 401);
@@ -64,8 +64,8 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
   }
   const { privateKey, publicKey } = await generateKeyPair('ES256', { extractable: true });
   const jwk = await exportJWK(publicKey);
-  const proof = (route, token, scheme = 'http') => new SignJWT({
-    htu: base.replace('http:', scheme + ':') + route, htm: 'POST', jti: randomUUID(),
+  const proof = (route, token, scheme = 'http', method = 'POST') => new SignJWT({
+    htu: base.replace('http:', scheme + ':') + route.split('?')[0], htm: method, jti: randomUUID(),
     ...(token ? { ath: createHash('sha256').update(token).digest('base64url') } : {}),
   }).setProtectedHeader({ alg: 'ES256', typ: 'dpop+jwt', jwk }).setIssuedAt().sign(privateKey);
   const paired = await admin('pairing', {});
@@ -88,6 +88,35 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
   const ticket = async () => { const r = await mint(); assert.equal(r.status, 200, r.body); return JSON.parse(r.body).ticket; };
   const wsURL = secret => base.replace('http:', 'ws:') + '/ws?orchestrationProtocol=2&wsTicket=' + secret;
   await call(wsURL(await ticket()), 'server.probe', {});
+  // Earlier activity is HTTP (not WS): verify the LAN allowlist reaches upstream
+  // handlers, while DPoP authentication and cursor validation remain enforced.
+  const projectId = randomUUID();
+  await call(wsURL(await ticket()), 'projects.mutate', {
+    type: 'project.create', commandId: randomUUID(), projectId,
+    title: 'History fixture', workspaceRoot: directory,
+  });
+  const { threadId } = await call(wsURL(await ticket()), 'orchestration.launchThread', {
+    commandId: randomUUID(), projectId, title: 'History fixture',
+    workspaceStrategy: { type: 'root' }, modelSelection: { instanceId: 'pi', model: 'test/model' },
+    runtimeMode: 'full-access', interactionMode: 'default',
+  });
+  const readThread = async (suffix, authenticated = true) => {
+    const route = `/api/orchestration/threads/${threadId}/${suffix}`;
+    return request(base, route, { headers: {
+      'x-t3-orchestration-protocol': '2',
+      ...(authenticated ? { authorization: 'DPoP ' + token,
+        dpop: await proof(route, token, 'http', 'GET') } : {}),
+    } });
+  };
+  const bounded = await readThread('bounded');
+  assert.equal(bounded.status, 200, bounded.body);
+  assert.equal(JSON.parse(bounded.body).hasMoreHistory, false);
+  const invalidHistory = await readThread('history?cursor=invalid');
+  assert.equal(invalidHistory.status, 400, invalidHistory.body);
+  assert.equal(JSON.parse(invalidHistory.body).reason, 'invalid_history_cursor');
+  for (const suffix of ['bounded', 'history?cursor=invalid']) {
+    assert.equal((await readThread(suffix, false)).status, 401);
+  }
   await assert.rejects(call(wsURL(await ticket()), 'server.getProcessDiagnostics', {}),
     error => error._tag === 'EnvironmentAuthorizationError');
   const denied = new WebSocket(wsURL(await ticket()), { origin: 'http://attacker.invalid' });
@@ -103,7 +132,7 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
   await new Promise((resolve, reject) => { accepted.once('open', resolve); accepted.once('error', reject); });
   // An occupied replacement must leave the existing LAN endpoint untouched.
   const blocker = net.createServer();
-  await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve));
+  await new Promise(resolve => blocker.listen(0, '0.0.0.0', resolve));
   await assert.rejects(gateway.lan.configure({ host: '127.0.0.1', port: blocker.address().port }), { code: 'EADDRINUSE' });
   await new Promise(resolve => blocker.close(resolve));
   assert.deepEqual(gateway.lan.status(), { endpoint });

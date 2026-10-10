@@ -28,6 +28,13 @@ enum AccountUsageSnapshot {
     case unknown, fresh, stale, clockSkew
   }
 
+  /// Recent samples need no age or expiry label, even if the polling TTL is shorter.
+  static func shouldShowFreshness(capturedAt: Date?, now: Date) -> Bool {
+    guard let capturedAt else { return true }
+    let age = now.timeIntervalSince(capturedAt)
+    return age < -5 || age > 300
+  }
+
   static func freshness(
     capturedAt: Date?, now: Date, maxAge: TimeInterval = 180
   ) -> Freshness {

@@ -60,8 +60,20 @@ enum T3V2Presentation {
           "text": item["text"] ?? "", "streaming": item["streaming"] ?? false,
           "attachments": item["attachments"] ?? [], "createdAt": date,
         ])
+      case "compaction":
+        let before = item["beforeTokenCount"] as? Int
+        let after = item["afterTokenCount"] as? Int
+        let counts = before.map { value in
+          after.map { " \(value.formatted()) → \($0.formatted()) tokens" }
+            ?? " \(value.formatted()) tokens"
+        } ?? ""
+        messages.append([
+          "id": item["id"] ?? "", "role": "compaction",
+          "title": "上下文已压缩" + counts,
+          "text": item["summary"] ?? "", "createdAt": date,
+        ])
       case "command_execution", "dynamic_tool", "file_change", "file_search", "web_search", "error",
-        "system_notice", "compaction":
+        "system_notice":
         let status = item["status"] as? String ?? "completed"
         let tool = !["error", "system_notice", "compaction"].contains(type)
         let name =

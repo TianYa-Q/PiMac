@@ -26,6 +26,9 @@ const methods = new Set(['server.probe', 'server.getConfig', 'server.getSettings
   // Stock mobile liveness feeds upstream's background subscription policy.
   // Host power state and all other administration remain denied.
   'server.reportClientActivity',
+  // Mobile project browser / file viewer; upstream retains read scope and file safety checks.
+  // Keep writeFile and unrelated filesystem/host methods denied.
+  'projects.listEntries', 'projects.readFile',
   'projects.mutate', 'assets.persistChatAttachments', 'assets.createUrl',
   'attachments.createUploadUrl', 'attachments.delete',
   // Mobile Usage / Limits use official services; upstream still enforces scopes.
@@ -44,7 +47,9 @@ export const rpcAllowed = method => methods.has(method);
 export const httpAllowed = (method, url) => {
   const pathname = url.split('?')[0];
   return (method === 'GET' && (pathname === '/ws' || pathname === '/.well-known/t3/environment' || pathname.startsWith('/api/auth/') ||
-    pathname.startsWith('/api/assets/') || pathname === '/api/orchestration/shell' || /^\/api\/orchestration\/threads\/[^/]+$/.test(pathname) || pathname === '/api/connect/link-state')) ||
+    pathname.startsWith('/api/assets/') || pathname === '/api/orchestration/shell' ||
+    // Mobile bounded snapshots and earlier-history pages retain upstream DPoP/read checks.
+    /^\/api\/orchestration\/threads\/[^/]+(?:\/(?:bounded|history))?$/.test(pathname) || pathname === '/api/connect/link-state')) ||
     // The official route validates the signed upload token and enforces its byte limit.
     (method === 'POST' && (pathname === '/oauth/token' || pathname.startsWith('/api/auth/') ||
       /^\/api\/attachments\/upload\/[^/]+$/.test(pathname) ||

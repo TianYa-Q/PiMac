@@ -45,6 +45,30 @@ struct T3V2PresentationTests {
     #expect(messages?.last?["id"] as? String == "user")
   }
 
+  @Test func compactionMapsToDedicatedCollapsibleMessage() throws {
+    let native: [String: Any] = [
+      "projection": [
+        "thread": ["id": "thread"],
+        "visibleTurnItems": [
+          ["item": [
+            "id": "compact", "type": "compaction", "summary": "Saved context",
+            "beforeTokenCount": 256000, "afterTokenCount": 29800,
+            "startedAt": "2026-01-01T00:00:01Z",
+          ]],
+          ["item": ["id": "unknown", "type": "compaction"]],
+        ],
+      ]
+    ]
+    let thread = try #require(T3V2Presentation.detail(native)["thread"] as? [String: Any])
+    let messages = try #require(thread["messages"] as? [[String: Any]])
+    #expect(messages[0]["role"] as? String == "compaction")
+    #expect(messages[0]["text"] as? String == "Saved context")
+    #expect((messages[0]["title"] as? String)?.contains("→") == true)
+    #expect(messages[0]["createdAt"] as? String == "2026-01-01T00:00:01Z")
+    #expect(messages[1]["title"] as? String == "上下文已压缩")
+    #expect((thread["activities"] as? [[String: Any]])?.isEmpty == true)
+  }
+
   @Test func commandStringsBecomeVisibleBashInputs() throws {
     for status in ["running", "completed"] {
       for title in ["bash", "Run command"] {

@@ -5,14 +5,14 @@ import Testing
 
 @MainActor
 struct T3ConnectionModelsTests {
-  @Test func privateAddressesAreCanonicalAndPublicOrWildcardAddressesAreRejected() throws {
+  @Test func privateAndWildcardAddressesAreCanonicalAndPublicAddressesAreRejected() throws {
     for host in [
-      "10.0.0.1", "172.16.1.2", "172.31.1.2", "192.168.1.7",
+      "0.0.0.0", "10.0.0.1", "172.16.1.2", "172.31.1.2", "192.168.1.7",
     ] {
       #expect(try T3NetworkEndpoint(host: host, port: 3773).host == host)
     }
     for host in [
-      "0.0.0.0", "127.0.0.1", "8.8.8.8", "172.32.1.1", "100.63.1.1", "100.64.0.1", "100.127.255.1",
+      "127.0.0.1", "8.8.8.8", "172.32.1.1", "100.63.1.1", "100.64.0.1", "100.127.255.1",
       "100.128.1.1", "192.168.01.2",
       "::1", "localhost", "192.168.1.999", "192.168.1.2/24", "192.168.1.2 ",
     ] {
@@ -61,7 +61,7 @@ struct T3ConnectionModelsTests {
     #expect(!T3Pairing(id: "id", credential: "fixture", expiresAt: "invalid").isValid(at: expiry))
   }
 
-  @Test func lanDefaultsOnSelectsPhysicalInterfaceAndRemembersDisable() throws {
+  @Test func lanDefaultsOnBindsWildcardEvenOfflineAndRemembersDisable() throws {
     let suite = "pimac-lan-defaults-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
@@ -71,26 +71,27 @@ struct T3ConnectionModelsTests {
       T3NetworkEndpoint.Interface(name: "en0", address: "192.168.1.3"),
     ]
     #expect(T3ConnectionPreferences.isEnabled(in: defaults))
-    let automatic = T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: interfaces)
-    #expect(automatic?.host == "192.168.1.3")
+    let automatic = T3ConnectionPreferences.startupEndpoint(from: defaults)
+    #expect(automatic?.host == "0.0.0.0")
     #expect(automatic?.port == 3773)
-    #expect(
-      T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: [interfaces[0]]) == nil)
-    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: []) == nil)
+    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults) == automatic)
+    #expect(automatic?.connectionURL(interfaces: []) == nil)
+    #expect(automatic?.connectionURL(interfaces: interfaces)?.host == "192.168.1.3")
+    #expect(automatic?.connectionURL(interfaces: [interfaces[1]])?.host == "192.168.2.3")
     T3ConnectionPreferences.save(
       try T3NetworkEndpoint(host: "192.168.2.3", port: 4773), to: defaults)
     #expect(
-      T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: interfaces)?.host
-        == "192.168.2.3")
+      T3ConnectionPreferences.startupEndpoint(from: defaults)?.host
+        == "0.0.0.0")
     let changedNetwork = T3ConnectionPreferences.startupEndpoint(
-      from: defaults, interfaces: [interfaces[2]])
-    #expect(changedNetwork?.host == "192.168.1.3")
+      from: defaults)
+    #expect(changedNetwork?.host == "0.0.0.0")
     #expect(changedNetwork?.port == 4773)
     defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
     #expect(!T3ConnectionPreferences.isEnabled(in: defaults))
-    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: interfaces) == nil)
+    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults) == nil)
     defaults.set(true, forKey: T3ConnectionPreferences.enabledKey)
-    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults, interfaces: interfaces) != nil)
+    #expect(T3ConnectionPreferences.startupEndpoint(from: defaults) != nil)
   }
 
   @Test func lanConsentPersistsButLegacyConsentIsNotReinterpreted() throws {

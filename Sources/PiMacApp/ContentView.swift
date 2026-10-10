@@ -584,7 +584,7 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
-              ScrollView {
+              ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: 3) {
                   ForEach(sessionSearchResults) { result in
                     redesignedSessionRow(result.session, snippet: result.snippet)
@@ -612,7 +612,7 @@ struct ContentView: View {
             )
             .controlSize(.small)
           } else {
-            ScrollView {
+            ScrollView(showsIndicators: false) {
               LazyVStack(spacing: 3) {
                 ForEach(visibleSessions) { session in
                   redesignedSessionRow(session)
@@ -2020,11 +2020,67 @@ private struct ConversationTurnView: View, Equatable {
           .id(assistant.id)
       }
       ForEach(turn.supplementaryEntries) { entry in
-        ChatEntryView(entry: entry)
-          .equatable()
-          .id(entry.id)
+        if entry.kind == .compaction {
+          CompactionEntryView(entry: entry)
+            .id(entry.id)
+        } else {
+          ChatEntryView(entry: entry)
+            .equatable()
+            .id(entry.id)
+        }
       }
     }
+  }
+}
+
+private struct CompactionEntryView: View {
+  let entry: ChatEntry
+  @Environment(\.conversationExpansionStore) private var expansionStore
+  @State private var localExpanded = false
+
+  private var expansionKey: String { "compaction-\(entry.id)" }
+  private var expanded: Bool {
+    get { expansionStore?.values[expansionKey] ?? localExpanded }
+    nonmutating set {
+      localExpanded = newValue
+      expansionStore?.values[expansionKey] = newValue
+    }
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Button {
+        withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() }
+      } label: {
+        HStack(spacing: 10) {
+          Rectangle().fill(Color.secondary.opacity(0.2)).frame(height: 1)
+          Image(systemName: "arrow.down.right.and.arrow.up.left")
+          Text(entry.title)
+            .fixedSize(horizontal: false, vertical: true)
+          if !entry.text.isEmpty {
+            Image(systemName: expanded ? "chevron.up" : "chevron.down")
+              .font(.caption2)
+          }
+          Rectangle().fill(Color.secondary.opacity(0.2)).frame(height: 1)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .disabled(entry.text.isEmpty)
+      .help(entry.text.isEmpty ? "上下文已压缩" : "展开或收起压缩摘要")
+      if expanded, !entry.text.isEmpty {
+        MarkdownView(entry.text)
+          .equatable()
+          .font(.callout)
+          .textSelection(.enabled)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(12)
+          .background(Color.secondary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
+      }
+    }
+    .padding(.vertical, 6)
   }
 }
 
@@ -2921,6 +2977,7 @@ private struct SettingsView: View {
   private enum SettingsTab: String, CaseIterable {
     case runtime = "运行环境"
     case mobile = "手机连接"
+    case ps5 = "PS5 网关"
     case telegram = "Telegram"
     case updates = "版本与扩展"
 
@@ -2928,6 +2985,7 @@ private struct SettingsView: View {
       switch self {
       case .runtime: return "desktopcomputer"
       case .mobile: return "iphone"
+      case .ps5: return "gamecontroller"
       case .telegram: return "paperplane"
       case .updates: return "shippingbox"
       }
@@ -2990,6 +3048,9 @@ private struct SettingsView: View {
             }
             if selectedTab == .telegram {
               TelegramSettingsView(control: telegram)
+            }
+            if selectedTab == .ps5 {
+              PS5GatewaySettingsView()
             }
 
             if selectedTab == .updates {

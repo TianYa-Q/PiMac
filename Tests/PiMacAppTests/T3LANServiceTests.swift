@@ -8,8 +8,7 @@ import Testing
 struct T3LANServiceTests {
   @Test(.timeLimit(.minutes(1)))
   func failedBindReconcilesAndPairingRequiresConfirmedLiveListener() async throws {
-    // No private network is required by CI; the pure transport tests use loopback.
-    guard let interface = T3NetworkEndpoint.interfaces().first else { return }
+    // Occupy the wildcard port, even when CI has no private network.
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let suite = "pimac-lan-service-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
@@ -29,7 +28,7 @@ struct T3LANServiceTests {
     var address = sockaddr_in()
     address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
     address.sin_family = sa_family_t(AF_INET)
-    #expect(inet_pton(AF_INET, interface.address, &address.sin_addr) == 1)
+    #expect(inet_pton(AF_INET, "0.0.0.0", &address.sin_addr) == 1)
     let bound = withUnsafePointer(to: &address) {
       $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
         Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
@@ -43,7 +42,7 @@ struct T3LANServiceTests {
     }
     #expect(located == 0)
     let endpoint = try T3NetworkEndpoint(
-      host: interface.address, port: Int(UInt16(bigEndian: address.sin_port)))
+      host: "0.0.0.0", port: Int(UInt16(bigEndian: address.sin_port)))
     try service.start(workspace: workspace, token: T3NetworkEndpoint.secret())
     for _ in 0..<200 where service.serverURL == nil {
       try await Task.sleep(for: .milliseconds(50))

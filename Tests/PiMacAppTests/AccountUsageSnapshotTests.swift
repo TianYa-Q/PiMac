@@ -18,6 +18,21 @@ struct AccountUsageSnapshotTests {
     #expect(AccountUsageSnapshot.date(1_000, milliseconds: true)?.timeIntervalSince1970 == 1)
   }
 
+  @Test func freshnessLabelIsHiddenForSamplesWithinFiveMinutes() {
+    let now = Date(timeIntervalSince1970: 1_000)
+    for age: TimeInterval in [0, 82, 180, 299, 300] {
+      #expect(!AccountUsageSnapshot.shouldShowFreshness(
+        capturedAt: now.addingTimeInterval(-age), now: now))
+    }
+    #expect(AccountUsageSnapshot.shouldShowFreshness(
+      capturedAt: now.addingTimeInterval(-301), now: now))
+    #expect(AccountUsageSnapshot.shouldShowFreshness(capturedAt: nil, now: now))
+    #expect(AccountUsageSnapshot.shouldShowFreshness(
+      capturedAt: now.addingTimeInterval(6), now: now))
+    #expect(!AccountUsageSnapshot.shouldShowFreshness(
+      capturedAt: now.addingTimeInterval(2), now: now))
+  }
+
   @Test func freshnessUsesQueryTimeAndHandlesClockChanges() {
     let now = Date(timeIntervalSince1970: 1_000)
     #expect(AccountUsageSnapshot.freshness(capturedAt: nil, now: now) == .unknown)

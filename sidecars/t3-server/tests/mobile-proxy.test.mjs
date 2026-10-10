@@ -224,6 +224,27 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
     await assert.rejects(readRpc('scheduledTasks.' + method, payload),
       error => error._tag === 'EnvironmentAuthorizationError' && error.requiredScope === 'orchestration:operate');
   }
+  // Stock mobile file viewer uses project RPCs over the same DPoP/ticket route.
+  // Exercise source extensions and UTF-8 with both normal and read-only sessions.
+  await mkdir(join(directory, 'vendor'), { recursive: true });
+  const fileContents = '// 手机文件预览\nexport const ready = true;\n';
+  await writeFile(join(directory, 'vendor', 't3-server.mjs'), fileContents);
+  const fileInput = { cwd: directory, relativePath: 'vendor/t3-server.mjs' };
+  for (const fileRpc of [rpc, readRpc]) {
+    const listing = await fileRpc('projects.listEntries', { cwd: directory, directoryPath: 'vendor' });
+    assert(listing.entries.some(entry => entry.path === 'vendor/t3-server.mjs'));
+    assert.deepEqual(await fileRpc('projects.readFile', fileInput), {
+      relativePath: fileInput.relativePath, contents: fileContents,
+      byteLength: Buffer.byteLength(fileContents), truncated: false,
+    });
+    await assert.rejects(fileRpc('projects.readFile', { ...fileInput, relativePath: '../escape.txt' }),
+      error => error._tag === 'ProjectReadFileError' && error.failure === 'workspace_path_outside_root');
+    await assert.rejects(fileRpc('projects.readFile', { ...fileInput, relativePath: 'vendor/missing.mjs' }),
+      error => error._tag === 'ProjectReadFileError' && error.failure === 'operation_failed');
+    await assert.rejects(fileRpc('projects.writeFile', { ...fileInput, contents: 'overwrite' }),
+      error => error._tag === 'EnvironmentAuthorizationError');
+  }
+  assert.equal(await readFile(join(directory, fileInput.relativePath), 'utf8'), fileContents);
   // Native Git reads cross the same DPoP/ticket transport; writes retain upstream scopes.
   assert.equal((await rpc('vcs.refreshStatus', { cwd: directory })).isRepo, false);
   assert.equal((await readRpc('vcs.listRefs', { cwd: directory })).isRepo, false);

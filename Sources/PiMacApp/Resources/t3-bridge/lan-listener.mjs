@@ -24,9 +24,13 @@ export function createLANListener({ localURL, allowed }) {
     return new Promise(resolve => listener.server.close(resolve));
   };
   const open = async endpoint => {
-    const sockets = new Set(), authority = `${endpoint.host}:${endpoint.port}`;
+    const sockets = new Set();
     const accept = req => {
       const peer = req.socket.remoteAddress?.replace(/^::ffff:/u, '');
+      // Check the actual destination of each connection, not a stale interface
+      // snapshot or arbitrary Host header. This survives Wi-Fi/IP changes.
+      const local = req.socket.localAddress?.replace(/^::ffff:/u, '');
+      const authority = `${local}:${endpoint.port}`;
       return !closed && (isPrivateAddress(peer) || isLoopbackPeer(peer)) &&
         req.headers.host === authority && req.url?.startsWith('/') && !req.url.startsWith('//') &&
         !['/api/connect/preferences', '/api/connect/unlink'].includes(req.url.split('?')[0]) &&
@@ -90,8 +94,12 @@ export function createLANListener({ localURL, allowed }) {
   const configure = endpoint => {
     const operation = pending.then(async () => {
       if (closed) throw new Error('LAN listener closed');
-      if (endpoint) validatePublicEndpoint(endpoint);
-      if (endpoint && active?.endpoint.host === endpoint.host && active.endpoint.port === endpoint.port) return status();
+      if (endpoint) {
+        validatePublicEndpoint(endpoint);
+        // Legacy IP+port callers are migrated to the same port-only listener.
+        endpoint = { host: '0.0.0.0', port: endpoint.port };
+      }
+      if (endpoint && active?.endpoint.port === endpoint.port) return status();
       // Bind first: a failed new endpoint must not destroy an existing listener.
       const next = endpoint ? await open(endpoint) : null, previous = active;
       active = next;

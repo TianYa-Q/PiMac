@@ -14,12 +14,13 @@ Protocol tests are not evidence that the installed App Store version interoperat
 ## Phone connection
 
 1. Build the new app; restart only after existing tasks finish.
-2. LAN opens automatically after Server readiness on an available physical
-   private IPv4 interface (prefer `en0`), port **3773** by default. View/copy the
+2. LAN opens automatically after Server readiness on **all IPv4 interfaces**
+   (`0.0.0.0`), port **3773** by default. View/copy the
    address under **Settings → T3 iOS 连接 → 局域网直连**. The Server and
    administration remain loopback-only; the separately bound proxy exposes only
-   authenticated upstream client routes. No available interface/occupied port
-   is surfaced as a settings error rather than exposing a wildcard.
+   authenticated upstream client routes. The listener starts even offline;
+   an occupied port is surfaced as a settings error. Displayed connection
+   addresses and pairing QR codes follow current private IPs (prefer `en0`).
 3. On the same trusted network, manually add the displayed address in T3 iOS
    and use a freshly generated upstream pairing credential. The UI also offers
    a pairing link/QR for clients supporting that format. LAN does not require a
@@ -34,12 +35,14 @@ Protocol tests are not evidence that the installed App Store version interoperat
 
 LAN defaults on. Endpoint preferences store only host/port under
 `t3RememberedLANEndpointV2`, never credentials. Explicit disable persists in
-`t3LANEnabled` and prevents reopening on restart. A saved address is reused if
-still local; after address changes startup selects an eligible physical interface
-and retains the saved port. Automatic selection excludes VPN/virtual interfaces,
-public IPs and wildcard binds. Legacy endpoint data is not reused.
+`t3LANEnabled` and prevents reopening on restart. Saved IP+port preferences migrate
+by retaining the port and binding `0.0.0.0`. Wi-Fi/IP changes do not require
+reconfiguration or restart; phones still need the current connection IP.
+The bind includes wired and VPN interfaces; the displayed address prefers physical
+private IPv4 interfaces. The older legacy endpoint key is not reused.
 LAN HTTP is unencrypted: use trusted networks, no public port forwarding. The
-proxy strips forwarding/control headers, checks peer/Host, and closes upgraded
+proxy strips forwarding/control headers, checks private/loopback peers and matches
+Host against each connection's actual destination IP and listener port, and closes upgraded
 sockets on disable/shutdown. Failed rebinding leaves the previous listener intact.
 
 The iOS catalog is keyed by `environmentId`: registering Tunnel or adding a LAN
@@ -189,6 +192,18 @@ root denial, Swift WebSocket chunk acknowledgements, unknown-outcome locking,
 and mobile DPoP/ticket status subscriptions and scope denial. Hosted PR creation,
 Git credential prompts and physical-phone UI still require manual acceptance.
 Rebuild the Server bundle before testing or packaging these changes.
+
+## Mobile project files
+
+The stock phone can browse project directories and open source/text files through
+`projects.listEntries` and `projects.readFile`. Both are explicitly allowlisted;
+upstream still requires `orchestration:read` and owns path resolution, UTF-8
+reading, binary-file rejection and large-file truncation. `projects.writeFile`,
+host filesystem browsing and editor launch remain denied. The previous host
+allowlist rejected file reads with a misleading missing-scope error even for
+authorized sessions. DPoP/ticket integration tests cover normal and read-only
+sessions, `.mjs`/UTF-8 contents, missing files, relative path escape and write denial.
+Physical-phone rendering still needs manual acceptance.
 
 ## Scheduled tasks
 

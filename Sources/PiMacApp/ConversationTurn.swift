@@ -33,6 +33,14 @@ struct ConversationTurn: Identifiable, Equatable {
       {
         continue
       }
+      // Compaction is a timeline boundary, not a footer of the entire user turn.
+      // Flush both sides so subsequent work cannot move the marker to the bottom.
+      if entry.kind == .compaction {
+        if !current.isEmpty { turns.append(ConversationTurn(entries: current)) }
+        turns.append(ConversationTurn(entries: [entry]))
+        current = []
+        continue
+      }
       if entry.kind == .user, !current.isEmpty {
         turns.append(ConversationTurn(entries: current))
         current = []

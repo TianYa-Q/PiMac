@@ -12,6 +12,21 @@ test('mobile dispatch and projection refresh are allowed narrowly', () => {
   assert.equal(rpcAllowed('orchestration.getUnknownProjection'), false);
 });
 
+test('mobile history HTTP reads are allowed without opening thread writes or unknown routes', () => {
+  for (const suffix of ['', '/bounded', '/history?cursor=opaque-page']) {
+    const route = '/api/orchestration/threads/thread-id' + suffix;
+    assert.equal(httpAllowed('GET', route), true, route);
+    for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
+      assert.equal(httpAllowed(method, route), false, method + ' ' + route);
+    }
+  }
+  for (const route of ['/api/orchestration/threads/', '/api/orchestration/threads//history',
+    '/api/orchestration/threads/thread-id/unknown', '/api/orchestration/threads/thread-id/history/extra',
+    '/api/orchestration/threads/thread-id/bounded/extra']) {
+    assert.equal(httpAllowed('GET', route), false, route);
+  }
+});
+
 test('mobile archive snapshot and stream are allowed without opening the namespace', () => {
   for (const method of ['orchestration.getArchivedShellSnapshot', 'orchestration.subscribeArchivedShell']) {
     assert.equal(rpcAllowed(method), true, method);
@@ -67,6 +82,16 @@ test('mobile Usage / Limits RPCs are allowed without opening server administrati
     assert.equal(rpcAllowed(method), false);
   }
   assert.equal(httpAllowed('POST', '/api/usage'), false);
+});
+
+test('mobile project files are readable without opening writes or filesystem administration', () => {
+  for (const method of ['projects.listEntries', 'projects.readFile']) {
+    assert.equal(rpcAllowed(method), true, method);
+  }
+  for (const method of ['projects.writeFile', 'projects.unknown', 'filesystem.browse', 'shell.openInEditor']) {
+    assert.equal(rpcAllowed(method), false, method);
+  }
+  assert.equal(httpAllowed('GET', '/api/projects/readFile'), false);
 });
 
 test('mobile attachment RPCs and signed POST uploads are allowed narrowly', () => {

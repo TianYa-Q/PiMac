@@ -15,6 +15,7 @@ let package = Package(
       resources: [
         .process("Resources/AppIcon.png"),
         .copy("Resources/t3-bridge"),
+        .copy("Resources/ps5-gateway"),
       ]
     ),
     .testTarget(name: "PiMacAppTests", dependencies: ["PiMacApp"]),

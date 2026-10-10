@@ -21,8 +21,7 @@ final class T3BridgeService: ObservableObject {
   @Published private(set) var lanPairing: T3Pairing?
   @Published private(set) var lanStateKnown = true
   var lanURL: URL? {
-    guard let lanEndpoint else { return nil }
-    return URL(string: "http://\(lanEndpoint.host):\(lanEndpoint.port)")
+    lanEndpoint?.connectionURL()
   }
   @Published private(set) var clients: [T3PairedClient] = []
   @Published private(set) var managementBusy = false
@@ -248,8 +247,6 @@ final class T3BridgeService: ObservableObject {
           guard let self, self.generation == current else { return }
           await self.configureLAN(endpoint)
         }
-      } else if T3ConnectionPreferences.isEnabled(in: defaults) {
-        lanMessage = "未找到可用的物理网卡私有 IPv4 地址；可在局域网设置中手动选择。"
       }
       return
     }
@@ -370,12 +367,7 @@ final class T3BridgeService: ObservableObject {
     lanMessage = ""
     defer { if generation == current { lanBusy = false } }
     do {
-      if let endpoint,
-        !T3NetworkEndpoint.interfaces().contains(where: { $0.address == endpoint.host })
-      {
-        throw ServiceError.invalidEndpoint
-      }
-      let value: Any = endpoint.map { ["host": $0.host, "port": $0.port] as Any } ?? NSNull()
+      let value: Any = endpoint.map { ["host": "0.0.0.0", "port": $0.port] as Any } ?? NSNull()
       let result: LANStatus = try await admin("lan", method: "POST", body: ["endpoint": value])
       guard generation == current else { return }
       try applyLANStatus(result)
@@ -385,7 +377,7 @@ final class T3BridgeService: ObservableObject {
       // A lost acknowledgement does not mean the listener stayed unchanged.
       lanStateKnown = false
       if await reconcileLAN(generation: current) {
-        lanMessage = "操作未确认成功，已读取实际状态；请检查网卡地址和端口后重试。"
+        lanMessage = "操作未确认成功，已读取实际状态；请检查端口后重试。"
       } else if generation == current {
         lanMessage = "无法确认局域网入口状态，可能仍在监听。请刷新状态；不要视为已经关闭。"
       }

@@ -14,6 +14,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     guard !terminating else { return .terminateLater }
     terminating = true
     Task {
+      guard await PS5GatewayController.shared.stopAndWait() else {
+        terminating = false
+        workspace.developmentReloadStatus = "退出已暂停：PS5 网关尚未确认恢复网络参数，请在设置中查看状态。"
+        sender.reply(toApplicationShouldTerminate: false)
+        return
+      }
       workspace.disconnectAll()
       let stopped = await workspace.t3Bridge.stopAndWait()
       if !stopped {
@@ -26,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    PS5GatewayController.shared.stop()
     LidSleepController.shared.stop()
   }
 

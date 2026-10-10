@@ -551,8 +551,9 @@ final class AppModel: ObservableObject {
       let role = message["role"] as? String ?? "assistant"
       return ChatEntry(
         id: message["id"] as? String ?? "",
-        kind: role == "user" ? .user : role == "reasoning" ? .thinking : .assistant,
-        title: role == "user" ? "你" : role == "reasoning" ? "思考过程" : "Pi",
+        kind: role == "user" ? .user : role == "reasoning" ? .thinking : role == "compaction" ? .compaction : .assistant,
+        title: role == "compaction" ? (message["title"] as? String ?? "上下文已压缩")
+          : role == "user" ? "你" : role == "reasoning" ? "思考过程" : "Pi",
         text: message["text"] as? String ?? "",
         isRunning: message["streaming"] as? Bool ?? false,
         attachments: message["localImages"] as? [PromptAttachment] ?? [],

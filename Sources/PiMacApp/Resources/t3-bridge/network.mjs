@@ -7,10 +7,10 @@ export function isPrivateAddress(host) {
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 export function validatePublicEndpoint(endpoint, interfaces = os.networkInterfaces()) {
-  if (!endpoint || (endpoint.host !== '127.0.0.1' && !isPrivateAddress(endpoint.host)) ||
+  if (!endpoint || (endpoint.host !== '0.0.0.0' && endpoint.host !== '127.0.0.1' && !isPrivateAddress(endpoint.host)) ||
       !Number.isInteger(endpoint.port) || endpoint.port < 1024 || endpoint.port > 65535 ||
-      !Object.values(interfaces).flat().some(item => item?.address === endpoint.host)) {
-    throw new Error('A local private IPv4 address and unprivileged port are required');
+      (endpoint.host !== '0.0.0.0' && !Object.values(interfaces).flat().some(item => item?.address === endpoint.host))) {
+    throw new Error('A wildcard or local private IPv4 address and unprivileged port are required');
   }
   return endpoint;
 }

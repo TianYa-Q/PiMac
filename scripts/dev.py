@@ -482,6 +482,7 @@ def bundle_development_app(binary_dir, destination=None):
             "CFBundleVersion": "1",
             "LSMinimumSystemVersion": "14.0",
             "NSHighResolutionCapable": True,
+            "NSAppleEventsUsageDescription": "Request system administrator authorization for temporary network and power settings.",
             "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
         }, plist)
     if run_build_command(["codesign", "--force", "--deep", "--sign",

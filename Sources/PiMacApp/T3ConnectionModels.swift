@@ -7,11 +7,25 @@ struct T3NetworkEndpoint: Equatable {
   let port: Int
 
   init(host: String, port: Int) throws {
-    guard Self.isPrivateIPv4(host), (1024...65535).contains(port) else {
+    guard (host == "0.0.0.0" || Self.isPrivateIPv4(host)), (1024...65535).contains(port) else {
       throw T3BridgeService.ServiceError.invalidEndpoint
     }
     self.host = host
     self.port = port
+  }
+
+  /// Wildcard is a bind address, never a client connection address.
+  func connectionURL(interfaces: [Interface] = Self.interfaces()) -> URL? {
+    let address: String
+    if host == "0.0.0.0" {
+      guard let preferred = interfaces.first(where: { $0.name == "en0" })
+        ?? interfaces.first(where: { $0.name.hasPrefix("en") }) ?? interfaces.first
+      else { return nil }
+      address = preferred.address
+    } else {
+      address = host
+    }
+    return URL(string: "http://\(address):\(port)")
   }
 
   static func isPrivateIPv4(_ host: String) -> Bool {
@@ -76,25 +90,11 @@ struct T3ConnectionPreferences {
     defaults.object(forKey: enabledKey) == nil || defaults.bool(forKey: enabledKey)
   }
 
-  static func startupEndpoint(
-    from defaults: UserDefaults,
-    interfaces: [T3NetworkEndpoint.Interface] = T3NetworkEndpoint.interfaces()
-  ) -> T3NetworkEndpoint? {
+  static func startupEndpoint(from defaults: UserDefaults) -> T3NetworkEndpoint? {
     guard isEnabled(in: defaults) else { return nil }
-    let saved = load(from: defaults)
-    if let saved, interfaces.contains(where: { $0.address == saved.host }) { return saved }
-    // Never automatically expose VPN/virtual interfaces or wildcard addresses.
-    let physical = interfaces.filter { $0.name.hasPrefix("en") }
-      .sorted {
-        if ($0.name == "en0") != ($1.name == "en0") { return $0.name == "en0" }
-        return $0.id < $1.id
-      }
-    for item in physical {
-      if let endpoint = try? T3NetworkEndpoint(host: item.address, port: saved?.port ?? 3773) {
-        return endpoint
-      }
-    }
-    return nil
+    // Keep the remembered port, but never bind to a remembered IP. Start even
+    // while offline so newly connected networks work without a service restart.
+    return try? T3NetworkEndpoint(host: "0.0.0.0", port: load(from: defaults)?.port ?? 3773)
   }
   private struct Endpoint: Codable {
     let host: String

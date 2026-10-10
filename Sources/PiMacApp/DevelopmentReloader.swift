@@ -47,6 +47,9 @@ final class DevelopmentReloader: ObservableObject {
       return
     }
     var blockers = workspace.restartBlockers
+    if let blocker = PS5GatewayController.shared.restartBlocker {
+      blockers.append(blocker)
+    }
     if DevelopmentReloadState.editsPending(directory: editDirectory) {
       blockers.append("代码修改批次尚未完成")
     }
