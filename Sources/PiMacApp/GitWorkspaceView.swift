@@ -69,6 +69,7 @@ struct GitWorkspaceView: View {
       if let url = store.pullRequestURL {
         Link("打开 Pull Request", destination: url).font(.callout)
       }
+      Divider()
       if let status = store.status, status.isRepo {
         HStack(spacing: 12) {
           Label(status.branch ?? "Detached HEAD", systemImage: "arrow.triangle.branch")
@@ -180,6 +181,7 @@ struct GitWorkspaceView: View {
               Divider()
             }
           }
+          .frame(maxWidth: .infinity)
         }.frame(minHeight: 150).background(
           .quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
         TextField("提交说明（只提交勾选的文件）", text: $commitMessage, axis: .vertical)
@@ -206,18 +208,26 @@ struct GitWorkspaceView: View {
           Button("创建 PR") { action("create_pr", title: "创建 Pull Request") }.disabled(
             locked || status.branch == nil)
         }
-      } else if !store.loading && store.requiresRefresh {
-        ContentUnavailableView(
-          "Git 状态暂不可用", systemImage: "exclamationmark.arrow.triangle.2.circlepath",
-          description: Text("请检查 Server 连接并刷新；读取失败不代表此目录没有仓库。"))
-      } else if !store.loading {
-        ContentUnavailableView(
-          "未发现 Git 仓库", systemImage: "folder.badge.questionmark",
-          description: Text("请先在此目录初始化 Git 仓库，然后刷新。"))
+      } else {
+        // 空状态必须占满剩余内容区，否则固定尺寸面板会把标题和提示一起挤到中部。
+        Group {
+          if store.loading || (store.status == nil && !store.requiresRefresh) {
+            ProgressView("正在读取 Git 状态…")
+          } else if store.requiresRefresh {
+            ContentUnavailableView(
+              "Git 状态暂不可用", systemImage: "exclamationmark.arrow.triangle.2.circlepath",
+              description: Text("请检查 Server 连接并刷新；读取失败不代表此目录没有仓库。"))
+          } else {
+            ContentUnavailableView(
+              "未发现 Git 仓库", systemImage: "folder.badge.questionmark",
+              description: Text("请先在此目录初始化 Git 仓库，然后刷新。"))
+          }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       }
       if store.busy { Text(store.progress).font(.callout).foregroundStyle(.secondary) }
     }
-    .padding(24).frame(width: 760, height: 640)
+    .padding(24).frame(width: 760, height: 640, alignment: .topLeading)
     .interactiveDismissDisabled(store.busy)
     .task(id: cwd) { await store.refresh(client: server, cwd: cwd) }
     .sheet(item: $previewFile) { file in

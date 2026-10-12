@@ -34,12 +34,15 @@ final class WorkspaceModel: ObservableObject {
 
   func clearProjectFilter() { projectFilterPath = nil }
 
-  var filteredSessions: [SessionItem] {
+  var filteredSessions: [SessionItem] { filteredSessions(settled: false) }
+
+  func filteredSessions(settled: Bool) -> [SessionItem] {
     let projectID = projectFilterPath.flatMap {
       server.projectID(for: URL(fileURLWithPath: $0))
     }
     if projectFilterPath != nil && projectID == nil { return [] }
-    return Self.sessionCatalog(threads: server.threads, projectID: projectID)
+    return Self.sessionCatalog(
+      threads: server.threads.filter { Self.isSettled($0) == settled }, projectID: projectID)
   }
 
   func project(forSessionPath path: String) -> WorkspaceProject? {
@@ -85,6 +88,7 @@ final class WorkspaceModel: ObservableObject {
   private var remoteSubmissionHolds: Set<ObjectIdentifier> = []
   private let persistsState: Bool
   private var shellLoaded = false
+  private var pendingCompletionVisits: Set<String> = []
   @Published private(set) var sessionCatalogRevision = 0
   private var projectImportTask: Task<Void, Never>?
 
@@ -95,8 +99,8 @@ final class WorkspaceModel: ObservableObject {
       self?.objectWillChange.send()
     }
     addTab(model: AppModel(restoreLastProjectOnLaunch: false), path: nil, draft: false)
-    guard restoreUserState else { return }
     server.onShell = { [weak self] snapshot in self?.applyShell(snapshot) }
+    guard restoreUserState else { return }
     server.onTaskStatus = { TaskStatusNotifications.shared.deliver($0) }
     // Cached shell is presentation only; all commands still require live readiness.
     if !server.shell.isEmpty { applyShell(server.shell) }
@@ -135,6 +139,7 @@ final class WorkspaceModel: ObservableObject {
     if persistsState && !server.isConnected { reasons.append("Server 未连接，无法确认空闲") }
     if server.hasRunningThread { reasons.append("Server 有运行中的线程") }
     if git.busy { reasons.append("Git 操作进行中") }
+    if isSettlingIdleSessions { reasons.append("批量 Settle 进行中") }
     if !remoteSubmissionHolds.isEmpty { reasons.append("远程消息正在提交") }
     if !telegram.canRestartSafely { reasons.append("Telegram 有任务、队列或待发送回复") }
     if tabs.contains(where: { !$0.model.canRestartSafely }) { reasons.append("桌面有任务、排队消息或未确认操作") }
@@ -176,6 +181,35 @@ final class WorkspaceModel: ObservableObject {
         selectProject(projects.first { $0.id == path } ?? projects[0])
       }
     }
+    acknowledgeSelectedCompletion()
+  }
+
+  /// 只确认当前可见的完成版本，不能用请求执行时间覆盖之后的新一轮结果。
+  static func completionVisit(thread: [String: Any], selectedThreadID: String?) -> [String: Any]? {
+    guard let id = thread["id"] as? String, id == selectedThreadID,
+      T3V2Presentation.hasUnreadCompletion(thread),
+      let completedAt = thread["latestRunCompletedAt"] as? String
+    else { return nil }
+    return ["type": "thread.visit", "threadId": id, "visitedAt": completedAt]
+  }
+
+  private func acknowledgeSelectedCompletion() {
+    guard server.isConnected, let id = selectedModel?.threadID,
+      let thread = server.thread(id),
+      let command = Self.completionVisit(thread: thread, selectedThreadID: id),
+      let completedAt = command["visitedAt"] as? String
+    else { return }
+    let key = "\(id)|\(completedAt)"
+    // 多次 shell 推送可能先于回执返回；同一完成版本只保留一个在途请求。
+    guard pendingCompletionVisits.insert(key).inserted else { return }
+    Task {
+      defer { pendingCompletionVisits.remove(key) }
+      do {
+        try await server.dispatch(command)
+      } catch {
+        model(forSessionPath: "t3:\(id)")?.statusText = "已读状态同步未确认，后续刷新将重试。"
+      }
+    }
   }
 
   func addProject(_ projectURL: URL) {
@@ -198,9 +232,9 @@ final class WorkspaceModel: ObservableObject {
     let saved = UserDefaults.standard.string(forKey: "t3SelectedThread.\(project.id)")
     let catalog = sessions(in: project.url)
     if let path = saved, catalog.contains(where: { $0.path == path }) {
-      openSession(path: path, in: project.url, markRead: false)
+      openSession(path: path, in: project.url)
     } else if let recent = catalog.first {
-      openSession(path: recent.path, in: project.url, markRead: false)
+      openSession(path: recent.path, in: project.url)
     } else {
       newSession(in: project.url)
     }
@@ -273,27 +307,12 @@ final class WorkspaceModel: ObservableObject {
     let model = AppModel(startupProjectURL: projectURL, continueLastSession: false)
     addTab(model: model, path: nil, draft: true)
   }
-  func openSession(path: String, in projectURL: URL, markRead: Bool = true) {
+  func openSession(path: String, in projectURL: URL) {
     guard let id = AppModel.threadID(from: path), let thread = server.thread(id),
       thread["projectId"] as? String == server.projectID(for: projectURL)
     else {
       selectedModel?.statusText = "此历史路径尚未导入 T3；不会启动旧桌面 Pi 进程。"
       return
-    }
-    if markRead, T3V2Presentation.hasUnreadCompletion(thread),
-      let completedAt = thread["latestRunCompletedAt"] as? String
-    {
-      // Acknowledge only the completion visible at click time, never a later
-      // run that finishes while the request is waiting for Server readiness.
-      Task {
-        do {
-          try await server.dispatch([
-            "type": "thread.visit", "threadId": id, "visitedAt": completedAt,
-          ])
-        } catch {
-          selectedModel?.statusText = "已读状态同步未确认，请重新点击会话。"
-        }
-      }
     }
     if let tab = tabs.first(where: {
       $0.model.currentSessionPath == path || $0.requestedSessionPath == path
@@ -317,7 +336,8 @@ final class WorkspaceModel: ObservableObject {
   /// Only the leading chat is reusable; an older empty chat must not replace a
   /// new task after the latest chat has already been used.
   static func latestEmptySessionPath(threads: [[String: Any]], projectID: String) -> String? {
-    guard let latest = sessionCatalog(threads: threads, projectID: projectID).first,
+    guard let latest = sessionCatalog(
+      threads: threads.filter { !isSettled($0) }, projectID: projectID).first,
       let id = AppModel.threadID(from: latest.path),
       let thread = threads.first(where: { $0["id"] as? String == id }),
       thread["title"] as? String == "新任务",
@@ -335,7 +355,10 @@ final class WorkspaceModel: ObservableObject {
     // Match T3 client-runtime's sortActiveThreadsByOrderKey: new/reopened
     // keyless threads lead, then manually arranged threads in saved key order.
     // Lifecycle anchors belong to Server; message/output updates never move rows.
-    return threads.filter { projectID == nil || $0["projectId"] as? String == projectID }.compactMap {
+    return threads.filter {
+      !($0["archivedAt"] is String)
+        && (projectID == nil || $0["projectId"] as? String == projectID)
+    }.compactMap {
       thread
         -> (id: String, anchorAt: Date, orderKey: String?, item: SessionItem)? in
       guard let id = thread["id"] as? String else { return nil }
@@ -364,6 +387,94 @@ final class WorkspaceModel: ObservableObject {
       return $0.id < $1.id
     }.map(\.item)
   }
+  /// 完成状态完全来自 Server；自动收起和手动收起走同一投影，不使用本地计时器。
+  static func isSettled(_ thread: [String: Any]) -> Bool {
+    thread["settledOverride"] as? String == "settled" || thread["settledAt"] is String
+  }
+
+  @Published private(set) var isSettlingIdleSessions = false
+
+  /// 只接受明确的终止/空闲状态；未知状态、待处理请求及后台任务保守保留。
+  static func canBulkSettle(_ thread: [String: Any]) -> Bool {
+    guard let id = thread["id"] as? String, !id.isEmpty,
+      !isSettled(thread), !(thread["archivedAt"] is String),
+      let status = thread["status"] as? String,
+      ["idle", "completed", "failed", "cancelled", "interrupted"].contains(status)
+    else { return false }
+    for key in ["activeRunId", "activityRunStatus", "pendingRuntimeRequest"] {
+      if let value = thread[key], !(value is NSNull) { return false }
+    }
+    if let tasks = thread["pendingBackgroundTasks"], !(tasks is NSNull) {
+      guard let tasks = tasks as? [[String: Any]], tasks.isEmpty else { return false }
+    }
+    return true
+  }
+
+  private func canSettleIdleSession(_ thread: [String: Any]) -> Bool {
+    guard Self.canBulkSettle(thread), let id = thread["id"] as? String else { return false }
+    let model = model(forSessionPath: "t3:\(id)")
+    return model?.isBusy != true && (model?.queuedPrompts.isEmpty ?? true)
+  }
+
+  var idleSessionPaths: [String] {
+    server.threads.filter(canSettleIdleSession)
+      .compactMap { ($0["id"] as? String).map { "t3:\($0)" } }
+  }
+
+  func settleIdleSessions() {
+    guard server.isConnected, !isSettlingIdleSessions else { return }
+    let paths = idleSessionPaths
+    guard !paths.isEmpty else { return }
+    isSettlingIdleSessions = true
+    Task {
+      defer { isSettlingIdleSessions = false }
+      var completed = 0
+      var unconfirmed = 0
+      // 固定本次范围，逐个重查；某个会话失败不阻断其余会话，Server 仍作最终原子校验。
+      for path in paths {
+        guard let id = AppModel.threadID(from: path), let thread = server.thread(id),
+          canSettleIdleSession(thread) else { continue }
+        do {
+          try await server.dispatch(["type": "thread.settle", "threadId": id])
+          completed += 1
+        } catch { unconfirmed += 1 }
+      }
+      do {
+        try await server.refresh()
+        selectedModel?.statusText = "已 Settle \(completed) 个会话"
+          + (unconfirmed > 0 ? "；\(unconfirmed) 个未确认，可能已开始运行或等待处理。" : "。")
+      } catch {
+        selectedModel?.statusText = "批量 Settle 已提交，但列表刷新失败；请检查 Server 状态，勿重复提交。"
+      }
+    }
+  }
+
+  enum SessionLifecycleAction {
+    case settle, unsettle, autoSettle(enabled: Bool)
+
+    var payload: [String: Any] {
+      switch self {
+      case .settle: return ["type": "thread.settle"]
+      case .unsettle: return ["type": "thread.unsettle"]
+      case .autoSettle(let enabled):
+        return ["type": "thread.auto-settle.set", "enabled": enabled]
+      }
+    }
+  }
+
+  func updateSessionLifecycle(path: String, action: SessionLifecycleAction) {
+    guard let id = AppModel.threadID(from: path) else { return }
+    Task {
+      do {
+        var payload = action.payload
+        payload["threadId"] = id
+        // 运行中、等待用户等限制由 Server 原子校验，不能仅依赖已打开的桌面标签。
+        try await server.dispatch(payload)
+        try await server.refresh()
+      } catch { selectedModel?.statusText = "会话状态更新未确认；运行中或等待处理的任务不能收起，请检查 Server 状态。" }
+    }
+  }
+
   func archiveSession(path: String, in projectURL: URL) {
     guard let id = AppModel.threadID(from: path), model(forSessionPath: path)?.isBusy != true else {
       return
@@ -410,6 +521,8 @@ final class WorkspaceModel: ObservableObject {
     tabs.append(tab)
     observations[tab.id] = Self.sidebarUpdates(for: model).sink { [weak self] _ in
       self?.objectWillChange.send()
+      // Published 回调先于属性落地；延后读取，覆盖异步绑定到会话的情况。
+      Task { @MainActor [weak self] in self?.acknowledgeSelectedCompletion() }
     }
     if persistsState {
       if let path, let text = UserDefaults.standard.string(forKey: "t3Draft.\(path)") {
@@ -426,6 +539,7 @@ final class WorkspaceModel: ObservableObject {
   private func selectTab(_ id: UUID) {
     selectedTabID = id
     extensionUI.selectSource(selectedModel)
+    acknowledgeSelectedCompletion()
     if persistsState, let project = selectedModel?.projectURL {
       UserDefaults.standard.set(project.path, forKey: "t3SelectedProject")
       if let path = selectedModel?.currentSessionPath, !path.isEmpty {
@@ -443,6 +557,7 @@ final class WorkspaceModel: ObservableObject {
       if tabs.isEmpty {
         addTab(model: AppModel(restoreLastProjectOnLaunch: false), path: nil, draft: false)
       }
+      acknowledgeSelectedCompletion()
     }
   }
   private func removeTabs(project: URL) {

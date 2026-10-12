@@ -53,6 +53,7 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
       const manager = official.management, route = req.method + ' ' + req.url;
       if (route === 'POST /internal/auth/desktop-session') return json(res, 200, await manager.desktopSession());
       if (route === 'GET /internal/auth/model-catalog') return json(res, 200, await manager.modelCatalog());
+      if (route === 'GET /internal/auth/model-context') return json(res, 200, await manager.modelContext());
       if (route === 'GET /internal/auth/connect') return json(res, 200, await manager.status());
       if (route === 'GET /internal/auth/clients') return json(res, 200, await manager.clients());
       if (route === 'GET /internal/auth/lan') return json(res, 200, lan.status());
@@ -69,6 +70,7 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
       }
       if (route === 'POST /internal/auth/account-status') return json(res, 200, { payload: JSON.stringify(await piAccounts.accountStatus(body)) });
       if (route === 'POST /internal/auth/model-preferences') return json(res, 200, await manager.modelPreferences(body));
+      if (route === 'POST /internal/auth/model-context') return json(res, 200, await manager.modelContext(body));
       if (route === 'POST /internal/auth/connect' && Object.keys(body).length === 1) return json(res, 200, await manager.control(body.operation));
       if (route === 'POST /internal/auth/revoke-client' && typeof body.sessionId === 'string') return json(res, 200, await manager.revokeClient(body.sessionId));
       if (route === 'POST /internal/auth/revoke-pairing' && typeof body.id === 'string') return json(res, 200, await manager.revokePairing(body.id));

@@ -98,6 +98,65 @@ struct ExtensionUIModelTests {
   }
 
   @Test
+  func hostQuotaRefreshPreservesSwitchedSessionAndSelectionTimestamp() throws {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    source.selectedModelId = "openai-codex/test"
+    ui.selectSource(source)
+    ui.handle(
+      try statusEvent(activeAccount: "X", updatedAt: 1_000, remainingPercent: 10), from: source)
+    ui.handle(
+      try statusEvent(activeAccount: "Y", updatedAt: 2_000, remainingPercent: 20), from: source)
+
+    ui.handle(try hostStatusEvent(updatedAt: 4_000, remainingPercent: 40), from: source)
+    #expect(ui.codexAccounts.first?.name == "Y")
+    #expect(ui.codexAccounts.first?.isActive == true)
+    #expect(ui.supportsAccountSwitch(for: source))
+    #expect(ui.managesSelectedAuth(for: source))
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 40)
+
+    // 较晚收到的真实会话状态不能被主机查询的时间戳挡住；共享额度仍保留较新值。
+    ui.handle(
+      try statusEvent(activeAccount: "X", updatedAt: 3_000, remainingPercent: 30), from: source)
+    #expect(ui.codexAccounts.first?.name == "X")
+    #expect(ui.codexAccounts.first?.isActive == true)
+    #expect(ui.codexAccounts.first?.primary?.remainingPercent == 40)
+  }
+
+  @Test
+  func hostQuotaRefreshDoesNotConsumeFirstSessionStatus() throws {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    ui.selectSource(source)
+    ui.handle(
+      try statusEvent(activeAccount: "X", updatedAt: 1_000, remainingPercent: 10), from: source)
+    ui.sessionWillChange(for: source)
+    ui.handle(try hostStatusEvent(updatedAt: 2_000, remainingPercent: 40), from: source)
+    ui.handle(
+      try statusEvent(activeAccount: "Y", updatedAt: 3_000, remainingPercent: 90), from: source)
+    #expect(ui.codexAccounts.first?.name == "Y")
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 40)
+    #expect(ui.codexAccountsUpdatedAt == Date(timeIntervalSince1970: 2))
+  }
+
+  private func hostStatusEvent(updatedAt: Double, remainingPercent: Double) throws -> PiRPCClient.JSON {
+    let payload: PiRPCClient.JSON = [
+      "version": 2, "provider": "openai-codex", "source": "host-query",
+      "supportsAccountSwitch": false, "managesSelectedAuth": false,
+      "updatedAt": updatedAt,
+      "accounts": [
+        ["name": "X", "primary": ["remainingPercent": remainingPercent]],
+        ["name": "Y"],
+      ],
+    ]
+    let data = try JSONSerialization.data(withJSONObject: payload)
+    return [
+      "method": "setStatus", "id": UUID().uuidString, "statusKey": "account-usage-gui",
+      "statusText": String(decoding: data, as: UTF8.self),
+    ]
+  }
+
+  @Test
   func parsesStoredResetCredits() throws {
     let ui = ExtensionUIModel()
     let source = AppModel(restoreLastProjectOnLaunch: false)

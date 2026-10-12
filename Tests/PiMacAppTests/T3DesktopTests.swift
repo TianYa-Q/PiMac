@@ -56,7 +56,7 @@ struct T3DesktopTests {
   }
 
   @Test(.timeLimit(.minutes(1)))
-  func desktopReconnectsAfterServerRestartWithoutRestartingClient() async throws {
+  func desktopReconnectsAndRetainsRefreshRequestsDuringPolling() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: root) }
@@ -84,8 +84,25 @@ struct T3DesktopTests {
     let state = root.appendingPathComponent("state")
     try service.start(
       workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
+    var requestedFollowUp = false
+    var liveDeliveries = 0
+    client.onShell = { [weak client] snapshot in
+      guard let client, snapshot["refreshProbe"] == nil else { return }
+      liveDeliveries += 1
+      guard !requestedFollowUp else { return }
+      requestedFollowUp = true
+      // 模拟 Settle 在轮询途中请求刷新；探针只有后续真正读取 Server 才会被移除。
+      client.requestRefresh()
+      var probe = snapshot
+      probe["refreshProbe"] = true
+      client.applyShell(probe)
+    }
     client.start(service: service)
     try await client.waitUntilReady()
+    #expect(requestedFollowUp)
+    #expect(liveDeliveries == 2)
+    #expect(client.shell["refreshProbe"] == nil)
+    client.onShell = nil
     #expect(!client.providers.isEmpty)
     // This is the same shutdown barrier used by development hot reload.
     #expect(await service.stopAndWait())
@@ -256,10 +273,17 @@ struct T3DesktopTests {
     #expect(!model.isBusy)
     model.composerText = "tools"
     model.sendPrompt()
+    // 不让出 MainActor，断言网络请求开始前已显示且输入框已清空。
+    let sent = try #require(model.messages.last)
+    #expect(sent.kind == .user && sent.text == "tools")
+    #expect(model.composerText.isEmpty)
+    model.apply(["thread": ["id": model.threadID!, "messages": []]])
+    #expect(model.messages.last?.id == sent.id)  // 旧快照不能吞掉本地回显。
     for _ in 0..<200 where model.lastSettledTurnID == nil {
       try await Task.sleep(for: .milliseconds(50))
     }
-    #expect(model.messages.contains { $0.kind == .user && $0.text == "tools" })
+    #expect(model.messages.filter { $0.kind == .user && $0.text == "tools" }.count == 1)
+    #expect(model.messages.first { $0.kind == .user && $0.text == "tools" }?.id == sent.id)
     let read = try #require(
       model.messages.first { $0.toolName == "read" && $0.toolInput == "fixture.txt" })
     // Official V2 wire projection deliberately omits arbitrary tool output.
@@ -302,7 +326,7 @@ struct T3DesktopTests {
     #expect(model.isStreaming)
     model.composerText = "steer-now"
     model.sendPrompt(delivery: .steer)
-    for _ in 0..<100 where !model.composerText.isEmpty {
+    for _ in 0..<100 where !model.canSubmitPrompt {
       try await Task.sleep(for: .milliseconds(10))
     }
     #expect(model.composerText.isEmpty)
@@ -342,6 +366,49 @@ struct T3DesktopTests {
     #expect(
       ((detail["projection"] as? [String: Any])?["thread"] as? [String: Any])?["id"] as? String
         == id)
+    // 从真实桌面入口停止无限运行的任务，覆盖公开命令校验及队列暂停语义。
+    model.composerText = "wait"
+    model.sendPrompt()
+    for _ in 0..<200 where !model.isStreaming {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(model.isStreaming)
+    let runningDetail = try await client.request("/api/orchestration/threads/\(id)")
+    let runs = (runningDetail["projection"] as? [String: Any])?["runs"] as? [[String: Any]]
+    let stoppedRun = try #require(
+      runs?.last { T3V2Presentation.active.contains($0["status"] as? String ?? "") }?["id"]
+        as? String)
+    model.composerText = "must-remain-queued"
+    model.sendPrompt(delivery: .followUp)
+    for _ in 0..<200 where model.queuedPrompts.isEmpty {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(model.queuedPrompts.count == 1)
+    model.abort()
+    for _ in 0..<200 where model.isStreaming || !model.queueHeld {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(!model.isStreaming)
+    #expect(model.lastSettledTurnID == stoppedRun)
+    #expect(model.terminalStopReason == "aborted")
+    #expect(model.queueHeld)
+    #expect(model.queuedPrompts.count == 1)
+    #expect(!model.messages.contains { $0.text == "Reply: must-remain-queued" })
+    // 附件读取失败也保留可编辑的原消息，并明确标记未确认，不丢失新草稿。
+    model.composerText = "missing-image"
+    model.attachments = [PromptAttachment(
+      url: root.appendingPathComponent("missing.png"), mimeType: "image/png")]
+    model.sendPrompt()
+    let failedID = try #require(model.messages.last?.id)
+    #expect(model.messages.last?.text == "missing-image")
+    #expect(model.messages.last?.attachments.count == 1)
+    model.composerText = "new draft"
+    for _ in 0..<100 where !model.canSubmitPrompt {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(model.messages.first { $0.id == failedID }?.isError == true)
+    #expect(model.composerText == "new draft")
+    #expect(model.statusText.contains("提交未确认"))
     // Optional LAN transport never changes the desktop's loopback Server.
     #expect(service.serverURL?.host == "127.0.0.1")
     let shell = try await client.request("/api/orchestration/shell")

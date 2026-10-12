@@ -62,6 +62,8 @@ final class AppModel: ObservableObject {
   private var connectTask: Task<Void, Never>?
   private var generation = UUID()
   private var submitting = false
+  /// 仅补齐尚未出现在 Server 快照中的本地消息，不写入持久化历史。
+  private var pendingSentMessages: [ChatEntry] = []
   private var pendingSelection: [String: Any]?
   private var submittedFromTurnID: String?
   private var lastTurnID: String?
@@ -108,6 +110,7 @@ final class AppModel: ObservableObject {
   }
   var canRestartSafely: Bool { !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty }
   var canReloadModelList: Bool { server?.isConnected == true && !isBusy }
+  var modelContextWindows: [String: Int] { server?.modelContextWindows ?? [:] }
   var canSubmitPrompt: Bool {
     server?.isConnected == true && connectionState == .connected && !isLoadingConfiguration
       && !isCompacting && !codexRotationInFlight && !submitting && !awaitingAgentStart
@@ -172,6 +175,9 @@ final class AppModel: ObservableObject {
     answeredDialogIDs.removeAll()
     isManagingAccounts = false
     queuedPrompts.removeAll()
+    pendingSentMessages.removeAll()
+    submitting = false
+    awaitingAgentStart = false
     connectTask?.cancel()
     server?.unwatch(owner: observerID)
     generation = UUID()
@@ -286,14 +292,12 @@ final class AppModel: ObservableObject {
     guard canSubmitPrompt,
       let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
     else { return }
-    submit(prompt) { [weak self] accepted in
-      guard let self, accepted else { return }
-      if self.composerText.trimmingCharacters(in: .whitespacesAndNewlines) == prompt.text {
-        self.composerText = ""
-      }
-      let ids = Set(prompt.attachments.map(\.id))
-      self.attachments.removeAll { ids.contains($0.id) }
-    }
+    guard threadID != nil else { return }
+    // 先更新界面，再进行附件上传和网络请求；新输入不会被异步完成回调清空。
+    composerText = ""
+    let ids = Set(prompt.attachments.map(\.id))
+    attachments.removeAll { ids.contains($0.id) }
+    submit(prompt) { _ in }
   }
   func sendRemotePrompt(
     _ text: String, attachments: [PromptAttachment] = [], messageID: String? = nil,
@@ -321,9 +325,15 @@ final class AppModel: ObservableObject {
     submittedFromTurnID = lastTurnID
     let selection = modelSelection
     let submittedMessageID = messageID ?? UUID().uuidString
+    let current = generation
+    let entry = ChatEntry(
+      id: submittedMessageID, kind: .user, title: "你", text: prompt.rpcText,
+      attachments: prompt.attachments.filter(\.isImage))
+    pendingSentMessages.append(entry)
+    messages.append(entry)
     Task { [weak self] in
       guard let self else { return }
-      defer { self.submitting = false }
+      defer { if self.generation == current { self.submitting = false } }
       do {
         let images: [[String: Any]] = try prompt.attachments.filter(\.isImage).map { attachment in
           let data = try Data(contentsOf: attachment.url)
@@ -343,28 +353,41 @@ final class AppModel: ObservableObject {
             images, threadID: id, messageID: submittedMessageID),
           "dispatchMode": ["type": "queue_after_active"],
         ].merging(isQueueing ? [:] : ["deliveryIntent": "steer"]) { _, new in new })
+        guard self.generation == current else { completion(true); return }
         completion(true)
         self.statusText = isSteering ? "已提交插入消息，当前工具调用结束后处理。"
           : isQueueing ? "已提交到 T3 Server 队列。" : "已提交到 T3 Server"
         // Server owns initial naming, including first messages sent from mobile.
       } catch {
+        guard self.generation == current else { completion(false); return }
         self.awaitingAgentStart = false
+        // 网络失败可能发生在 Server 接收之后：保留原消息 ID，不自动重发。
+        // 后续权威快照若包含该 ID，会自然替换这条未确认消息。
+        for index in self.pendingSentMessages.indices
+        where self.pendingSentMessages[index].id == submittedMessageID {
+          self.pendingSentMessages[index].title = "你 · 提交未确认"
+          self.pendingSentMessages[index].isError = true
+          if let visible = self.messages.firstIndex(where: { $0.id == submittedMessageID }) {
+            self.messages[visible] = self.pendingSentMessages[index]
+          }
+        }
         completion(false)
         self.statusText = "提交未确认；请检查会话后再操作，不会自动重发。"
+        server.requestRefresh()
       }
     }
   }
   func abort() {
-    guard let id = threadID, let server else { return }
+    guard let id = threadID, let runID = lastTurnID, let server else { return }
+    let current = generation
     Task {
       do {
-        if isCompacting {
-          try await server.interrupt(threadID: id)
-        } else {
-          try await server.interrupt(threadID: id)
-        }
+        try await server.interrupt(threadID: id, runID: runID)
       } catch {
+        // 停止请求针对点击时的任务；切换会话后不把旧请求的错误写到新会话。
+        guard generation == current else { return }
         statusText = "取消未确认，请刷新状态。"
+        server.requestRefresh()
       }
     }
   }
@@ -430,7 +453,8 @@ final class AppModel: ObservableObject {
       return PiModel(
         provider: String(slug[..<slash]), modelId: String(slug[slug.index(after: slash)...]),
         name: model["name"] as? String ?? slug,
-        reasoning: levels.count > 1, thinkingLevels: levels)
+        reasoning: levels.count > 1, thinkingLevels: levels,
+        defaultContextWindow: server?.modelContextSettings.defaults[slug])
     }
     let hidden = Set(UserDefaults.standard.stringArray(forKey: "t3HiddenModels") ?? [])
     models = allModels.filter { !hidden.contains($0.id) }
@@ -530,13 +554,17 @@ final class AppModel: ObservableObject {
     var entries = (thread["messages"] as? [[String: Any]] ?? []).map { message -> ChatEntry in
       let role = message["role"] as? String ?? "assistant"
       return ChatEntry(
-        id: message["id"] as? String ?? "",
+        id: (role == "user" ? message["messageId"] as? String : nil)
+          ?? message["id"] as? String ?? "",
         kind: role == "user" ? .user : role == "reasoning" ? .thinking : role == "compaction" ? .compaction : .assistant,
         title: role == "compaction" ? (message["title"] as? String ?? "上下文已压缩")
           : role == "user" ? "你" : role == "reasoning" ? "思考过程" : "Pi",
         text: message["text"] as? String ?? "",
         isRunning: message["streaming"] as? Bool ?? false,
         attachments: message["localImages"] as? [PromptAttachment] ?? [],
+        htmlRender: message["htmlRender"] as? T3HTMLRender,
+        htmlDocument: message["htmlDocument"] as? String,
+        htmlRenderError: message["htmlRenderError"] as? String,
         timestamp: T3DesktopClient.date(message["createdAt"]))
     }
     var toolEntries: [String: ChatEntry] = [:]
@@ -593,6 +621,14 @@ final class AppModel: ObservableObject {
         entries.append(entry)
       }
     }
+    // 用消息身份去重而非文本：相同内容连续发送仍是不同消息。
+    // 排队消息确认后由队列 UI 展示，避免取消队列后留下虚假的聊天记录。
+    let confirmedIDs = Set(entries.map(\.id)).union(
+      (thread["queuedMessages"] as? [[String: Any]] ?? []).compactMap {
+        $0["messageId"] as? String ?? $0["id"] as? String
+      })
+    pendingSentMessages.removeAll { confirmedIDs.contains($0.id) }
+    entries.append(contentsOf: pendingSentMessages)
     entries.append(contentsOf: ChatEntry.groupingToolEntries(Array(toolEntries.values)))
     entries.sort { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
     if messages != entries { messages = entries }
@@ -605,11 +641,32 @@ final class AppModel: ObservableObject {
   func refreshExternalTranscript(at path: String) { server?.requestRefresh() }
   func applyRemoteSessionSnapshot(from source: AppModel) { server?.requestRefresh() }
   func reloadModelList() {
+    guard canReloadModelList, !isLoadingConfiguration, let server else { return }
+    isLoadingConfiguration = true
     Task {
-      try? await server?.loadConfig()
-      refreshModels()
+      defer { isLoadingConfiguration = false }
+      do {
+        try await server.loadConfig()
+        refreshModels()
+      } catch {
+        statusText = "模型配置刷新失败：\(error.localizedDescription)"
+      }
     }
   }
+
+  func setModelContextWindow(_ tokens: Int?, for modelID: String) async throws {
+    guard let server, server.isConnected, !isLoadingConfiguration else {
+      throw T3DesktopClient.ClientError.unavailable
+    }
+    try ModelContextLimit.validate(tokens)
+    isLoadingConfiguration = true
+    defer { isLoadingConfiguration = false }
+    // Server 写入 Pi 的模型元数据，不改会话统计，也不打断任何正在执行的线程。
+    try await server.setModelContextWindow(tokens, modelID: modelID)
+    refreshModels()
+    showTransientStatus("上下文限制已保存；新的 Pi 进程生效，已有会话不会立即变更。")
+  }
+
   func refreshModelPreferences() { refreshModels() }
   func setModelVisible(_ visible: Bool, modelID: String) {
     var hidden = Set(UserDefaults.standard.stringArray(forKey: "t3HiddenModels") ?? [])

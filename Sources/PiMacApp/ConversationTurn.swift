@@ -5,6 +5,7 @@ struct ConversationTurn: Identifiable, Equatable {
   let id: String
   let user: ChatEntry?
   let finalAssistant: ChatEntry?
+  let htmlRenders: [ChatEntry]
   let activity: [ChatEntry]
   let supplementaryEntries: [ChatEntry]
 
@@ -12,11 +13,12 @@ struct ConversationTurn: Identifiable, Equatable {
     self.entries = entries
     id = entries.first?.id ?? "empty-turn"
     user = entries.first(where: { $0.kind == .user })
-    let finalAssistant = entries.last(where: { $0.kind == .assistant })
+    htmlRenders = entries.filter { $0.htmlRender != nil }
+    let finalAssistant = entries.last(where: { $0.kind == .assistant && $0.htmlRender == nil })
     self.finalAssistant = finalAssistant
     activity = entries.filter {
       $0.kind == .thinking || $0.kind == .tool
-        || ($0.kind == .assistant && $0.id != finalAssistant?.id)
+        || ($0.kind == .assistant && $0.htmlRender == nil && $0.id != finalAssistant?.id)
     }
     supplementaryEntries = entries.filter { $0.kind == .system || $0.kind == .compaction }
   }

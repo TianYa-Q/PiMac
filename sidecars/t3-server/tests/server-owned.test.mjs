@@ -49,6 +49,32 @@ async function open(directory) {
   return { gateway, get, ws, rpc, dispatch, create, message, snapshot, close: () => gateway.close() };
 }
 
+test('Pi session discovers T3 MCP scheduling tools while invalid credentials remain rejected', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-mcp-scheduling-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  for (const authorization of [undefined, 'Bearer invalid', 'Bearer ' + token]) {
+    const response = await fetch(f.gateway.serverURL + '/mcp', { method: 'POST',
+      headers: { 'content-type': 'application/json', ...(authorization ? { authorization } : {}) },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) });
+    assert.equal(response.status, 401);
+  }
+  const threadId = await f.create();
+  await f.dispatch(f.message(threadId, 'mcp-discovery'));
+  const projection = await eventually(async () => {
+    const projection = await f.snapshot(threadId);
+    return projection.runs.some(run => ['completed', 'failed'].includes(run.status)) ? projection : null;
+  });
+  assert(projection.runs.some(run => run.status === 'completed'), JSON.stringify(projection.runs));
+  assert(projection.visibleTurnItems.some(row => row.item.text?.includes('schedule_task')),
+    JSON.stringify(projection.visibleTurnItems));
+  const { tasks } = await f.rpc('scheduledTasks.list', {});
+  const task = tasks.find(task => task.title === 'MCP acceptance timer');
+  assert(task, 'schedule_task must persist a real task through the official scheduler');
+  assert.equal(task.threadId, threadId);
+  assert(task.nextRunAt);
+});
+
 test('server names a desktop draft on its first mobile message without overwriting custom titles', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-mobile-title-'));
   const f = await open(directory);

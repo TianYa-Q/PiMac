@@ -23,20 +23,32 @@ test('every pinned upstream file is pristine and every host patch still matches'
   }
 });
 
-test('Pi lifecycle stays upstream-owned with a bounded telemetry-only exception', () => {
+test('Pi lifecycle stays upstream-owned with bounded telemetry and image projection exceptions', () => {
   const adapter = 'apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts';
   const contract = 'packages/contracts/src/orchestrationV2.ts';
   for (const file of Object.keys(patches)) {
     assert(!file.startsWith('packages/contracts/') || file === contract, file);
     assert(!/\/Pi(?:AdapterV2|Rpc|Driver)\.ts$/.test(file) || file === adapter, file);
   }
-  assert.equal(patches[adapter].length, 6);
+  const imagePatches = patches[adapter].filter(entry => entry.newText.includes('toolOutputImages'));
+  assert.equal(imagePatches.length, 2);
+  assert(imagePatches.some(entry => entry.newText.includes('import { toolOutputImages } from "@t3tools/shared/toolOutput";')));
+  const imageProjection = imagePatches.find(entry => entry.newText.includes('toolOutputImages(resultRecord).length > 0'));
+  assert(imageProjection, 'Image blocks must survive the native tool output projection');
+  assert(imageProjection.newText.includes('? { output: resultRecord }'));
+  assert(imageProjection.newText.includes(': outputText.length > 0 ? { output: outputText } : {}'));
+  assert.equal(patches[adapter].length - imagePatches.length, 6);
   assert.equal(patches[contract].length, 1);
   assert(patches[contract][0].newText.includes('piMetrics: Schema.optional'));
   for (const entry of patches[adapter]) {
-    assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage/.test(entry.newText));
+    assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage|toolOutputImages/.test(entry.newText));
     assert(!/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText));
   }
+  const discovery = patches['apps/server/src/provider/PiProvider.ts'];
+  assert.equal(discovery.length, 2);
+  assert(discovery.every(entry => entry.newText.includes('createModelContextSettings')));
+  assert(discovery.some(entry => entry.newText.includes('.recordModels(modelsData)')));
+  assert(discovery.every(entry => !/\.set\(|connection\.|type: "prompt"/.test(entry.newText)));
   // The host allowlist supplements the official connection-scoped middleware;
   // it must not resurrect ws.ts's retired per-handler scope checks.
   assert(Object.hasOwn(patches, 'apps/server/src/auth/RpcAuthorization.ts'));

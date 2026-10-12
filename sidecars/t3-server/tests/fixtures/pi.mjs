@@ -1,4 +1,5 @@
-// Protocol-only fixture: never calls a model, network, shell or real Pi.
+// Protocol-only fixture: never calls a model, shell or real Pi.
+// MCP acceptance probes only the test-owned local Server.
 import fs from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -71,6 +72,52 @@ process.stdin.on('data', chunk => {
         if (command.message === '/handled') break;
         running = true; send({ type: 'agent_start' });
         if (command.message === 'wait') break;
+        if (command.message === 'mcp-discovery' || command.message === 'html-render') {
+          send({ type: 'message_start', message: { role: 'assistant', content: [] } });
+          // 使用上游注入的会话凭据，只输出工具名；不把 token 写入日志或投影。
+          void (async () => {
+            const headers = { authorization: 'Bearer ' + process.env.T3_MCP_BEARER_TOKEN,
+              'content-type': 'application/json', accept: 'application/json, text/event-stream',
+              'mcp-protocol-version': '2025-06-18' };
+            const request = async (id, method, params) => {
+              const response = await fetch(process.env.T3_MCP_URL, { method: 'POST', headers,
+                body: JSON.stringify({ jsonrpc: '2.0', id, method, params }) });
+              const session = response.headers.get('mcp-session-id');
+              if (session) headers['mcp-session-id'] = session;
+              const body = await response.text();
+              if (!response.ok) throw new Error('MCP status ' + response.status);
+              const payload = response.headers.get('content-type')?.includes('text/event-stream')
+                ? body.split('\n').find(line => line.startsWith('data:')).slice(5).trim() : body;
+              const parsed = JSON.parse(payload);
+              if (parsed.error) throw new Error(parsed.error.message);
+              return parsed.result;
+            };
+            await request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {},
+              clientInfo: { name: 'pimac-fixture', version: '1' } });
+            if (command.message === 'html-render') {
+              const html = '<!doctype html><html><head><style>h2{font-size:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.box{background:var(--secondary);padding:20px;border-radius:8px}p{color:var(--muted-foreground)}</style></head><body><h2>侧栏前后对比</h2><div class="grid"><div class="box">修改前<p>标题、项目、时间各占一行</p></div><div class="box">修改后<p>紧凑标题与单行元信息</p></div></div></body></html>';
+              send({ type: 'tool_execution_start', toolCallId: 'html-1', toolName: 'mcp__t3-code__html_render', args: { title: '侧栏前后对比', html, height: 260 } });
+              const result = await request(2, 'tools/call', { name: 'html_render', arguments: { title: '侧栏前后对比', html, height: 260 } });
+              if (result.isError) throw new Error(JSON.stringify(result.content));
+              send({ type: 'tool_execution_end', toolCallId: 'html-1', toolName: 'mcp__t3-code__html_render', result, isError: false });
+              send({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '已完成页面展示。' }], stopReason: 'stop' } });
+              return;
+            }
+            const tools = await request(2, 'tools/list', {});
+            const names = tools.tools.map(tool => tool.name);
+            const task = await request(3, 'tools/call', { name: 'schedule_task', arguments: {
+              title: 'MCP acceptance timer', prompt: 'test-owned timer',
+              schedule: { type: 'interval', everyMs: 3600000 } } });
+            if (task.isError) throw new Error(JSON.stringify(task.content));
+            send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: JSON.stringify(names) } });
+            send({ type: 'message_end', message: { role: 'assistant',
+              content: [{ type: 'text', text: JSON.stringify(names) }], stopReason: 'stop' } });
+          })().catch(error => {
+            send({ type: 'message_end', message: { role: 'assistant', content: [],
+              stopReason: 'error', errorMessage: String(error) } });
+          }).finally(() => { running = false; send({ type: 'agent_settled' }); });
+          break;
+        }
         if (command.message === 'dialog') {
           pendingDialog = true;
           send({ type: 'extension_ui_request', id: 'fixture-input', method: 'input', title: 'Official Pi dialog', placeholder: 'Enter text' });

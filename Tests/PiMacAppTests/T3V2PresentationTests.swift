@@ -47,6 +47,22 @@ struct T3V2PresentationTests {
     #expect(mapped["snapshotSequence"] as? Int == 42)
   }
 
+  @Test func interruptedRunRemainsVisibleWithHeldQueue() {
+    let mapped = T3V2Presentation.detail(["projection": [
+      "thread": ["id": "thread"],
+      "runs": [
+        ["id": "stopped", "status": "interrupted"],
+        ["id": "pending", "status": "queued", "queueHeld": true],
+      ],
+      "visibleTurnItems": [],
+    ]])
+    let thread = mapped["thread"] as? [String: Any]
+    let turn = thread?["latestTurn"] as? [String: Any]
+    #expect(turn?["turnId"] as? String == "stopped")
+    #expect(turn?["state"] as? String == "interrupted")
+    #expect(thread?["queueHeld"] as? Bool == true)
+  }
+
   @Test func visibleHistoryUsesOfficialItemsIncludingInheritedReasoning() {
     let detail: [String: Any] = [
       "projection": [

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-private func thinkingLevelLabel(_ level: String) -> String {
+func thinkingLevelLabel(_ level: String) -> String {
   let chinese: String
   switch level {
   case "off": chinese = "不思考"
@@ -50,7 +50,7 @@ private enum ConversationLayout {
 /// SwiftUI does not expose scroll phases on macOS 14. Observe AppKit's live-scroll
 /// notifications so content growth is never mistaken for a user's scroll gesture.
 private struct ConversationScrollObserver: NSViewRepresentable {
-  let onUserScroll: (_ isAtBottom: Bool) -> Void
+  let onUserScroll: (_ isAtBottom: Bool, _ isUserGesture: Bool) -> Void
 
   func makeCoordinator() -> Coordinator {
     Coordinator(onUserScroll: onUserScroll)
@@ -68,16 +68,18 @@ private struct ConversationScrollObserver: NSViewRepresentable {
   }
 
   final class Coordinator {
-    var onUserScroll: (Bool) -> Void
+    var onUserScroll: (Bool, Bool) -> Void
     private weak var scrollView: NSScrollView?
     private var observers: [NSObjectProtocol] = []
+    private var wheelMonitor: Any?
 
-    init(onUserScroll: @escaping (Bool) -> Void) {
+    init(onUserScroll: @escaping (Bool, Bool) -> Void) {
       self.onUserScroll = onUserScroll
     }
 
     deinit {
       observers.forEach(NotificationCenter.default.removeObserver)
+      if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
     }
 
     func attach(to scrollView: NSScrollView?) {
@@ -85,6 +87,15 @@ private struct ConversationScrollObserver: NSViewRepresentable {
       observers.forEach(NotificationCenter.default.removeObserver)
       observers.removeAll()
       self.scrollView = scrollView
+      if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
+      // 真实滚轮输入优先于首次/异步布局的底部定位；普通布局通知仍不代表用户意图。
+      wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self, weak scrollView] event in
+        guard let self, let scrollView, event.window === scrollView.window,
+          scrollView.bounds.contains(scrollView.convert(event.locationInWindow, from: nil)),
+          event.scrollingDeltaY != 0 else { return event }
+        self.onUserScroll(false, true)
+        return event
+      }
       // 对话底部是一个真实的内容边界，不允许橡皮筋效果把最后一条消息
       // 临时拖到固定留白之外。
       scrollView.verticalScrollElasticity = .none
@@ -94,8 +105,8 @@ private struct ConversationScrollObserver: NSViewRepresentable {
           forName: NSScrollView.willStartLiveScrollNotification,
           object: scrollView,
           queue: .main
-        ) { [weak self] _ in
-          self?.onUserScroll(false)
+        ) { [weak self] notification in
+          self?.onUserScroll(false, notification.userInfo?["userGesture"] as? Bool == true)
         })
       for name in [
         NSScrollView.didLiveScrollNotification,
@@ -108,7 +119,7 @@ private struct ConversationScrollObserver: NSViewRepresentable {
             queue: .main
           ) { [weak self, weak scrollView] _ in
             guard let self, let scrollView else { return }
-            self.onUserScroll(Self.isAtBottom(scrollView))
+            self.onUserScroll(Self.isAtBottom(scrollView), false)
           })
       }
     }
@@ -177,6 +188,8 @@ struct ContentView: View {
   @State private var initialScrollGeneration = 0
   @State private var conversationBottomIsVisible = false
   @State private var visibleSessionCount = 10
+  @State private var expandedSessionPaths: Set<String> = []
+  @State private var showingSettledSessions = false
   @State private var sessionSearchText = ""
   @State private var sessionSearchExpanded = false
   @FocusState private var sessionSearchFocused: Bool
@@ -351,6 +364,16 @@ struct ContentView: View {
       sessionSearchResults = []
       sessionSearchError = nil
     }
+    .task(id: sessionTreeRevealKey) {
+      // 打开子会话时展开祖先；仅关系或选中项变化才触发，不干扰用户主动折叠。
+      let tree = sessionTree
+      let path = app.currentSessionPath
+      let ancestors = tree.ancestorPaths(of: path)
+      expandedSessionPaths.formUnion(ancestors)
+      if let index = tree.roots.firstIndex(where: { $0.path == (ancestors.last ?? path) }) {
+        visibleSessionCount = max(visibleSessionCount, index + 1)
+      }
+    }
     .task(id: sessionSearchKey) {
       let query = sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !SessionSearchQuery(query).isEmpty else {
@@ -399,8 +422,8 @@ struct ContentView: View {
   }
 
   private var redesignedSidebar: some View {
-    let sessions = allSessions
-    let visibleSessions = Array(sessions.prefix(visibleSessionCount))
+    let tree = sessionTree
+    let visibleSessions = tree.rows(expandedPaths: expandedSessionPaths, rootLimit: visibleSessionCount)
     let searching = !SessionSearchQuery(sessionSearchText).isEmpty
     return VStack(spacing: 0) {
       VStack(alignment: .leading, spacing: 0) {
@@ -485,11 +508,7 @@ struct ContentView: View {
         .foregroundStyle(.secondary)
         .padding(.bottom, 3)
 
-        if workspace.projects.isEmpty {
-          Button("添加项目…", systemImage: "folder.badge.plus") { choosingProject = true }
-            .buttonStyle(.bordered)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else if projectsCollapsed {
+        if projectsCollapsed && !workspace.projects.isEmpty {
           ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 7) {
               ForEach(workspace.projects) { project in
@@ -498,7 +517,7 @@ struct ContentView: View {
             }
             .padding(.vertical, 1)
           }
-        } else {
+        } else if !workspace.projects.isEmpty {
           LazyVStack(spacing: 3) {
             ForEach(workspace.projects) { project in
               projectRow(project)
@@ -532,10 +551,50 @@ struct ContentView: View {
           .padding(.bottom, 10)
 
           HStack {
-            Text(workspace.projectFilterPath == nil ? "全部会话" : "会话")
-              .font(.caption.bold())
+            Menu {
+              Button {
+                showingSettledSessions = false
+              } label: {
+                Label("活跃会话", systemImage: showingSettledSessions ? "bubble.left" : "checkmark")
+              }
+              Button {
+                showingSettledSessions = true
+              } label: {
+                Label("已完成", systemImage: showingSettledSessions ? "checkmark" : "checkmark.circle")
+              }
+            } label: {
+              HStack(spacing: 5) {
+                Text(showingSettledSessions ? "已完成" : "活跃会话")
+                  .font(.caption.weight(.semibold))
+                Image(systemName: "chevron.down")
+                  .font(.system(size: 8, weight: .semibold))
+                  .foregroundStyle(.tertiary)
+              }
               .foregroundStyle(.secondary)
+              .padding(.vertical, 4)
+              .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("切换活跃 / 已完成会话")
             Spacer()
+            if !showingSettledSessions {
+              Button {
+                workspace.settleIdleSessions()
+              } label: {
+                Image(systemName: "checkmark.circle")
+                  .frame(width: 24, height: 24)
+                  .contentShape(Rectangle())
+              }
+              .buttonStyle(.plain)
+              .foregroundStyle(.secondary)
+              .disabled(
+                !workspace.server.isConnected || workspace.isSettlingIdleSessions
+                  || workspace.idleSessionPaths.isEmpty)
+              .help("一键 Settle 所有项目中未在进行的会话（保留运行中、排队及等待处理的会话）")
+              .accessibilityLabel(workspace.isSettlingIdleSessions ? "正在批量 Settle" : "一键 Settle")
+            }
             if workspace.projectFilterPath != nil {
               Button("全部") { workspace.clearProjectFilter() }
                 .buttonStyle(.plain)
@@ -605,7 +664,7 @@ struct ContentView: View {
               ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: 3) {
                   ForEach(sessionSearchResults) { result in
-                    redesignedSessionRow(result.session, snippet: result.snippet)
+                    redesignedSessionRow(result.session, snippet: result.snippet, childCount: 0)
                   }
                 }
                 .padding(.vertical, 6)
@@ -630,11 +689,33 @@ struct ContentView: View {
           } else {
             ScrollView(showsIndicators: false) {
               LazyVStack(spacing: 3) {
-                ForEach(visibleSessions) { session in
-                  redesignedSessionRow(session)
+                ForEach(visibleSessions) { row in
+                  HStack(alignment: .center, spacing: 0) {
+                    if row.childCount > 0 {
+                      Button {
+                        if !expandedSessionPaths.insert(row.id).inserted {
+                          expandedSessionPaths.remove(row.id)
+                        }
+                      } label: {
+                        Image(systemName: expandedSessionPaths.contains(row.id) ? "chevron.down" : "chevron.right")
+                          .font(.system(size: 9, weight: .semibold))
+                          .foregroundStyle(.secondary)
+                          .frame(width: 12, height: 34)
+                          .contentShape(Rectangle())
+                      }
+                      .buttonStyle(.plain)
+                      .help("\(expandedSessionPaths.contains(row.id) ? "折叠" : "展开") \(row.childCount) 个子会话")
+                      .accessibilityLabel("\(expandedSessionPaths.contains(row.id) ? "折叠" : "展开")子会话：\(row.session.title)")
+                      .accessibilityValue("\(row.childCount) 个子会话")
+                    } else {
+                      Color.clear.frame(width: 12, height: 1)
+                    }
+                    redesignedSessionRow(row.session, childCount: row.childCount)
+                  }
+                  .padding(.leading, CGFloat(min(row.depth, 6)) * 14)
                 }
-                if visibleSessions.count < sessions.count {
-                  loadMoreSessionsButton(totalCount: sessions.count)
+                if visibleSessionCount < tree.roots.count {
+                  loadMoreSessionsButton(totalCount: tree.roots.count)
                 }
               }
               .padding(.vertical, 6)
@@ -778,73 +859,112 @@ struct ContentView: View {
   private var sessionSearchKey: String {
     let sessions = allSessions
     return
-      "\(workspace.projectFilterPath ?? "")|\(sessionSearchText)|\(sessionSearchRetry)|"
+      "\(workspace.projectFilterPath ?? "")|\(showingSettledSessions)|\(sessionSearchText)|\(sessionSearchRetry)|"
       + sessions.map { "\($0.path)|\($0.title)|\($0.modifiedAt.timeIntervalSince1970)" }
       .joined(separator: "\n")
   }
 
-  private func redesignedSessionRow(_ session: SessionItem, snippet: String? = nil) -> some View {
+  // 只清理自动生成的图片占位前缀；保留原始标题供悬停查看，不改写会话数据。
+  private func sidebarSessionTitle(_ title: String) -> String {
+    let cleaned = title.replacingOccurrences(
+      of: #"^(?:\[\[粘贴图片\s+[^\]]+\]\]\s*)+"#,
+      with: "", options: .regularExpression)
+    return cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "图片会话" : cleaned
+  }
+
+  private func redesignedSessionRow(
+    _ session: SessionItem, snippet: String? = nil, childCount: Int
+  ) -> some View {
     let selected = workspace.isSelectedSession(path: session.path)
+    let thread = AppModel.threadID(from: session.path).flatMap { workspace.server.thread($0) }
     let running = workspace.model(forSessionPath: session.path)?.isBusy == true
-    let unreadDone = AppModel.threadID(from: session.path).flatMap { workspace.server.thread($0) }
-      .map { T3V2Presentation.hasUnreadCompletion($0) } ?? false
+      || T3V2Presentation.active.contains(thread?["status"] as? String ?? "")
+    let settled = thread.map { WorkspaceModel.isSettled($0) } ?? false
+    let autoSettleEnabled = !(thread?["autoSettleDisabledAt"] is String)
+    let parentID = thread.flatMap { T3V2Presentation.subagentParentID($0) }
+    let parentThread = parentID.flatMap { workspace.server.thread($0) }
+    let unreadDone = !selected && (thread.map { T3V2Presentation.hasUnreadCompletion($0) } ?? false)
     return SidebarHoverRegion { hovered in
-      ZStack(alignment: .trailing) {
+      ZStack(alignment: .topTrailing) {
         Button {
           guard let projectURL = workspace.project(forSessionPath: session.path)?.url else { return }
           workspace.openSession(path: session.path, in: projectURL)
         } label: {
-          HStack(spacing: 9) {
-            Image(systemName: selected ? "bubble.left.fill" : "bubble.left")
-              .foregroundStyle(
-                running ? Color.orange : selected ? Color.accentColor : Color.secondary
-              )
-              .frame(width: 17)
-            VStack(alignment: .leading, spacing: 2) {
-              Text(session.title)
-                .font(.callout)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
+          VStack(alignment: .leading, spacing: 6) {
+              if parentID != nil {
+                Text("子代理")
+                  .font(.caption2.weight(.semibold))
+                  .foregroundStyle(Color.accentColor)
+                  .padding(.horizontal, 5)
+                  .padding(.vertical, 1)
+                  .background(Color.accentColor.opacity(0.1), in: Capsule())
+              }
+              HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if unreadDone {
+                  Circle()
+                    .fill(Color.green)
+                    .frame(width: 5, height: 5)
+                    .accessibilityLabel("未读完成")
+                }
+                Text(sidebarSessionTitle(session.title))
+                  .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                  .foregroundStyle(selected ? Color.primary : Color.primary.opacity(0.86))
+                  .lineLimit(2)
+                  .frame(maxWidth: .infinity, alignment: .leading)
+              }
+              .padding(.trailing, 22)
+              .help(session.title)
+              if parentID != nil {
+                Text("隶属：\(parentThread?["title"] as? String ?? "父会话不在当前列表")")
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+                  .lineLimit(1)
+                  .help(parentThread?["title"] as? String ?? "父会话可能已归档或不在当前可见范围")
+              }
               if let snippet {
                 Text(snippet)
                   .font(.caption)
                   .foregroundStyle(.secondary)
                   .lineLimit(2)
               }
-              if workspace.projectFilterPath == nil,
-                let project = workspace.project(forSessionPath: session.path)
-              {
-                HStack(spacing: 4) {
-                  projectIcon(project, size: 14)
-                  Text(project.name).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+              HStack(spacing: 5) {
+                if workspace.projectFilterPath == nil,
+                  let project = workspace.project(forSessionPath: session.path)
+                {
+                  Text(project.name)
+                    .lineLimit(1)
+                    .help(project.url.path)
+                  Text("·").foregroundStyle(.tertiary)
                 }
-                .help(project.url.path)
-              }
-              HStack(spacing: 6) {
                 SessionRelativeTime(date: session.modifiedAt)
-                  .font(.caption2)
-                  .foregroundStyle(.secondary)
-                if unreadDone {
-                  Text("Done")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.green)
+                  .lineLimit(1)
+                  .fixedSize()
+                Spacer(minLength: 2)
+                if childCount > 0 {
+                  Label("\(childCount)", systemImage: "arrow.triangle.branch")
+                    .fixedSize()
+                    .help("\(childCount) 个子会话")
+                }
+                if settled {
+                  Image(systemName: "checkmark.circle")
+                    .help("已完成")
                 }
               }
-            }
+              .font(.system(size: 10))
+              .foregroundStyle(.secondary)
           }
-          .padding(.leading, 9)
-          .padding(.trailing, 38)
-          .padding(.vertical, 7)
+          .padding(.horizontal, 12)
+          .padding(.vertical, 10)
           .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
 
         if hovered {
           Button {
-            guard let projectURL = workspace.project(forSessionPath: session.path)?.url else { return }
-            workspace.archiveSession(path: session.path, in: projectURL)
+            workspace.updateSessionLifecycle(
+              path: session.path, action: settled ? .unsettle : .settle)
           } label: {
-            Image(systemName: "archivebox")
+            Image(systemName: settled ? "arrow.uturn.backward" : "checkmark")
               .font(.system(size: 12, weight: .medium))
               .foregroundStyle(.secondary)
               .frame(width: 26, height: 26)
@@ -852,30 +972,52 @@ struct ContentView: View {
           }
           .buttonStyle(.plain)
           .disabled(running)
-          .help(running ? "任务运行时不能归档" : "归档会话")
+          .help(settled ? "恢复到活跃列表" : "完成并收起会话（Settle）")
           .padding(.trailing, 6)
+          .padding(.top, 5)
           .transition(.opacity)
         }
       }
       .background {
-        RoundedRectangle(cornerRadius: 9)
-          .fill(
-            selected
-              ? Color.accentColor.opacity(0.11)
-              : hovered ? Color.primary.opacity(0.055) : Color.clear
-          )
-          .overlay {
-            RoundedRectangle(cornerRadius: 9)
-              .strokeBorder(
-                hovered
-                  ? (selected ? Color.accentColor.opacity(0.17) : Color.primary.opacity(0.07))
-                  : Color.clear,
-                lineWidth: 1
-              )
+        RoundedRectangle(cornerRadius: 8)
+          .fill(selected ? Color.accentColor.opacity(0.10)
+            : hovered ? Color.primary.opacity(0.045) : Color.clear)
+          .overlay(alignment: .leading) {
+            if selected || running {
+              Capsule()
+                .fill(running ? Color.orange : Color.accentColor.opacity(0.85))
+                .frame(width: 3, height: 20)
+                .accessibilityLabel(running ? "运行中" : "当前会话")
+            }
           }
-          .shadow(color: .black.opacity(hovered ? 0.07 : 0), radius: 4, y: 1)
       }
       .contentShape(RoundedRectangle(cornerRadius: 9))
+      .contextMenu {
+        if let parentID {
+          Button("打开父会话", systemImage: "arrow.turn.up.left") {
+            let path = "t3:\(parentID)"
+            guard let projectURL = workspace.project(forSessionPath: path)?.url else { return }
+            workspace.openSession(path: path, in: projectURL)
+          }
+          .disabled(workspace.project(forSessionPath: "t3:\(parentID)") == nil)
+          Divider()
+        }
+        Button(settled ? "恢复活跃（Unsettle）" : "完成并收起（Settle）") {
+          workspace.updateSessionLifecycle(
+            path: session.path, action: settled ? .unsettle : .settle)
+        }
+        .disabled(running)
+        Button(autoSettleEnabled ? "停用自动 Settle" : "启用自动 Settle") {
+          workspace.updateSessionLifecycle(
+            path: session.path, action: .autoSettle(enabled: !autoSettleEnabled))
+        }
+        Divider()
+        Button("归档会话", systemImage: "archivebox") {
+          guard let projectURL = workspace.project(forSessionPath: session.path)?.url else { return }
+          workspace.archiveSession(path: session.path, in: projectURL)
+        }
+        .disabled(running)
+      }
     }
   }
 
@@ -991,8 +1133,30 @@ struct ContentView: View {
     .padding()
   }
 
+  private var sessionParentPaths: [String: String] {
+    var parents: [String: String] = [:]
+    for thread in workspace.server.threads {
+      if let id = thread["id"] as? String,
+        let parentID = T3V2Presentation.subagentParentID(thread)
+      {
+        parents["t3:\(id)"] = "t3:\(parentID)"
+      }
+    }
+    return parents
+  }
+
+  private var sessionTree: SessionTree {
+    SessionTree(sessions: allSessions, parentPaths: sessionParentPaths)
+  }
+
+  private var sessionTreeRevealKey: String {
+    let parents = sessionParentPaths
+    return app.currentSessionPath + "|"
+      + allSessions.map { "\($0.path):\(parents[$0.path] ?? "")" }.sorted().joined(separator: "|")
+  }
+
   private var allSessions: [SessionItem] {
-    workspace.filteredSessions
+    workspace.filteredSessions(settled: showingSettledSessions)
   }
 
   private func loadMoreSessionsButton(totalCount: Int) -> some View {
@@ -1051,6 +1215,7 @@ struct ContentView: View {
               .frame(width: 0, height: 0)
           }
         }
+        .environment(\.htmlRenderViewportHeight, viewport.size.height)
         .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
         .overlay(alignment: .bottomTrailing) {
@@ -1210,11 +1375,11 @@ struct ContentView: View {
     }
   }
 
-  private func updateScrollModeAfterUserScroll(isAtBottom: Bool) {
+  private func updateScrollModeAfterUserScroll(isAtBottom: Bool, isUserGesture: Bool) {
     // Replacing a project's transcript makes AppKit emit transient scroll notifications while
     // the new content is being laid out. They are not user intent and must not cancel the
     // pending one-shot scroll to the new session's bottom.
-    guard !initialSessionScrollPending else { return }
+    guard !initialSessionScrollPending || isUserGesture else { return }
 
     if isAtBottom {
       // AppKit's end-of-scroll notification can arrive after the geometry preference update.
@@ -2048,7 +2213,7 @@ private struct ComposerTextView: NSViewRepresentable {
   }
 }
 
-private struct ConversationTurnView: View, Equatable {
+struct ConversationTurnView: View, Equatable {
   let turn: ConversationTurn
   let isActive: Bool
   let onEdit: (String) -> Void
@@ -2068,6 +2233,12 @@ private struct ConversationTurnView: View, Equatable {
       }
       if !turn.activity.isEmpty {
         ActivityGroupView(entries: turn.activity, taskIsRunning: isActive)
+      }
+      ForEach(turn.htmlRenders) { entry in
+        if let reference = entry.htmlRender {
+          HTMLRenderView(reference: reference, document: entry.htmlDocument, failure: entry.htmlRenderError)
+            .id(entry.id)
+        }
       }
       if let assistant = turn.finalAssistant {
         ChatEntryView(entry: assistant)
@@ -2296,7 +2467,9 @@ private struct ActivityEntryView: View {
 
           // Keep selectable input outside the disclosure button so dragging to
           // copy a command does not toggle the tool's output.
-          if entry.kind == .tool, let toolInput = entry.toolInput, !toolInput.isEmpty {
+          if entry.kind == .tool, let toolInput = entry.toolInput, !toolInput.isEmpty,
+            !(expanded && hasExpandableInput && entry.toolName != "codemode")
+          {
             Group {
               if entry.toolName == "read" {
                 ReadToolInputView(input: toolInput)
@@ -2323,10 +2496,10 @@ private struct ActivityEntryView: View {
           }
 
           if expanded && hasVisibleDetails {
-            if entry.toolName == "codemode", let code = entry.toolInput,
-              !code.isEmpty
-            {
-              ToolDetailView(title: "脚本 · JavaScript", text: code)
+            if hasExpandableInput, let input = entry.toolInput {
+              ToolDetailView(
+                title: entry.toolName == "codemode" ? "脚本 · JavaScript" : "调用参数",
+                text: input)
                 .padding(.leading, 31)
             }
             activityContent
@@ -2354,7 +2527,7 @@ private struct ActivityEntryView: View {
                   if call.name == "read" {
                     ReadToolInputView(input: input)
                   } else {
-                    Text(input).lineLimit(3).textSelection(.enabled).help(input)
+                    Text(input).textSelection(.enabled).help(input)
                   }
                 }
                 if let error = call.error {
@@ -2459,10 +2632,16 @@ private struct ActivityEntryView: View {
     }
   }
 
+  private var hasExpandableInput: Bool {
+    // 命令和文件路径已完整展示；通用参数的三行预览必须能展开，输出为空时也不例外。
+    entry.kind == .tool && entry.toolInput?.isEmpty == false
+      && !["bash", "read", "edit", "write"].contains(entry.toolName ?? "")
+  }
+
   private var hasVisibleDetails: Bool {
     if entry.kind == .thinking { return !entry.text.isEmpty }
     if !entry.attachments.isEmpty { return true }
-    if entry.toolName == "codemode", entry.toolInput?.isEmpty == false { return true }
+    if hasExpandableInput { return true }
     if !entry.childToolEntries.isEmpty || !entry.nestedCalls.isEmpty || !entry.nestedCallsComplete {
       return true
     }
@@ -2772,251 +2951,6 @@ struct ImageAttachmentPreview: View {
       }
     }
     .frame(minWidth: 640, idealWidth: 900, minHeight: 480, idealHeight: 680)
-  }
-}
-
-private struct ModelSettingsView: View {
-  @Environment(\.dismiss) private var dismiss
-  @EnvironmentObject private var app: AppModel
-  @State private var search = ""
-  @State private var onlyVisible = false
-
-  private var filteredModels: [PiModel] {
-    let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-    let visibleIDs = Set(app.models.map(\.id))
-    return app.allModels.filter { model in
-      (!onlyVisible || visibleIDs.contains(model.id))
-        && (query.isEmpty || "\(model.name) \(model.id)".localizedCaseInsensitiveContains(query))
-    }
-  }
-
-  var body: some View {
-    VStack(spacing: 0) {
-      HStack(spacing: 12) {
-        Image(systemName: "slider.horizontal.3")
-          .font(.title2)
-          .foregroundStyle(Color.accentColor)
-          .frame(width: 40, height: 40)
-          .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-        VStack(alignment: .leading, spacing: 4) {
-          Text("模型与思考等级").font(.title2.bold())
-          Text("设置新会话默认值，管理模型显示与思考等级")
-            .font(.caption).foregroundStyle(.secondary)
-        }
-        Spacer()
-        Button(action: app.reloadModelList) {
-          Label("刷新", systemImage: "arrow.clockwise")
-        }
-        .disabled(!app.canReloadModelList || app.isLoadingConfiguration)
-        .help("重新读取 Server 的可用模型列表")
-        Button("完成") { dismiss() }
-          .buttonStyle(.borderedProminent)
-          .keyboardShortcut(.defaultAction)
-      }
-      .padding(.horizontal, 24)
-      .padding(.vertical, 18)
-      .background(Color(nsColor: .windowBackgroundColor))
-
-      Divider()
-
-      ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-          VStack(alignment: .leading, spacing: 10) {
-            sectionTitle("会话默认值", icon: "bubble.left.and.bubble.right")
-            VStack(spacing: 0) {
-              settingRow("默认模型", detail: "仅用于新会话，不改变已有会话。") {
-                Picker(
-                  "默认模型",
-                  selection: Binding(
-                    get: { app.defaultModelID },
-                    set: { app.setDefaultModel($0) }
-                  )
-                ) {
-                  Text("自动选择").tag(nil as String?)
-                  if let id = app.defaultModelID, !app.models.contains(where: { $0.id == id }) {
-                    Text("\(id)（隐藏或不可用）").tag(Optional(id))
-                  }
-                  ForEach(app.models) { model in
-                    Text("\(model.name) · \(model.provider)").tag(Optional(model.id))
-                  }
-                }
-                .labelsHidden()
-              }
-              Divider().padding(.horizontal, 16)
-              settingRow("默认思考等级", detail: "模型未设置专属等级时使用。") {
-                Picker(
-                  "默认思考等级",
-                  selection: Binding(
-                    get: { app.globalDefaultThinkingLevel },
-                    set: { app.setGlobalDefaultThinkingLevel($0) }
-                  )
-                ) {
-                  ForEach(PiModel.thinkingLevelOrder, id: \.self) { level in
-                    Text(thinkingLevelLabel(level)).tag(level)
-                  }
-                }
-                .labelsHidden()
-              }
-            }
-            .background(
-              Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12)
-            )
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
-          }
-
-          HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "arrow.down.right.and.arrow.up.left")
-              .foregroundStyle(Color.accentColor)
-              .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 4) {
-              Text("上下文压缩").font(.caption.weight(.semibold))
-              Text("使用 /compact 命令，压缩模型与自动压缩策略遵循 Pi 配置。")
-                .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-          }
-          .padding(12)
-          .frame(maxWidth: .infinity, alignment: .leading)
-          .background(Color.accentColor.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
-
-          VStack(alignment: .leading, spacing: 10) {
-            HStack {
-              sectionTitle("可用模型", icon: "square.stack.3d.up")
-              Spacer()
-              Text("已显示 \(app.models.count) / \(app.allModels.count)")
-                .font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                .monospacedDigit()
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(Color.secondary.opacity(0.08), in: Capsule())
-            }
-            HStack(spacing: 8) {
-              Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-              TextField("搜索模型名称或提供商", text: $search)
-                .textFieldStyle(.plain)
-              if !search.isEmpty {
-                Button {
-                  search = ""
-                } label: {
-                  Image(systemName: "xmark.circle.fill")
-                }
-                .buttonStyle(.plain).foregroundStyle(.secondary)
-              }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(
-              Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8)
-            )
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary, lineWidth: 1))
-            HStack {
-              Toggle("仅已显示", isOn: $onlyVisible)
-                .toggleStyle(.checkbox)
-                .help("只查看已在对话选择列表中显示的模型")
-              Spacer()
-              Text("默认思考等级")
-                .frame(width: 150, alignment: .trailing)
-            }
-            .font(.caption).foregroundStyle(.secondary)
-
-            LazyVStack(spacing: 0) {
-              if filteredModels.isEmpty {
-                Text(app.allModels.isEmpty ? "暂无模型，请连接 Server 后刷新。" : "没有匹配的模型")
-                  .foregroundStyle(.secondary)
-                  .frame(maxWidth: .infinity).padding(24)
-              }
-              ForEach(filteredModels) { model in
-                modelRow(model)
-                if model.id != filteredModels.last?.id {
-                  Divider().padding(.leading, 62).padding(.trailing, 14)
-                }
-              }
-            }
-            .background(
-              Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12)
-            )
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
-          }
-        }
-        .padding(24)
-      }
-      .background(Color(nsColor: .windowBackgroundColor))
-    }
-    .frame(width: 780, height: 720)
-  }
-
-  private func sectionTitle(_ title: String, icon: String) -> some View {
-    Label(title, systemImage: icon)
-      .font(.callout.weight(.semibold))
-      .foregroundStyle(.primary)
-  }
-
-  private func settingRow<Control: View>(
-    _ title: String, detail: String, @ViewBuilder control: () -> Control
-  ) -> some View {
-    HStack(spacing: 20) {
-      VStack(alignment: .leading, spacing: 5) {
-        Text(title).font(.callout.weight(.medium))
-        Text(detail).font(.caption).foregroundStyle(.secondary)
-      }
-      Spacer(minLength: 0)
-      control()
-        .pickerStyle(.menu)
-        .controlSize(.regular)
-        .frame(width: 260)
-    }
-    .padding(.horizontal, 16)
-    .padding(.vertical, 12)
-  }
-
-  private func modelRow(_ model: PiModel) -> some View {
-    HStack(spacing: 12) {
-      Toggle(
-        "显示 \(model.name)",
-        isOn: Binding(
-          get: { app.models.contains(where: { $0.id == model.id }) },
-          set: { app.setModelVisible($0, modelID: model.id) }
-        )
-      )
-      .labelsHidden().toggleStyle(.switch).controlSize(.small)
-      .help("在对话模型列表中显示此模型")
-
-      VStack(alignment: .leading, spacing: 4) {
-        HStack(spacing: 6) {
-          Text(model.name).font(.callout.weight(.medium))
-            .lineLimit(1)
-            .help(model.name)
-          if model.id == app.selectedModelId {
-            Text("当前").font(.caption2)
-              .foregroundStyle(Color.accentColor)
-              .padding(.horizontal, 6).padding(.vertical, 2)
-              .background(Color.accentColor.opacity(0.12), in: Capsule())
-          }
-        }
-        Text(model.id).font(.caption.monospaced())
-          .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-          .help(model.id)
-      }
-      Spacer(minLength: 8)
-      Picker(
-        "专属默认思考等级",
-        selection: Binding(
-          get: { app.modelDefaultThinkingLevels[model.id] ?? "__global__" },
-          set: { app.setDefaultThinkingLevel($0 == "__global__" ? nil : $0, for: model.id) }
-        )
-      ) {
-        Text("跟随全局").tag("__global__")
-        ForEach(model.thinkingLevels, id: \.self) { level in
-          Text(thinkingLevelLabel(level)).tag(level)
-        }
-      }
-      .labelsHidden()
-      .pickerStyle(.menu)
-      .controlSize(.small)
-      .frame(width: 150)
-      .help("仅用于此模型的新会话；跟随全局时使用默认思考等级")
-    }
-    .padding(.horizontal, 14)
-    .padding(.vertical, 11)
   }
 }
 

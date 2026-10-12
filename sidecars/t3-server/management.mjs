@@ -22,6 +22,7 @@ export { oauthAwareCommandReadiness } from './oauth-readiness.mjs';
 import { originAllowed } from './origin-policy.mjs';
 import { connectionRoute } from './connection-diagnostics.mjs';
 import { setModelPreferences } from './model-preferences.mjs';
+import { createModelContextSettings } from './model-context.mjs';
 import { ServerSettingsService } from './upstream/apps/server/src/serverSettings.ts';
 
 import { ProviderRegistry } from './upstream/apps/server/src/provider/ProviderRegistry.ts';
@@ -56,6 +57,7 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
   const settings = yield* ServerSettingsService;
   const providers = yield* ProviderRegistry;
   const controlContext = yield* Effect.context();
+  const modelContext = createModelContextSettings();
   const localURL = `http://127.0.0.1:${server.address.port}`;
   const originalApply = runtime.applyConfig;
   runtime.applyConfig = value => originalApply(value).pipe(Effect.tap(status => Effect.sync(() => {
@@ -167,6 +169,9 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
     async modelCatalog() {
       const snapshots = await run(providers.refreshInstance('pi'));
       return { catalogs: JSON.stringify(Object.fromEntries(snapshots.map(p => [p.instanceId, p.models]))) };
+    },
+    async modelContext(value) {
+      return value === undefined ? modelContext.snapshot() : modelContext.set(value);
     },
     async modelPreferences(value) {
       setModelPreferences(value);

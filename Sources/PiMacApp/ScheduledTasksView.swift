@@ -67,36 +67,52 @@ struct ScheduledTasksView: View {
           }
         }
       }
-      Text(ScheduledTaskPresentation.summary(store.tasks))
-        .font(.caption).foregroundStyle(.secondary)
-      HStack {
-        TextField("搜索标题、提示词、项目或模型", text: $searchText)
-          .textFieldStyle(.roundedBorder)
-        Picker("筛选", selection: $filter) {
-          ForEach(ScheduledTaskFilter.allCases) { Text($0.title).tag($0) }
-        }
-        .frame(width: 125)
-        Picker("排序", selection: $sort) {
-          ForEach(ScheduledTaskSort.allCases) { Text($0.title).tag($0) }
-        }
-        .frame(width: 130)
-        Text("\(visibleTasks.count) / \(store.tasks.count)").font(.caption).foregroundStyle(
-          .secondary)
-      }
-      if let refreshed = store.lastRefreshedAt {
-        Text("最近刷新：\(refreshed.formatted(date: .omitted, time: .standard))")
+      // 无任务时不展示无意义的计数与筛选；筛选无结果时仍保留工具栏，便于恢复。
+      if !store.tasks.isEmpty {
+        Text(ScheduledTaskPresentation.summary(store.tasks))
           .font(.caption).foregroundStyle(.secondary)
+        HStack {
+          TextField("搜索标题、提示词、项目或模型", text: $searchText)
+            .textFieldStyle(.roundedBorder)
+          Picker("筛选", selection: $filter) {
+            ForEach(ScheduledTaskFilter.allCases) { Text($0.title).tag($0) }
+          }
+          .frame(width: 125)
+          Picker("排序", selection: $sort) {
+            ForEach(ScheduledTaskSort.allCases) { Text($0.title).tag($0) }
+          }
+          .frame(width: 130)
+          Text("\(visibleTasks.count) / \(store.tasks.count)").font(.caption).foregroundStyle(
+            .secondary)
+        }
       }
+      Divider()
       if store.hasLoaded && store.tasks.isEmpty {
         ContentUnavailableView(
-          "暂无定时任务", systemImage: "calendar", description: Text("点击“新建”设置周期和提示词。"))
+          "暂无定时任务", systemImage: "calendar", description: Text("点击“新建”设置周期和提示词。")
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else if store.hasLoaded && visibleTasks.isEmpty {
-        ContentUnavailableView(
-          "无匹配任务", systemImage: "magnifyingglass", description: Text("尝试其他关键词或筛选条件。"))
-        Button("清除筛选") {
-          searchText = ""
-          filter = .all
+        VStack(spacing: 12) {
+          ContentUnavailableView(
+            "无匹配任务", systemImage: "magnifyingglass", description: Text("尝试其他关键词或筛选条件。"))
+          Button("清除筛选") {
+            searchText = ""
+            filter = .all
+          }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if !store.hasLoaded {
+        Group {
+          if store.errorMessage != nil || !server.isConnected {
+            ContentUnavailableView(
+              "暂无法加载定时任务", systemImage: "exclamationmark.triangle",
+              description: Text("请检查 Server 连接后刷新。"))
+          } else {
+            ProgressView("正在加载定时任务…")
+          }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         ScrollView {
           LazyVStack(alignment: .leading, spacing: 12) {
@@ -104,9 +120,13 @@ struct ScheduledTasksView: View {
           }
         }
       }
+      if let refreshed = store.lastRefreshedAt {
+        Text("最近刷新：\(refreshed.formatted(date: .omitted, time: .standard))")
+          .font(.caption).foregroundStyle(.secondary)
+      }
     }
     .padding(22)
-    .frame(width: 780, height: 600)
+    .frame(width: 780, height: 600, alignment: .topLeading)
     .interactiveDismissDisabled(store.isMutating)
     .task {
       while !Task.isCancelled {

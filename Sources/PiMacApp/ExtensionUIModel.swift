@@ -254,7 +254,10 @@ final class ExtensionUIModel: ObservableObject {
     // An explicitly malformed timestamp must not bypass out-of-order protection.
     guard payload["updatedAt"] == nil || updatedAt != nil else { return }
     let sourceID = ObjectIdentifier(source)
-    let isFirstStatusAfterSessionChange = awaitingSessionStatus.remove(sourceID) != nil
+    let isHostQuery = payload["source"] as? String == "host-query"
+    // 主机只读查询只提供共享额度，不代表会话授权；也不能消耗等待中的会话首报。
+    let isFirstStatusAfterSessionChange =
+      !isHostQuery && awaitingSessionStatus.remove(sourceID) != nil
     let active = payload["activeAccount"] as? String
     let defaultAccount = payload["defaultAccount"] as? String
     var seenNames: Set<String> = []
@@ -313,7 +316,7 @@ final class ExtensionUIModel: ObservableObject {
       updatedAt.map { incoming in
         previousSelection?.updatedAt.map { incoming >= $0 } ?? true
       } ?? true
-    if selectionIsCurrent {
+    if !isHostQuery && selectionIsCurrent {
       sessionAccountSelections[sourceID] = SessionAccountSelection(
         activeAccount: active,
         provider: provider,
@@ -332,7 +335,7 @@ final class ExtensionUIModel: ObservableObject {
     // selected account; it must not replace an existing application-wide quota snapshot.
     // Subsequent payloads from the process are periodic or user-requested refreshes.
     let mayUpdateUsage =
-      payload["source"] as? String == "host-query"
+      isHostQuery
       || usageSnapshot.accounts.isEmpty && usageSnapshot.gemini == nil
       || (!isInitialStatusFromSource && !isFirstStatusAfterSessionChange)
     let usageIsCurrent =

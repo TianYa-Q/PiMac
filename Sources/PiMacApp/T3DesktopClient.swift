@@ -10,6 +10,8 @@ final class T3DesktopClient: ObservableObject {
   @Published private(set) var status = "正在启动本机 T3 Server…"
   private(set) var shell: JSON = [:]
   private(set) var providers: [JSON] = []
+  private(set) var modelContextSettings = ModelContextSettings.empty
+  var modelContextWindows: [String: Int] { modelContextSettings.overrides }
   var onShell: ((JSON) -> Void)?
   var onTaskStatus: ((TaskStatusTracker.Event) -> Void)?
   private var taskStatusTracker = TaskStatusTracker()
@@ -17,7 +19,8 @@ final class T3DesktopClient: ObservableObject {
   private var token = ""
   private var connectedServerURL: URL?
   private var loop: Task<Void, Never>?
-  private var refreshTask: Task<Void, Never>?
+  private var refreshTask: Task<Void, Error>?
+  private var refreshRequested = false
   private var generation = UUID()
   private var watches: [UUID: (String, (JSON) -> Void, (JSON) -> Void)] = [:]
   private var imageCache: [String: PromptAttachment] = [:]
@@ -25,6 +28,7 @@ final class T3DesktopClient: ObservableObject {
   private var replyImageCache: [String: [PromptAttachment]] = [:]
   private var toolDetailCache: [String: JSON] = [:]
   private var imageFailures: [String: Int] = [:]
+  private var htmlDocumentCache: [String: String] = [:]
   private let searchIndex = ServerSessionSearchIndex()
   private var hasDeliveredShell = false
   private let sessionCatalog = SessionCatalogCache()
@@ -72,6 +76,7 @@ final class T3DesktopClient: ObservableObject {
             self.token = ""
             self.syncedModelPreferences = nil
             self.providers = []
+            self.modelContextSettings = .empty
             self.threadRevisions.removeAll()
             self.searchIndex.reset()
             self.isConnected = false
@@ -110,9 +115,11 @@ final class T3DesktopClient: ObservableObject {
     loop = nil
     refreshTask?.cancel()
     refreshTask = nil
+    refreshRequested = false
     token = ""
     connectedServerURL = nil
     providers = []
+    modelContextSettings = .empty
     syncedModelPreferences = nil
     isConnected = false
     watches.removeAll()
@@ -120,6 +127,7 @@ final class T3DesktopClient: ObservableObject {
     imageCache.removeAll()
     replyImageCache.removeAll()
     toolDetailCache.removeAll()
+    htmlDocumentCache.removeAll()
     imageFailures.removeAll()
     hasDeliveredShell = false
     taskStatusTracker = TaskStatusTracker()
@@ -215,8 +223,11 @@ final class T3DesktopClient: ObservableObject {
     return attachments
   }
 
-  func interrupt(threadID: String) async throws {
-    try await dispatch(["type": "thread.stop", "threadId": threadID])
+  func interrupt(threadID: String, runID: String) async throws {
+    // thread.stop 是 Server 内部命令；公开接口用 run.interrupt，holdQueue 同时阻止排队消息继续执行。
+    try await dispatch([
+      "type": "run.interrupt", "threadId": threadID, "runId": runID, "holdQueue": true,
+    ])
   }
 
   static func mutationMethod(for type: String?) -> String {
@@ -237,11 +248,31 @@ final class T3DesktopClient: ObservableObject {
     return id
   }
 
-  private var refreshing = false
   func refresh() async throws {
-    guard !refreshing else { return }
-    refreshing = true
-    defer { refreshing = false }
+    // 刷新途中可能刚提交 Settle；当前快照不一定包含该写入，必须保留一次后续读取。
+    // 并发请求合并到同一任务，调用方等待完整刷新，而不是将“正在刷新”当作成功。
+    refreshRequested = true
+    if let refreshTask {
+      try await refreshTask.value
+      return
+    }
+    let current = generation
+    let task = Task {
+      while self.generation == current, self.refreshRequested {
+        try Task.checkCancellation()
+        self.refreshRequested = false
+        try await self.refreshSnapshot()
+      }
+    }
+    refreshTask = task
+    defer {
+      // 旧连接结束时不能清除新连接已经创建的刷新任务。
+      if generation == current { refreshTask = nil }
+    }
+    try await task.value
+  }
+
+  private func refreshSnapshot() async throws {
     let current = generation
     let next = try await request("/api/orchestration/shell")
     applyShell(T3V2Presentation.shell(next))
@@ -379,9 +410,11 @@ final class T3DesktopClient: ObservableObject {
   }
 
   func requestRefresh() {
-    guard refreshTask == nil else { return }
-    refreshTask = Task { [weak self] in
-      defer { self?.refreshTask = nil }
+    if refreshTask != nil {
+      refreshRequested = true
+      return
+    }
+    Task { [weak self] in
       try? await self?.refresh()
     }
   }
@@ -403,6 +436,7 @@ final class T3DesktopClient: ObservableObject {
   func loadConfig() async throws {
     let result = try await rpc("server.getConfig")
     let catalogs = try await service?.modelCatalog() ?? [:]
+    modelContextSettings = try await service?.modelContextSettings() ?? .empty
     providers = (result["providers"] as? [JSON] ?? []).map { provider in
       var nativeProvider = provider
       if let id = provider["instanceId"] as? String, let models = catalogs[id] {
@@ -411,6 +445,11 @@ final class T3DesktopClient: ObservableObject {
       return nativeProvider
     }
   }
+  func setModelContextWindow(_ tokens: Int?, modelID: String) async throws {
+    guard let service else { throw ClientError.unavailable }
+    modelContextSettings = try await service.setModelContextWindow(tokens, modelID: modelID)
+  }
+
   func usageSummary(period: UsagePeriod) async throws -> UsageSnapshot {
     try await waitUntilReady()
     let summary = try await rpc(
@@ -552,15 +591,20 @@ final class T3DesktopClient: ObservableObject {
       }
       reads += 1
       var images: [PromptAttachment] = []
+      // 即使详情请求失败，也保留快照里的有效引用，让最终失败能显示而非无限留白。
+      item["htmlRender"] = T3HTMLRender.read(
+        toolName: item["toolName"] as? String ?? "", output: item["output"])
       do {
         let response = try await rpc(
           "orchestration.getTurnItem",
           payload: [
             "threadId": ownerThreadID, "itemId": id, "revision": revision,
           ])
-        guard let detail = response["item"] as? JSON else {
-          toolDetailCache[key] = item
-          continue
+        guard let detail = response["item"] as? JSON else { throw ClientError.rejected }
+        if let page = T3HTMLRender.read(
+          toolName: item["toolName"] as? String ?? "", output: detail["output"]) {
+          item["htmlRender"] = page
+          item["htmlDocument"] = try await htmlRenderDocument(page)
         }
         for (imageIndex, mime) in T3ToolOutputImages.mimeTypes(detail["output"]).enumerated() {
           let imageKey = "\(key)|\(imageIndex)"
@@ -597,6 +641,9 @@ final class T3DesktopClient: ObservableObject {
           complete = false
           rows[index]["item"] = item
           continue
+        }
+        if item["htmlRender"] is T3HTMLRender, item["htmlDocument"] == nil {
+          item["htmlRenderError"] = "HTML 页面加载失败"
         }
       }
       guard generation == current else { return (native, false) }
@@ -674,6 +721,55 @@ final class T3DesktopClient: ObservableObject {
     thread["messages"] = messages
     detail["thread"] = thread
     return (detail, complete)
+  }
+
+  /// 只使用官方签名附件接口下载页面，避免把服务凭据或本地文件访问权限交给网页。
+  func htmlRenderDocument(_ reference: T3HTMLRender) async throws -> String {
+    guard let base = service?.serverURL else { throw ClientError.rejected }
+    let current = generation
+    let key = "\(base.absoluteString)|\(reference.attachmentID)"
+    if let cached = htmlDocumentCache[key] { return cached }
+    let signed = try await rpc("assets.createUrl", payload: [
+      "resource": ["_tag": "attachment", "attachmentId": reference.attachmentID,
+        "mimeType": "text/html", "disposition": "inline"]
+    ])
+    guard let relative = signed["relativeUrl"] as? String, relative.hasPrefix("/api/assets/"),
+      let url = URL(string: base.absoluteString + relative), url.host == base.host,
+      url.port == base.port, url.scheme == base.scheme else { throw ClientError.rejected }
+    let (bytes, response) = try await session.bytes(from: url)
+    let limit = 8 * 1024 * 1024
+    guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+      response.mimeType == "text/html", response.expectedContentLength <= limit
+    else { throw ClientError.rejected }
+    var data = Data()
+    for try await byte in bytes {
+      guard data.count < limit else { throw ClientError.rejected }
+      data.append(byte)
+    }
+    guard generation == current, !Task.isCancelled else { throw CancellationError() }
+    guard let html = String(data: data, encoding: .utf8), !html.isEmpty
+    else { throw ClientError.rejected }
+    // 附件不可变；缓存独立于虚拟列表视图的挂载周期，并限制总内存占用。
+    if htmlDocumentCache.values.reduce(0, { $0 + $1.utf8.count }) + data.count > 16 * 1024 * 1024 {
+      htmlDocumentCache.removeAll()
+    }
+    htmlDocumentCache[key] = html
+    var recovered = false
+    for itemKey in Array(toolDetailCache.keys) {
+      guard var item = toolDetailCache[itemKey],
+        (item["htmlRender"] as? T3HTMLRender)?.attachmentID == reference.attachmentID,
+        item["htmlRenderError"] != nil else { continue }
+      item["htmlDocument"] = html
+      item.removeValue(forKey: "htmlRenderError")
+      toolDetailCache[itemKey] = item
+      imageFailures.removeValue(forKey: itemKey)
+      recovered = true
+    }
+    if recovered {
+      threadRevisions.removeAll()
+      requestRefresh()
+    }
+    return html
   }
 
   func replyDocumentURL(path: String, threadID: String) async throws -> URL {

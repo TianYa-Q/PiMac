@@ -14,6 +14,17 @@ enum T3V2Presentation {
     return status
   }
 
+  /// 只认服务端的 subagent 关系；fork 同样有父线程，但不是委派的子代理。
+  static func subagentParentID(_ thread: JSON) -> String? {
+    guard let lineage = thread["lineage"] as? JSON,
+      lineage["relationshipToParent"] as? String == "subagent",
+      let parentID = lineage["parentThreadId"] as? String,
+      !parentID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      parentID != thread["id"] as? String
+    else { return nil }
+    return parentID
+  }
+
   static func hasUnreadCompletion(_ thread: JSON) -> Bool {
     guard thread["status"] as? String == "completed" else { return false }
     let completed = T3DesktopClient.date(thread["latestRunCompletedAt"])
@@ -49,8 +60,10 @@ enum T3V2Presentation {
       let appThread = projection["thread"] as? JSON
     else { return native }
     let runs = projection["runs"] as? [JSON] ?? []
+    // 排队消息尚未执行，不能覆盖刚停止的任务，否则取消结果会被映射成 idle。
     let currentRun =
-      runs.last(where: { active.contains($0["status"] as? String ?? "") }) ?? runs.last
+      runs.last(where: { active.contains($0["status"] as? String ?? "") })
+      ?? runs.last(where: { $0["status"] as? String != "queued" })
     var result = thread(appThread, run: currentRun)
     let rows = projection["visibleTurnItems"] as? [JSON] ?? []
     let items = rows.compactMap { $0["item"] as? JSON }
@@ -62,7 +75,7 @@ enum T3V2Presentation {
       switch type {
       case "user_message", "assistant_message", "reasoning":
         messages.append([
-          "id": item["id"] ?? "",
+          "id": item["id"] ?? "", "messageId": item["messageId"] ?? item["id"] ?? "",
           "role": type == "user_message" ? "user" : type == "reasoning" ? "reasoning" : "assistant",
           "text": item["text"] ?? "", "streaming": item["streaming"] ?? false,
           "attachments": item["attachments"] ?? [], "createdAt": date,
@@ -87,6 +100,16 @@ enum T3V2Presentation {
           item["toolName"] as? String ?? item["title"] as? String
           ?? (type == "file_change" ? "edit" : type == "command_execution" ? "bash" : type)
         var data: JSON = ["toolName": name, "input": item["input"] ?? [:]]
+        if status == "completed", let page = item["htmlRender"] as? T3HTMLRender
+          ?? T3HTMLRender.read(toolName: name, output: item["output"]) {
+          // 页面独立于折叠的工作过程显示；历史快照与实时结果走同一条映射路径。
+          messages.append([
+            "id": "\(item["id"] as? String ?? "")-html", "role": "assistant",
+            "text": "", "streaming": false, "htmlRender": page, "createdAt": date,
+            "htmlDocument": item["htmlDocument"] ?? NSNull(),
+            "htmlRenderError": item["htmlRenderError"] ?? NSNull(),
+          ])
+        }
         if let images = item["localImages"] as? [PromptAttachment], !images.isEmpty {
           // Keep generated images visible even when the work/tool group is collapsed.
           messages.append([

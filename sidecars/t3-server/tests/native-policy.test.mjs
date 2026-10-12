@@ -2,6 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { httpAllowed, rpcAllowed } from '../native.mjs';
 
+test('Pi MCP discovery and calls pass host policy without opening other routes or methods', () => {
+  assert.equal(httpAllowed('POST', '/mcp'), true);
+  assert.equal(httpAllowed('POST', '/mcp?session=opaque'), true);
+  for (const method of ['GET', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']) {
+    assert.equal(httpAllowed(method, '/mcp'), false, method);
+  }
+  for (const route of ['/mcp/', '/mcp/tools', '/api/mcp', '/mcp-other']) {
+    assert.equal(httpAllowed('POST', route), false, route);
+  }
+});
+
 test('mobile dispatch and projection refresh are allowed narrowly', () => {
   assert.equal(rpcAllowed('orchestration.dispatchCommand'), true);
   assert.equal(rpcAllowed('orchestration.getThreadProjection'), true);

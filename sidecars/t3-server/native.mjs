@@ -46,7 +46,10 @@ const methods = new Set(['server.probe', 'server.getConfig', 'server.getSettings
 export const rpcAllowed = method => methods.has(method);
 export const httpAllowed = (method, url) => {
   const pathname = url.split('?')[0];
-  return (method === 'GET' && (pathname === '/ws' || pathname === '/.well-known/t3/environment' || pathname.startsWith('/api/auth/') ||
+  // Pi 启动时通过此路由发现并注册 T3 工具；不能被宿主白名单提前拦成 404。
+  // 仅放行 MCP POST，凭据有效性及线程权限仍由上游 McpHttpServer 校验。
+  return (method === 'POST' && pathname === '/mcp') ||
+    (method === 'GET' && (pathname === '/ws' || pathname === '/.well-known/t3/environment' || pathname.startsWith('/api/auth/') ||
     pathname.startsWith('/api/assets/') || pathname === '/api/orchestration/shell' ||
     // Mobile bounded snapshots and earlier-history pages retain upstream DPoP/read checks.
     /^\/api\/orchestration\/threads\/[^/]+(?:\/(?:bounded|history))?$/.test(pathname) || pathname === '/api/connect/link-state')) ||

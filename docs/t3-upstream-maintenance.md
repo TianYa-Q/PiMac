@@ -23,7 +23,8 @@
 
 ## Official implementations, not local enhancements
 
-PiDriver, PiRpc, PiAdapterV2 and wire contracts are now unpatched. Removed the
+At the upgrade baseline, PiDriver, PiRpc, PiAdapterV2 and wire contracts were
+unpatched; subsequent bounded presentation exceptions are listed below. Removed the
 local file-change detail/diff helper, tool-parent inference, output-usage helper,
 assistant-duration wire field, and their helper-only tests. Native tool events,
 file changes, token usage, steering, cancellation and settlement use official
@@ -50,6 +51,12 @@ remain official.
   authorization, private readiness and credential-safe subprocess environment.
 - Managed tunnel health/publication diagnostics, not a second tunnel runtime.
 - Desktop model visibility/preferences and config-change notifications.
+- PiAdapterV2: six telemetry-only patches and two raster-image output projection
+  patches; the optional `piMetrics` contract field has one patch. No Pi lifecycle,
+  retry, steering, compaction or transport controls are replaced.
+- PiProvider: two discovery-only patches capture raw context-window metadata for
+  desktop model settings before the official wire projection drops it. Unknown
+  defaults stay unknown; overridden effective windows are not labeled defaults.
 - Review roots bounded to official active projects/worktrees because the host's
   configured cwd is its private state directory.
 - First mobile message title compatibility for desktop drafts without titleSeed;
@@ -81,8 +88,9 @@ swift test
 ```
 
 `upstream-maintenance.test.mjs` checks all manifest hashes and all patch anchors,
-including modules not reached by the current bundle, and guards against adding
-Pi adapter/transport/driver or contract patches again. Protocol fixtures exercise
+including modules not reached by the current bundle, and explicitly validates
+the bounded telemetry/image/discovery exceptions while keeping Pi transport,
+driver and lifecycle changes forbidden. Protocol fixtures exercise
 native runs, persistence/restart, scheduler, attachments, model selection, Git,
 DPoP, host-policy denial and read-only scopes. They do not establish real-model,
 public tunnel or App Store acceptance.

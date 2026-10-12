@@ -591,7 +591,7 @@ extension AppModel {
   nonisolated static func toolInputText(toolName: String, args: Any?) -> String? {
     // Pi exposes codemode as raw JavaScript to providers, while normal RPC tool
     // events/history use { code }. Accept both forms without re-encoding the script.
-    if toolName == "codemode", let code = args as? String { return code }
+    if let input = args as? String { return input }
     guard let args = args as? PiRPCClient.JSON else { return nil }
     switch toolName {
     case "codemode":
@@ -622,7 +622,8 @@ extension AppModel {
     case "generate_image":
       return args["prompt"] as? String
     default:
-      return args["path"] as? String
+      // MCP 和自定义工具没有固定参数结构，保留整个对象，不能只取 path 丢失调用信息。
+      return prettyJSON(args)
     }
   }
 

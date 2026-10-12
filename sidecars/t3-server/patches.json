@@ -1,4 +1,14 @@
 {
+  "apps/server/src/provider/PiProvider.ts": [
+    {
+      "oldText": "import { causeErrorTag } from \"@t3tools/shared/observability\";",
+      "newText": "import { createModelContextSettings } from \"pimac:model-context.mjs\";\nimport { causeErrorTag } from \"@t3tools/shared/observability\";"
+    },
+    {
+      "oldText": "    const discoveredModels = parseDiscoveredModels(\n      modelsData,",
+      "newText": "    // Capture the authoritative Pi context metadata before the wire model projection drops it.\n    createModelContextSettings().recordModels(modelsData);\n    const discoveredModels = parseDiscoveredModels(\n      modelsData,"
+    }
+  ],
   "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts": [
   {
     "oldText": "import { mcpToolPresentation } from \"../../provider/McpToolPresentation.ts\";",

@@ -25,6 +25,12 @@ LAN shares upstream authentication and the same environment identity; it never
 publishes administration routes or introduces another orchestration engine. The supervisor has no workspace/Pi command API.
 Provider subprocesses must not inherit supervisor secrets.
 
+Pi's upstream-owned extension discovers T3 tools through `POST /mcp`, including
+`schedule_task` for chat-created timers. Host HTTP policy must allow that exact
+route; upstream still validates the thread-bound MCP bearer credential. Missing,
+invalid, and supervisor credentials are rejected. Existing Pi processes that
+failed discovery need a safe runtime reload/session reopen after publication.
+
 ## Reproducible build
 
 Commit host sources, patches, tests, dependency locks, and `upstream-pin.json`.

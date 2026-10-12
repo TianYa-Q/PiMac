@@ -281,6 +281,16 @@ final class T3BridgeService: ObservableObject {
     return try JSONSerialization.jsonObject(with: data) as? [String: [[String: Any]]] ?? [:]
   }
 
+  func modelContextSettings() async throws -> ModelContextSettings {
+    try await admin("model-context")
+  }
+
+  func setModelContextWindow(_ tokens: Int?, modelID: String) async throws -> ModelContextSettings {
+    try await admin(
+      "model-context", method: "POST",
+      body: ["modelId": modelID, "tokens": tokens as Any? ?? NSNull()])
+  }
+
   func syncModelPreferences(hiddenModels: [String], defaultModel: String?) async throws {
     struct Response: Decodable { let ok: Bool }
     let _: Response = try await admin(

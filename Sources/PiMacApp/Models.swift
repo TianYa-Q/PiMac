@@ -49,6 +49,9 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
   var nestedCallsComplete = true
   var diff: String? = nil
   var attachments: [PromptAttachment] = []
+  var htmlRender: T3HTMLRender? = nil
+  var htmlDocument: String? = nil
+  var htmlRenderError: String? = nil
   var modelProvider: String? = nil
   var modelID: String? = nil
   var timestamp: Date? = .now
@@ -139,6 +142,7 @@ struct PiModel: Identifiable, Hashable {
   let reasoning: Bool
   let api: String?
   let thinkingLevels: [String]
+  let defaultContextWindow: Int?
 
   var id: String { "\(provider)/\(modelId)" }
 
@@ -148,13 +152,15 @@ struct PiModel: Identifiable, Hashable {
     name: String,
     reasoning: Bool = false,
     api: String? = nil,
-    thinkingLevels: [String]? = nil
+    thinkingLevels: [String]? = nil,
+    defaultContextWindow: Int? = nil
   ) {
     self.provider = provider
     self.modelId = modelId
     self.name = name
     self.reasoning = reasoning
     self.api = api
+    self.defaultContextWindow = defaultContextWindow
     self.thinkingLevels =
       thinkingLevels ?? (reasoning ? Array(Self.thinkingLevelOrder.prefix(5)) : ["off"])
   }
