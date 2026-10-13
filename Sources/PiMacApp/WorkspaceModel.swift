@@ -51,7 +51,8 @@ final class WorkspaceModel: ObservableObject {
       let project = server.projects.first(where: { $0["id"] as? String == projectID }),
       let root = project["workspaceRoot"] as? String
     else { return nil }
-    return WorkspaceProject(url: URL(fileURLWithPath: root), customName: project["title"] as? String)
+    return WorkspaceProject(
+      url: URL(fileURLWithPath: root), customName: project["title"] as? String)
   }
 
   func switchNewChatProject(to project: WorkspaceProject) {
@@ -272,9 +273,10 @@ final class WorkspaceModel: ObservableObject {
       return
     }
     let savedPath = persistsState ? UserDefaults.standard.string(forKey: "t3SelectedProject") : nil
-    guard let project = selectedProject
-      ?? projects.first(where: { $0.id == savedPath })
-      ?? projects.first
+    guard
+      let project = selectedProject
+        ?? projects.first(where: { $0.id == savedPath })
+        ?? projects.first
     else { return }
     newSession(in: project.url)
   }
@@ -288,8 +290,8 @@ final class WorkspaceModel: ObservableObject {
     if let tab = tabs.last(where: {
       $0.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL
     }), tab.isDraft,
-      (tab.model.currentSessionPath.isEmpty || tab.model.currentSessionPath == reusablePath
-        || tab.model.threadID.map({ server.thread($0) == nil }) == true),
+      tab.model.currentSessionPath.isEmpty || tab.model.currentSessionPath == reusablePath
+        || tab.model.threadID.map({ server.thread($0) == nil }) == true,
       !tab.model.hasUserMessage, !tab.model.hasUnsubmittedInput, !tab.model.isBusy,
       tab.model.queuedPrompts.isEmpty
     {
@@ -336,8 +338,10 @@ final class WorkspaceModel: ObservableObject {
   /// Only the leading chat is reusable; an older empty chat must not replace a
   /// new task after the latest chat has already been used.
   static func latestEmptySessionPath(threads: [[String: Any]], projectID: String) -> String? {
-    guard let latest = sessionCatalog(
-      threads: threads.filter { !isSettled($0) }, projectID: projectID).first,
+    guard
+      let latest = sessionCatalog(
+        threads: threads.filter { !isSettled($0) }, projectID: projectID
+      ).first,
       let id = AppModel.threadID(from: latest.path),
       let thread = threads.first(where: { $0["id"] as? String == id }),
       thread["title"] as? String == "新任务",
@@ -363,6 +367,10 @@ final class WorkspaceModel: ObservableObject {
         -> (id: String, anchorAt: Date, orderKey: String?, item: SessionItem)? in
       guard let id = thread["id"] as? String else { return nil }
       let createdAt = T3DesktopClient.date(thread["createdAt"])
+      let messageValue = thread["latestMessageAt"]
+      let messageAt =
+        messageValue == nil || messageValue is NSNull
+        ? createdAt : T3DesktopClient.date(messageValue)
       // Upstream sinks malformed timestamps to epoch, not distantPast.
       let epoch = Date(timeIntervalSince1970: 0)
       let reopenedAt = T3DesktopClient.date(thread["unsettledAt"])
@@ -373,7 +381,8 @@ final class WorkspaceModel: ObservableObject {
         id, anchorAt, thread["activeOrderKey"] as? String,
         SessionItem(
           path: "t3:\(id)", title: thread["title"] as? String ?? "未命名线程",
-          modifiedAt: T3DesktopClient.date(thread["updatedAt"]))
+          // 不使用 updatedAt：收起、改标题等元数据操作也会更新它。
+          modifiedAt: messageAt)
       )
     }.sorted {
       switch ($0.orderKey, $1.orderKey) {
@@ -433,7 +442,8 @@ final class WorkspaceModel: ObservableObject {
       // 固定本次范围，逐个重查；某个会话失败不阻断其余会话，Server 仍作最终原子校验。
       for path in paths {
         guard let id = AppModel.threadID(from: path), let thread = server.thread(id),
-          canSettleIdleSession(thread) else { continue }
+          canSettleIdleSession(thread)
+        else { continue }
         do {
           try await server.dispatch(["type": "thread.settle", "threadId": id])
           completed += 1
@@ -441,7 +451,8 @@ final class WorkspaceModel: ObservableObject {
       }
       do {
         try await server.refresh()
-        selectedModel?.statusText = "已 Settle \(completed) 个会话"
+        selectedModel?.statusText =
+          "已 Settle \(completed) 个会话"
           + (unconfirmed > 0 ? "；\(unconfirmed) 个未确认，可能已开始运行或等待处理。" : "。")
       } catch {
         selectedModel?.statusText = "批量 Settle 已提交，但列表刷新失败；请检查 Server 状态，勿重复提交。"
@@ -450,12 +461,13 @@ final class WorkspaceModel: ObservableObject {
   }
 
   enum SessionLifecycleAction {
-    case settle, unsettle, autoSettle(enabled: Bool)
+    case settle, unsettle
+    case autoSettle(enabled: Bool)
 
     var payload: [String: Any] {
       switch self {
       case .settle: return ["type": "thread.settle"]
-      case .unsettle: return ["type": "thread.unsettle"]
+      case .unsettle: return ["type": "thread.unsettle", "reason": "user"]
       case .autoSettle(let enabled):
         return ["type": "thread.auto-settle.set", "enabled": enabled]
       }

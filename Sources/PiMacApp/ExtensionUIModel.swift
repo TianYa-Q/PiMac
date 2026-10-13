@@ -258,7 +258,19 @@ final class ExtensionUIModel: ObservableObject {
     // 主机只读查询只提供共享额度，不代表会话授权；也不能消耗等待中的会话首报。
     let isFirstStatusAfterSessionChange =
       !isHostQuery && awaitingSessionStatus.remove(sourceID) != nil
-    let active = payload["activeAccount"] as? String
+    // 只读额度携带的线程绑定使用自己的时间戳，不能被额度缓存时间挡住。
+    let selectionPayload =
+      isHostQuery
+      ? payload["sessionSelection"] as? PiRPCClient.JSON : payload
+    let selectionUpdatedAt = selectionPayload.flatMap {
+      AccountUsageSnapshot.date($0["updatedAt"], milliseconds: true)
+    }
+    let hasSelection =
+      selectionPayload != nil
+      && (!isHostQuery
+        || (selectionPayload?["provider"] as? String == providerID
+          && selectionUpdatedAt != nil))
+    let active = selectionPayload?["activeAccount"] as? String
     let defaultAccount = payload["defaultAccount"] as? String
     var seenNames: Set<String> = []
     let accounts = rawAccounts.compactMap { raw -> CodexAccountStatus? in
@@ -313,19 +325,20 @@ final class ExtensionUIModel: ObservableObject {
     let isInitialStatusFromSource =
       previousSelection == nil || previousSelection?.provider != provider
     let selectionIsCurrent =
-      updatedAt.map { incoming in
+      selectionUpdatedAt.map { incoming in
         previousSelection?.updatedAt.map { incoming >= $0 } ?? true
       } ?? true
-    if !isHostQuery && selectionIsCurrent {
+    if hasSelection && selectionIsCurrent {
       sessionAccountSelections[sourceID] = SessionAccountSelection(
         activeAccount: active,
         provider: provider,
         supportsAccountSwitch: version == 2
-          ? payload["supportsAccountSwitch"] as? Bool ?? false : true,
+          ? selectionPayload?["supportsAccountSwitch"] as? Bool ?? false : true,
         managesSelectedAuth: version == 2
-          ? payload["managesSelectedAuth"] as? Bool ?? false : active != nil,
-        geminiIsActive: gemini?.isActive ?? false,
-        updatedAt: updatedAt ?? previousSelection?.updatedAt
+          ? selectionPayload?["managesSelectedAuth"] as? Bool ?? false : active != nil,
+        geminiIsActive: isHostQuery
+          ? selectionPayload?["geminiIsActive"] as? Bool ?? false : gemini?.isActive ?? false,
+        updatedAt: selectionUpdatedAt ?? previousSelection?.updatedAt
       )
     }
 
@@ -342,7 +355,7 @@ final class ExtensionUIModel: ObservableObject {
       updatedAt.map { incoming in
         usageSnapshot.updatedAt.map { incoming >= $0 } ?? true
       } ?? true
-    if mayUpdateUsage && usageIsCurrent {
+    if payload["selectionOnly"] as? Bool != true && mayUpdateUsage && usageIsCurrent {
       usageSnapshots[provider] = UsageSnapshot(
         accounts: accounts,
         gemini: gemini,

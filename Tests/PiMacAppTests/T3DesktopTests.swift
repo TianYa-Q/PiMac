@@ -147,7 +147,7 @@ struct T3DesktopTests {
     let initial = WorkspaceModel.sessionCatalog(threads: [older, newer], projectID: "project")
     #expect(initial.map(\.path) == ["t3:newer", "t3:older"])
     var updated = older
-    updated["updatedAt"] = "2026-10-04T00:00:00Z"
+    updated["latestMessageAt"] = "2026-10-04T00:00:00Z"
     updated["title"] = "Updated title"
     let refreshed = WorkspaceModel.sessionCatalog(threads: [newer, updated], projectID: "project")
     #expect(refreshed.map(\.path) == initial.map(\.path))
@@ -396,8 +396,10 @@ struct T3DesktopTests {
     #expect(!model.messages.contains { $0.text == "Reply: must-remain-queued" })
     // 附件读取失败也保留可编辑的原消息，并明确标记未确认，不丢失新草稿。
     model.composerText = "missing-image"
-    model.attachments = [PromptAttachment(
-      url: root.appendingPathComponent("missing.png"), mimeType: "image/png")]
+    model.attachments = [
+      PromptAttachment(
+        url: root.appendingPathComponent("missing.png"), mimeType: "image/png")
+    ]
     model.sendPrompt()
     let failedID = try #require(model.messages.last?.id)
     #expect(model.messages.last?.text == "missing-image")

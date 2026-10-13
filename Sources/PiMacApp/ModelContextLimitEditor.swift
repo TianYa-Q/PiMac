@@ -12,12 +12,10 @@ struct ModelContextLimitButton: View {
       isPresented = true
     } label: {
       HStack(spacing: 4) {
-        VStack(alignment: .trailing, spacing: 1) {
-          Text((currentLimit ?? model.defaultContextWindow).map { $0.formatted() } ?? "未获取大小")
-            .monospacedDigit().lineLimit(1)
-          Text(currentLimit == nil ? "Pi 默认" : "手工设置")
-            .font(.caption2).foregroundStyle(.secondary)
-        }
+        Text((currentLimit ?? model.defaultContextWindow).map { $0.formatted() } ?? "未获取大小")
+          .monospacedDigit().lineLimit(1)
+        Text(currentLimit == nil ? "Pi 默认" : "手工")
+          .font(.caption2).foregroundStyle(.secondary).fixedSize()
         Image(systemName: "pencil").font(.caption2)
       }
     }

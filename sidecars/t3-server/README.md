@@ -28,7 +28,13 @@ Provider subprocesses must not inherit supervisor secrets.
 Pi's upstream-owned extension discovers T3 tools through `POST /mcp`, including
 `schedule_task` for chat-created timers. Host HTTP policy must allow that exact
 route; upstream still validates the thread-bound MCP bearer credential. Missing,
-invalid, and supervisor credentials are rejected. Existing Pi processes that
+invalid, and supervisor credentials are rejected. Host policy restricts
+`orchestrator_capabilities` to the running parent's provider/model (or its current
+selection when idle), never the full catalog. `delegate_task` enforces that same
+identity even for explicit targets: model/default aliases, other providers and
+driver overrides cannot be used as fallback. A failed child must be retried with
+the same model or reported as failed, not downgraded. Model options remain
+configurable; ordinary top-level thread selection is unaffected. Existing Pi processes that
 failed discovery need a safe runtime reload/session reopen after publication.
 
 ## Reproducible build
@@ -88,7 +94,12 @@ as native file paths. Back up real Server state before first upgraded startup.
 The desktop uses official runtime requests for extension dialogs and `/compact`
 for compaction. Arbitrary tool output, full diffs and tool images are omitted
 by upstream wire projection. Terminal-only extension status and old private
-account/Fast/compaction-model overrides are not preserved.
+account/Fast/compaction-model overrides are not preserved. The host observes only
+`account-usage-gui` session-selection metadata before upstream ignores status
+updates. It keeps thread/provider bindings in memory (no tokens or quota payloads)
+and returns them through the private desktop account-status socket. Lightweight
+selection reads are independent of the 60/180-second quota refresh cadence; they
+never infer a binding from global `auth.json` or the future-session default.
 
 See `docs/t3-server-migration.md` for capabilities, limitations and acceptance
 boundaries, and `docs/t3-upstream-maintenance.md` for the upgrade and patch audit. Protocol-fixture tests do not prove real-model or App Store acceptance.

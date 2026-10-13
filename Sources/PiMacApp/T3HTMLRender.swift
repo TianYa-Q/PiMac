@@ -12,11 +12,12 @@ struct T3HTMLRender: Equatable, Sendable {
   let height: Double
   let measurements: [Measurement]
 
+  static func isRenderTool(_ name: String) -> Bool {
+    name == "html_render" || name.hasSuffix("__html_render") || name.hasSuffix(".html_render")
+  }
+
   static func read(toolName: String, output: Any?) -> Self? {
-    guard
-      toolName == "html_render" || toolName.hasSuffix("__html_render")
-        || toolName.hasSuffix(".html_render")
-    else { return nil }
+    guard isRenderTool(toolName) else { return nil }
     var nodes = 128
     var bytes = 16_384
     var failed = false

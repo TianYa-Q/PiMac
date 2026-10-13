@@ -1,4 +1,30 @@
 {
+  "apps/server/src/orchestration-v2/ProjectionStore.ts": [
+  {
+    "oldText": "  readonly latest_user_message_at: string | null;",
+    "newText": "  readonly latest_message_at: string | null;\n  readonly latest_user_message_at: string | null;"
+  },
+  {
+    "oldText": "  readonly latestUserMessageAt: DateTime.Utc | null;",
+    "newText": "  readonly latestMessageAt: DateTime.Utc | null;\n  readonly latestUserMessageAt: DateTime.Utc | null;"
+  },
+  {
+    "oldText": "              ) AS pending_secret_request_payload_json,\n              (",
+    "newText": "              ) AS pending_secret_request_payload_json,\n              -- 消息时间独立于线程生命周期；只投影标量，不把正文放回 shell。\n              (\n                SELECT MAX(message_time) FROM (\n                  SELECT COALESCE(json_extract(item.payload_json, '$.startedAt'), item.updated_at) AS message_time\n                  FROM orchestration_v2_projection_turn_items item\n                  WHERE item.thread_id = t.thread_id\n                    AND item.type IN ('user_message', 'assistant_message', 'reasoning', 'compaction')\n                  UNION ALL\n                  SELECT message.created_at AS message_time\n                  FROM orchestration_v2_projection_messages message\n                  WHERE message.thread_id = t.thread_id\n                )\n              ) AS latest_message_at,\n              ("
+  },
+  {
+    "oldText": "    latestVisibleMessage: null,\n    latestUserMessageAt: latestUserMessage?.updatedAt ?? null,",
+    "newText": "    latestVisibleMessage: null,\n    latestMessageAt: [\n      ...projection.messages.map((message) => message.createdAt),\n      ...projection.turnItems.filter((item) =>\n        ['user_message', 'assistant_message', 'reasoning', 'compaction'].includes(item.type)\n      ).map((item) => item.startedAt ?? item.updatedAt),\n    ].reduce<DateTime.Utc | null>((latest, date) =>\n      latest === null || DateTime.toEpochMillis(date) > DateTime.toEpochMillis(latest)\n        ? date : latest, null),\n    latestUserMessageAt: latestUserMessage?.updatedAt ?? null,"
+  },
+  {
+    "oldText": "    latestVisibleMessage: null,\n    latestUserMessageAt: input.state.latestUserMessageAt,",
+    "newText": "    latestVisibleMessage: null,\n    latestMessageAt: input.state.latestMessageAt,\n    latestUserMessageAt: input.state.latestUserMessageAt,"
+  },
+  {
+    "oldText": "          latestUserMessageAt:\n            row.latest_user_message_at === null",
+    "newText": "          latestMessageAt:\n            row.latest_message_at === null ? null : DateTime.makeUnsafe(row.latest_message_at),\n          latestUserMessageAt:\n            row.latest_user_message_at === null"
+  }
+],
   "apps/server/src/provider/PiProvider.ts": [
     {
       "oldText": "import { causeErrorTag } from \"@t3tools/shared/observability\";",
@@ -20,7 +46,11 @@
   },
   {
     "oldText": "import { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";",
-    "newText": "import { startPiMessage, recordPiDelta, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";"
+    "newText": "import { getNative } from \"pimac:native.mjs\";\nimport { startPiMessage, recordPiDelta, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";"
+  },
+  {
+    "oldText": "          case \"extension_ui_request\":\n            yield* handleExtensionUiRequest(event);",
+    "newText": "          case \"extension_ui_request\":\n            getNative().accountSelections.record(turn?.turnInput.threadId ?? state?.providerThread.appThreadId ?? input.threadId, event);\n            yield* handleExtensionUiRequest(event);"
   },
   {
     "oldText": "            const delta = event[\"assistantMessageEvent\"];",
@@ -44,6 +74,15 @@
   }
 ],
   "packages/contracts/src/orchestrationV2.ts": [
+{
+  "oldText": "  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),",
+  "newText": "  latestMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),\n  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),"
+},
+{
+  "oldText": "  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtcFromString),",
+  "newText": "  latestMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),\n  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtcFromString),"
+},
+
   {
     "oldText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),",
     "newText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),\n  piMetrics: Schema.optional(Schema.Struct({\n    outputDurationMs: NonNegativeInt,\n    speedMethod: Schema.optional(Schema.Literal(\"aa-approx-v1\")),\n    speedTokens: Schema.optional(Schema.Number),\n    speedDurationMs: Schema.optional(NonNegativeInt),\n    totalCostUsd: Schema.optional(Schema.Number),\n  })),"
@@ -57,6 +96,14 @@
     {
       "oldText": "title: command.titleSeed ?? projection.thread.title,",
       "newText": "title: command.titleSeed ??\n            ([\"\", \"新任务\", \"New thread\"].includes(projection.thread.title.trim())\n              ? command.text.trim().replace(/\\s+/g, \" \").slice(0, 60) || projection.thread.title\n              : projection.thread.title),"
+    },
+    {
+      "oldText": "  const dispatchThreadMutation = Effect.fn(\"orchestrationV2.dispatch.threadMutation\")(function* (",
+      "newText": "  const dispatchSingleThreadMutation = Effect.fn(\"orchestrationV2.dispatch.threadMutation\")(function* ("
+    },
+    {
+      "oldText": "  const dispatchProviderSessionDetach = Effect.fn(\"orchestrationV2.dispatch.providerSessionDetach\")(",
+      "newText": "  // 父会话收起时，在同一决策事务中处理完整子树；任一子会话校验失败，\n  // 整组事件和副作用都不会提交，不能让父会话已完成而子会话仍在活跃列表。\n  // 使用 visited 防止损坏的 lineage 循环；归档会话不参与活跃列表生命周期。\n  const dispatchThreadMutation = (\n    ...args: Parameters<typeof dispatchSingleThreadMutation>\n  ) => Effect.gen(function* () {\n    const [command, events, effects] = args;\n    if (command.type !== \"thread.settle\") {\n      return yield* dispatchSingleThreadMutation(command, events, effects);\n    }\n    const shell = yield* projectionStore.getShellSnapshot({ location: \"active\" })\n      .pipe(mapDispatchError(command));\n    const ids = [command.threadId];\n    const visited = new Set(ids);\n    for (let index = 0; index < ids.length; index++) {\n      for (const child of shell.threads) {\n        if (child.lineage.parentThreadId !== ids[index] || visited.has(child.id)) continue;\n        visited.add(child.id);\n        ids.push(child.id);\n      }\n    }\n    for (const threadId of ids) {\n      yield* dispatchSingleThreadMutation({ ...command, threadId }, events, effects);\n    }\n  });\n\n  const dispatchProviderSessionDetach = Effect.fn(\"orchestrationV2.dispatch.providerSessionDetach\")("
     }
   ],
   "apps/server/src/cloud/ManagedEndpointRuntime.ts": [
@@ -299,6 +346,32 @@
       "oldText": "requireCursorSdk(\"@cursor/sdk\") as typeof import(\"@cursor/sdk\")",
       "newText": "new Proxy({}, { get: () => class { constructor() { throw new Error(\"Cursor is disabled in the Pi Mac host\"); } } }) as typeof import(\"@cursor/sdk\")",
       "count": 1
+    }
+  ],
+  "apps/server/src/mcp/OrchestratorMcpService.ts": [
+    {
+      "oldText": "        const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();\n        return {\n          parentThreadId: parent?.thread.id ?? null,",
+      "newText": "        const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();\n        // 活跃轮次可能与下一轮的线程设置不同；子代理锁定实际运行的父模型。\n        const selection = parent?.runs\n          .filter(ThreadManagementService.isActiveRun)\n          .toSorted((left, right) => right.ordinal - left.ordinal)[0]?.modelSelection\n          ?? parent?.thread.modelSelection;\n        return {\n          parentThreadId: parent?.thread.id ?? null,"
+    },
+    {
+      "oldText": "          inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,\n          inheritedModel: parent?.thread.modelSelection.model ?? null,",
+      "newText": "          inheritedProviderInstanceId: selection?.instanceId ?? null,\n          inheritedModel: selection?.model ?? null,"
+    },
+    {
+      "oldText": "          providers: providers.map((provider) => {",
+      "newText": "          providers: providers.filter((provider) => provider.instanceId === selection?.instanceId).map((provider) => {"
+    },
+    {
+      "oldText": "                provider?.models.map((model) => ({",
+      "newText": "                provider?.models.filter((model) => model.slug === selection?.model).map((model) => ({"
+    },
+    {
+      "oldText": "              canRunCrossProviderChildTask: constraints.length === 0,",
+      "newText": "              canRunCrossProviderChildTask: false,"
+    },
+    {
+      "oldText": "        const providers = yield* loadProviders;\n        const target = yield* resolveTargetRechecking({\n          parent,\n          target: input.target,\n          providers,\n        });\n        const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);",
+      "newText": "        const providers = yield* loadProviders;\n        const selection = parentRun.modelSelection;\n        // 列表过滤不是授权边界：显式模型/实例覆盖也必须拒绝，失败后不能降级重试。\n        const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);\n        if (\n          (input.target?.model !== undefined && input.target.model !== selection.model) ||\n          (input.target?.providerInstanceId !== undefined &&\n            input.target.providerInstanceId !== selection.instanceId) ||\n          (input.target?.driverKind !== undefined && input.target.driverKind !== provider?.driver)\n        ) {\n          return yield* failure(\n            \"invalid_request\",\n            \"Child tasks must use the parent's running provider and model; model fallback is not allowed.\",\n          );\n        }\n        const target = yield* resolveTargetRechecking({\n          parent: { ...parent, thread: { ...parent.thread, modelSelection: selection } },\n          target: { ...input.target, providerInstanceId: selection.instanceId, model: selection.model },\n          providers,\n        });\n        const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);"
     }
   ],
   "apps/server/src/auth/RpcAuthorization.ts": [

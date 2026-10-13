@@ -73,6 +73,7 @@ final class AppModel: ObservableObject {
   private var speed = OutputSpeedTracker()
   private var accountStatusTask: Task<Void, Never>?
   private var accountQuotaRefreshPolicy = AccountQuotaRefreshPolicy()
+  private var accountSelectionLastPoll: ContinuousClock.Instant?
   var threadID: String? { Self.threadID(from: currentSessionPath) }
 
   var piPath: String {
@@ -345,21 +346,30 @@ final class AppModel: ObservableObject {
             "sizeBytes": data.count, "dataUrl": "data:\(mime);base64,\(data.base64EncodedString())",
           ]
         }
-        try await server.dispatch([
-          "type": "message.dispatch", "threadId": id,
-          "modelSelection": selection,
-          "messageId": submittedMessageID, "text": prompt.rpcText,
-          "attachments": try await server.persistAttachments(
-            images, threadID: id, messageID: submittedMessageID),
-          "dispatchMode": ["type": "queue_after_active"],
-        ].merging(isQueueing ? [:] : ["deliveryIntent": "steer"]) { _, new in new })
-        guard self.generation == current else { completion(true); return }
+        try await server.dispatch(
+          [
+            "type": "message.dispatch", "threadId": id,
+            "modelSelection": selection,
+            "messageId": submittedMessageID, "text": prompt.rpcText,
+            "attachments": try await server.persistAttachments(
+              images, threadID: id, messageID: submittedMessageID),
+            "dispatchMode": ["type": "queue_after_active"],
+          ].merging(isQueueing ? [:] : ["deliveryIntent": "steer"]) { _, new in new })
+        guard self.generation == current else {
+          completion(true)
+          return
+        }
         completion(true)
-        self.statusText = isSteering ? "已提交插入消息，当前工具调用结束后处理。"
+        self.statusText =
+          isSteering
+          ? "已提交插入消息，当前工具调用结束后处理。"
           : isQueueing ? "已提交到 T3 Server 队列。" : "已提交到 T3 Server"
         // Server owns initial naming, including first messages sent from mobile.
       } catch {
-        guard self.generation == current else { completion(false); return }
+        guard self.generation == current else {
+          completion(false)
+          return
+        }
         self.awaitingAgentStart = false
         // 网络失败可能发生在 Server 接收之后：保留原消息 ID，不自动重发。
         // 后续权威快照若包含该 ID，会自然替换这条未确认消息。
@@ -556,8 +566,11 @@ final class AppModel: ObservableObject {
       return ChatEntry(
         id: (role == "user" ? message["messageId"] as? String : nil)
           ?? message["id"] as? String ?? "",
-        kind: role == "user" ? .user : role == "reasoning" ? .thinking : role == "compaction" ? .compaction : .assistant,
-        title: role == "compaction" ? (message["title"] as? String ?? "上下文已压缩")
+        kind: role == "user"
+          ? .user
+          : role == "reasoning" ? .thinking : role == "compaction" ? .compaction : .assistant,
+        title: role == "compaction"
+          ? (message["title"] as? String ?? "上下文已压缩")
           : role == "user" ? "你" : role == "reasoning" ? "思考过程" : "Pi",
         text: message["text"] as? String ?? "",
         isRunning: message["streaming"] as? Bool ?? false,
@@ -739,14 +752,18 @@ final class AppModel: ObservableObject {
       if !accountQuotaMessage.isEmpty { accountQuotaMessage = "" }
       return
     }
-    guard
-      accountQuotaRefreshPolicy.shouldRefresh(
-        generation: generation, provider: provider, isActive: isBusy, force: force
-      )
-    else { return }
+    let refreshQuota = accountQuotaRefreshPolicy.shouldRefresh(
+      generation: generation, provider: provider, isActive: isBusy, force: force)
+    // 账户轮换不应等待 60/180 秒的额度查询周期；轻量读取不访问额度服务。
+    if !refreshQuota, let lastPoll = accountSelectionLastPoll,
+      ContinuousClock.now - lastPoll < .seconds(2)
+    {
+      return
+    }
+    accountSelectionLastPoll = .now
     let threadID = self.threadID ?? "@discovery"
     let current = generation
-    isRefreshingAccountQuota = true
+    isRefreshingAccountQuota = refreshQuota
     accountStatusTask = Task { [weak self] in
       guard let self else { return }
       defer {
@@ -756,21 +773,22 @@ final class AppModel: ObservableObject {
       do {
         // Host quotas are independent of official per-thread token metrics.
         if let payload = try await server.accountStatus(
-          threadID: threadID, provider: provider.rawValue, force: force),
+          threadID: threadID, provider: provider.rawValue, force: force,
+          selectionOnly: !refreshQuota),
           self.generation == current, self.accountUsageProvider == provider
         {
-          self.accountQuotaMessage = ""
+          if refreshQuota { self.accountQuotaMessage = "" }
           let data = try JSONSerialization.data(withJSONObject: payload)
           self.extensionUI?.handle(
             [
               "method": "setStatus", "id": "server-account-status",
               "statusKey": "account-usage-gui", "statusText": String(decoding: data, as: UTF8.self),
             ], from: self)
-        } else if self.generation == current, self.accountUsageProvider == provider {
+        } else if refreshQuota, self.generation == current, self.accountUsageProvider == provider {
           self.accountQuotaMessage = ""
         }
       } catch {
-        if self.generation == current, self.accountUsageProvider == provider {
+        if refreshQuota, self.generation == current, self.accountUsageProvider == provider {
           self.accountQuotaMessage = "账户额度查询失败；已有数据仅为旧缓存。请检查授权、文件权限及本机 Server。"
         }
       }
@@ -858,7 +876,8 @@ final class AppModel: ObservableObject {
   }
   func editQueuedPrompt(id: String) {
     guard let prompt = queuedPrompts.first(where: { $0.id == id }),
-      let threadID, let server else { return }
+      let threadID, let server
+    else { return }
     guard !hasUnsubmittedInput else {
       statusText = "请先发送或清空输入框，避免覆盖尚未提交的草稿。"
       return
@@ -884,13 +903,17 @@ final class AppModel: ObservableObject {
   func queuedPromptMoveTarget(id: String, direction: Int) -> String? {
     guard direction == -1 || direction == 1,
       let index = queuedPrompts.firstIndex(where: { $0.id == id }),
-      queuedPrompts.indices.contains(index + direction) else { return nil }
+      queuedPrompts.indices.contains(index + direction)
+    else { return nil }
     return queuedPrompts[index + direction].id
   }
   func moveQueuedPrompt(id: String, direction: Int) {
     guard let target = queuedPromptMoveTarget(id: id, direction: direction),
-      let to = queuedPrompts.firstIndex(where: { $0.id == target }) else { return }
-    let before: Any = direction == -1 ? target
+      let to = queuedPrompts.firstIndex(where: { $0.id == target })
+    else { return }
+    let before: Any =
+      direction == -1
+      ? target
       : (queuedPrompts.indices.contains(to + 1) ? queuedPrompts[to + 1].id as Any : NSNull())
     queueCommand(["type": "queued-run.reorder", "runId": id, "beforeRunId": before])
   }
@@ -901,7 +924,9 @@ final class AppModel: ObservableObject {
     }
     let signed = try await server.replyDocumentURL(path: path, threadID: id)
     guard threadID == id else { throw CancellationError() }
-    if let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedFragment {
+    if let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+      .percentEncodedFragment
+    {
       var components = URLComponents(url: signed, resolvingAgainstBaseURL: false)
       components?.percentEncodedFragment = fragment
       return components?.url ?? signed

@@ -300,10 +300,15 @@ final class T3BridgeService: ObservableObject {
       ])
   }
 
-  func accountStatus(provider: String, force: Bool) async throws -> [String: Any] {
+  func accountStatus(threadID: String, provider: String, force: Bool, selectionOnly: Bool)
+    async throws -> [String: Any]
+  {
     struct Response: Decodable { let payload: String }
     let response: Response = try await admin(
-      "account-status", method: "POST", body: ["provider": provider, "force": force])
+      "account-status", method: "POST",
+      body: [
+        "threadID": threadID, "provider": provider, "force": force, "selectionOnly": selectionOnly,
+      ])
     return try JSONSerialization.jsonObject(with: Data(response.payload.utf8)) as? [String: Any]
       ?? [:]
   }

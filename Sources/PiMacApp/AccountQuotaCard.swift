@@ -182,8 +182,10 @@ private struct CodexAccountsCard: View, Equatable {
           if !snapshot.message.isEmpty {
             Text(snapshot.message)
               .font(.caption2)
-              .foregroundStyle(snapshot.accounts.contains { $0.primary != nil || $0.secondary != nil }
-                || snapshot.gemini?.quotas.isEmpty == false ? Color.orange : Color.red)
+              .foregroundStyle(
+                snapshot.accounts.contains { $0.primary != nil || $0.secondary != nil }
+                  || snapshot.gemini?.quotas.isEmpty == false ? Color.orange : Color.red
+              )
               .lineLimit(1)
               .truncationMode(.tail)
               .help(snapshot.message)
@@ -230,7 +232,7 @@ private struct CodexAccountsCard: View, Equatable {
       emptyStatus
     } else {
       let accounts = AccountQuotaPresentation.accounts(snapshot.accounts)
-      ScrollView {
+      ScrollView(showsIndicators: false) {
         LazyVStack(spacing: 7) {
           if AccountQuotaPresentation.showsGeminiFirst(snapshot.gemini),
             let gemini = snapshot.gemini
@@ -308,8 +310,8 @@ private struct CodexAccountsCard: View, Equatable {
       }
       if account.primary == nil && account.secondary == nil {
         if account.error == nil {
-        Text(account.isHidden ? "额度已隐藏" : "暂无额度数据，可刷新重试")
-          .font(.caption2).foregroundStyle(.secondary)
+          Text(account.isHidden ? "额度已隐藏" : "暂无额度数据，可刷新重试")
+            .font(.caption2).foregroundStyle(.secondary)
         }
       } else {
         if let window = account.primary { usageRow(window, label: windowLabel(window)) }

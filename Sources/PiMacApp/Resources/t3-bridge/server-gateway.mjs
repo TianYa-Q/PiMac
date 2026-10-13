@@ -68,7 +68,15 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
         if (!lan.status().endpoint) throw new Error('LAN not enabled');
         return json(res, 200, await manager.pairing({ label: 'Pi Mac LAN phone' }));
       }
-      if (route === 'POST /internal/auth/account-status') return json(res, 200, { payload: JSON.stringify(await piAccounts.accountStatus(body)) });
+      if (route === 'POST /internal/auth/account-status') {
+        if (!['openai', 'openai-codex', 'antigravity'].includes(body.provider)) throw new Error('Unsupported provider');
+        const payload = body.selectionOnly === true
+          ? { version: 2, provider: body.provider, source: 'host-query', selectionOnly: true, accounts: [], updatedAt: Date.now() }
+          : await piAccounts.accountStatus(body);
+        // 缓存只属于共享额度；每次响应都读取最新线程绑定，避免自动切换被旧缓存遮住。
+        const sessionSelection = official.broker.accountSelections.read(body.threadID, body.provider);
+        return json(res, 200, { payload: JSON.stringify({ ...payload, sessionSelection }) });
+      }
       if (route === 'POST /internal/auth/model-preferences') return json(res, 200, await manager.modelPreferences(body));
       if (route === 'POST /internal/auth/model-context') return json(res, 200, await manager.modelContext(body));
       if (route === 'POST /internal/auth/connect' && Object.keys(body).length === 1) return json(res, 200, await manager.control(body.operation));

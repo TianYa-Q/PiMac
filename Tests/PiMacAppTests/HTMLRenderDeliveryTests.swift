@@ -69,9 +69,9 @@ struct HTMLRenderDeliveryTests {
       try await Task.sleep(for: .milliseconds(100))
     }
     let reference = try #require(page())
-    let html = try await client.htmlRenderDocument(reference)
-    #expect(document() == html)
-    // 从会话数据进入视图之前已下载并缓存；移走测试附件后仍可恢复，不依赖重新下载。
+    let html = try #require(document())
+    // 在任何显式加载之前移走附件，证明 live hydration 自己已完成下载和缓存。
+    // 否则这里先调用 htmlRenderDocument 会掩盖“必须由视图/reopen 触发下载”的回归。
     let files =
       FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.allObjects
       as? [URL] ?? []

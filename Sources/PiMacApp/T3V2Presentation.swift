@@ -25,6 +25,24 @@ enum T3V2Presentation {
     return parentID
   }
 
+  /// 运行提示沿委派链向上传递，但不改写服务端状态；fork 不继承，损坏的环也必须终止。
+  static func runningThreadIDs(threads: [JSON], locallyRunningIDs: Set<String>) -> Set<String> {
+    var parents: [String: String] = [:]
+    var running = locallyRunningIDs
+    for thread in threads {
+      guard let id = thread["id"] as? String else { continue }
+      if let parentID = subagentParentID(thread) { parents[id] = parentID }
+      if active.contains(thread["status"] as? String ?? "") { running.insert(id) }
+    }
+    var pending = Array(running)
+    while let id = pending.popLast() {
+      if let parentID = parents[id], running.insert(parentID).inserted {
+        pending.append(parentID)
+      }
+    }
+    return running
+  }
+
   static func hasUnreadCompletion(_ thread: JSON) -> Bool {
     guard thread["status"] as? String == "completed" else { return false }
     let completed = T3DesktopClient.date(thread["latestRunCompletedAt"])
@@ -83,10 +101,11 @@ enum T3V2Presentation {
       case "compaction":
         let before = item["beforeTokenCount"] as? Int
         let after = item["afterTokenCount"] as? Int
-        let counts = before.map { value in
-          after.map { " \(value.formatted()) → \($0.formatted()) tokens" }
-            ?? " \(value.formatted()) tokens"
-        } ?? ""
+        let counts =
+          before.map { value in
+            after.map { " \(value.formatted()) → \($0.formatted()) tokens" }
+              ?? " \(value.formatted()) tokens"
+          } ?? ""
         messages.append([
           "id": item["id"] ?? "", "role": "compaction",
           "title": "上下文已压缩" + counts,
@@ -100,8 +119,10 @@ enum T3V2Presentation {
           item["toolName"] as? String ?? item["title"] as? String
           ?? (type == "file_change" ? "edit" : type == "command_execution" ? "bash" : type)
         var data: JSON = ["toolName": name, "input": item["input"] ?? [:]]
-        if status == "completed", let page = item["htmlRender"] as? T3HTMLRender
-          ?? T3HTMLRender.read(toolName: name, output: item["output"]) {
+        if status == "completed",
+          let page = item["htmlRender"] as? T3HTMLRender
+            ?? T3HTMLRender.read(toolName: name, output: item["output"])
+        {
           // 页面独立于折叠的工作过程显示；历史快照与实时结果走同一条映射路径。
           messages.append([
             "id": "\(item["id"] as? String ?? "")-html", "role": "assistant",
@@ -175,9 +196,11 @@ enum T3V2Presentation {
         return left == right
           ? ($0["ordinal"] as? Int ?? 0) < ($1["ordinal"] as? Int ?? 0) : left < right
       }.compactMap { run -> JSON? in
-        guard let message = sourceMessages.first(where: {
-          $0["id"] as? String == run["userMessageId"] as? String
-        }) else { return nil }
+        guard
+          let message = sourceMessages.first(where: {
+            $0["id"] as? String == run["userMessageId"] as? String
+          })
+        else { return nil }
         var queued = message
         queued["runId"] = run["id"]
         return queued
@@ -208,7 +231,8 @@ enum T3V2Presentation {
   {
     let usageTurn = turns.last(where: { $0["tokenUsage"] is JSON })
     let usage = usageTurn?["tokenUsage"] as? JSON
-    let usageDate = contextTimestamp(usage?["updatedAt"])
+    let usageDate =
+      contextTimestamp(usage?["updatedAt"])
       ?? contextTimestamp(usageTurn?["completedAt"])
       ?? contextTimestamp(usageTurn?["startedAt"])
     let turnIDs = Set(turns.compactMap { $0["id"] as? String })

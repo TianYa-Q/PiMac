@@ -17,8 +17,10 @@ final class SessionCatalogCache {
     entries = remaining
     for (projectID, rows) in groups {
       let metadata = rows.map { row in
-        ["id", "title", "createdAt", "unsettledAt", "activeOrderKey", "updatedAt",
-          "settledOverride", "settledAt", "archivedAt", "autoSettleDisabledAt"].map {
+        [
+          "id", "title", "createdAt", "unsettledAt", "activeOrderKey", "latestMessageAt",
+          "settledOverride", "settledAt", "archivedAt", "autoSettleDisabledAt",
+        ].map {
           row[$0] as? String
         }
       }

@@ -25,6 +25,7 @@ struct HTMLRenderView: View {
   @State private var contentHeight: Double?
   @State private var frameWidth: Double = 728
   @State private var externalLink: URL?
+  @State private var previewImage: HTMLRenderImageSource?
 
   private var previewHeight: Double {
     reference.previewHeight(
@@ -38,7 +39,7 @@ struct HTMLRenderView: View {
           HTMLRenderWebView(
             html: html, dark: colorScheme == .dark,
             onHeight: { contentHeight = $0 }, onError: { error = $0 },
-            onLink: { externalLink = $0 }
+            onLink: { externalLink = $0 }, onImage: { previewImage = $0 }
           )
           .accessibilityLabel(reference.title)
           .onAppear { frameWidth = geometry.size.width }
@@ -69,6 +70,9 @@ struct HTMLRenderView: View {
       }
     }
     .frame(maxWidth: 728, alignment: .leading)
+    .sheet(item: $previewImage) { image in
+      HTMLRenderImagePreview(image: image)
+    }
     .confirmationDialog(
       "打开外部链接？",
       isPresented: Binding(
@@ -95,6 +99,8 @@ struct HTMLRenderWebView: NSViewRepresentable {
   let onHeight: (Double) -> Void
   let onError: (String) -> Void
   let onLink: (URL) -> Void
+  var onImage: (HTMLRenderImageSource) -> Void = { _ in }
+  var allowsMagnification = false
 
   func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -104,7 +110,7 @@ struct HTMLRenderWebView: NSViewRepresentable {
     configuration.userContentController.add(context.coordinator, name: "renderEvent")
     let view = WKWebView(frame: .zero, configuration: configuration)
     view.navigationDelegate = context.coordinator
-    context.coordinator.observeWheel(in: view)
+    view.allowsMagnification = allowsMagnification
     view.setValue(false, forKey: "drawsBackground")
     view.loadHTMLString(Self.document(html: html, dark: dark), baseURL: nil)
     return view
@@ -122,7 +128,6 @@ struct HTMLRenderWebView: NSViewRepresentable {
   }
 
   static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
-    coordinator.stopObservingWheel()
     view.stopLoading()
     view.navigationDelegate = nil
     view.configuration.userContentController.removeScriptMessageHandler(forName: "renderEvent")
@@ -186,21 +191,24 @@ struct HTMLRenderWebView: NSViewRepresentable {
   }
 
   static func document(html: String, dark: Bool) -> String {
-    // iframe 内仅报告滚动边界，不提供原生权限。也考虑页面里的可滚动表格/列表。
-    let scrollProbe = """
-      <script>(function(){let target=null;function report(){
-        let el=target;while(el&&el!==document.body&&el!==document.documentElement){
-          const style=getComputedStyle(el);if(/auto|scroll/.test(style.overflowY)&&el.scrollHeight>el.clientHeight+1)break;el=el.parentElement;
-        }
-        if(!el||el===document.body||el===document.documentElement)el=document.scrollingElement||document.documentElement;
-        parent.postMessage({jsonrpc:'2.0',method:'pi/scroll-state',params:{top:el.scrollTop,height:el.scrollHeight,viewport:el.clientHeight}},'*');
-      }document.addEventListener('mouseover',e=>{target=e.target instanceof Element?e.target:null;report();},true);
-      document.addEventListener('scroll',report,true);window.addEventListener('resize',report);window.addEventListener('load',report);
-      new ResizeObserver(report).observe(document.documentElement);report();})();</script>
+    // 图片在原 sandbox 内解析；blob 源在原页转为图片数据，不授予新窗口同源或文件权限。
+    // 阻断页面及内部滚动区的边界连锁滚动，滚轮不再由原生监视器转交会话。
+    let imageBridge = """
+      <style>*{overscroll-behavior:contain!important}img{cursor:zoom-in}</style>
+      <script>document.addEventListener('click',async e=>{
+        if(!e.isTrusted||!(e.target instanceof HTMLImageElement))return;
+        e.preventDefault();e.stopPropagation();let source=e.target.currentSrc||e.target.src;
+        if(source.startsWith('blob:')){try{const blob=await(await fetch(source)).blob();
+          if(blob.size>8*1024*1024||!blob.type.startsWith('image/'))return;
+          source=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=reject;reader.readAsDataURL(blob);});
+        }catch{return;}}
+        if(typeof source==='string'&&source.length<=16*1024*1024)
+          parent.postMessage({jsonrpc:'2.0',method:'pi/open-image',params:{source}},'*');
+      },true);</script>
       """
     return """
       <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-      <style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}iframe{width:100%;height:100%;border:0;display:block}</style></head>
+      <style>html,body{margin:0;width:100%;height:100%;overflow:hidden;overscroll-behavior:contain;background:transparent}iframe{width:100%;height:100%;border:0;display:block;overscroll-behavior:contain}</style></head>
       <body><iframe id="page" sandbox="allow-scripts" referrerpolicy="no-referrer"></iframe><script>
       const page=document.getElementById('page');let theme=\(themeJSON(dark: dark));
       window.setRenderTheme=function(t){theme=t;page.contentWindow.postMessage({jsonrpc:'2.0',method:'ui/notifications/host-context-changed',params:{theme:t.appearance,styles:{variables:t.variables}}},'*');};
@@ -211,9 +219,11 @@ struct HTMLRenderWebView: NSViewRepresentable {
           window.webkit.messageHandlers.renderEvent.postMessage({height:d.params.height});
         if(d.method==='ui/open-link'&&typeof d.params.url==='string')
           window.webkit.messageHandlers.renderEvent.postMessage({url:d.params.url});
-        if(d.method==='pi/scroll-state')
-          window.webkit.messageHandlers.renderEvent.postMessage({scroll:d.params});
-      });page.srcdoc=\(json(html + scrollProbe));
+        if(d.method==='pi/open-image'&&typeof d.params.source==='string')
+          window.webkit.messageHandlers.renderEvent.postMessage({image:d.params.source});
+        if(d.method==='pi/image-load-failed')
+          window.webkit.messageHandlers.renderEvent.postMessage({imageError:true});
+      });page.srcdoc=\(json(html + imageBridge));
       </script></body></html>
       """
   }
@@ -222,54 +232,6 @@ struct HTMLRenderWebView: NSViewRepresentable {
     var parent: HTMLRenderWebView
     var html: String
     var dark: Bool
-    var scrollState = HTMLRenderScrollState()
-    private weak var webView: WKWebView?
-    private var wheelMonitor: Any?
-
-    func observeWheel(in view: WKWebView) {
-      webView = view
-      wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) {
-        [weak self, weak view] event in
-        guard let self, let view, event.window === view.window,
-          view.bounds.contains(view.convert(event.locationInWindow, from: nil)),
-          self.routeWheel(event)
-        else { return event }
-        return nil
-      }
-    }
-
-    func stopObservingWheel() {
-      if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
-      wheelMonitor = nil
-      webView = nil
-    }
-
-    /// 返回 true 表示已转交会话；触控板惯性由后续事件驱动，精确像素不做额外缩放。
-    func routeWheel(_ event: NSEvent) -> Bool {
-      guard
-        scrollState.routesToConversation(
-          deltaY: event.scrollingDeltaY, deltaX: event.scrollingDeltaX),
-        let scroll = webView?.enclosingScrollView
-      else { return false }
-      NotificationCenter.default.post(
-        name: NSScrollView.willStartLiveScrollNotification,
-        object: scroll, userInfo: ["userGesture": true])
-      // 不再把事件送回 NSScrollView 的命中/嵌套滚动分发，避免再次落到 WebKit。
-      // 直接更新外层 clip，鼠标按行缩放、触控板按精确像素滚动，并遵守真实内容边界。
-      let clip = scroll.contentView
-      let scale = event.hasPreciseScrollingDeltas ? 1 : scroll.verticalLineScroll
-      var bounds = clip.bounds
-      bounds.origin.y += (clip.isFlipped ? -1 : 1) * event.scrollingDeltaY * scale
-      clip.scroll(to: clip.constrainBoundsRect(bounds).origin)
-      scroll.reflectScrolledClipView(clip)
-      NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scroll)
-      return true
-    }
-
-    deinit {
-      if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
-    }
-
     init(parent: HTMLRenderWebView) {
       self.parent = parent
       html = parent.html
@@ -280,13 +242,10 @@ struct HTMLRenderWebView: NSViewRepresentable {
       _ controller: WKUserContentController, didReceive message: WKScriptMessage
     ) {
       guard message.frameInfo.isMainFrame, let data = message.body as? [String: Any] else { return }
-      if let metrics = data["scroll"] as? [String: Double],
-        let top = metrics["top"], let height = metrics["height"],
-        let viewport = metrics["viewport"],
-        let state = HTMLRenderScrollState(top: top, height: height, viewport: viewport)
-      {
-        scrollState = state
+      if let source = data["image"] as? String, let image = HTMLRenderImageSource(source) {
+        parent.onImage(image)
       }
+      if data["imageError"] as? Bool == true { parent.onError("图片加载失败") }
       if let height = data["height"] as? Double, height.isFinite, height > 0 {
         parent.onHeight(min(2000, max(80, height)))
       }

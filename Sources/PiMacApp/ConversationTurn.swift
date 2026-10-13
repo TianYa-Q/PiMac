@@ -35,9 +35,10 @@ struct ConversationTurn: Identifiable, Equatable {
       {
         continue
       }
-      // Compaction is a timeline boundary, not a footer of the entire user turn.
-      // Flush both sides so subsequent work cannot move the marker to the bottom.
-      if entry.kind == .compaction {
+      // 系统通知和压缩标记属于发生时的数据流，而非整轮对话的页脚。
+      // 两侧分别成组，避免后续正常回复或工具活动被渲染到旧异常之前；
+      // 通知确实是最后一条时，自然仍显示在底部。
+      if entry.kind == .compaction || entry.kind == .system {
         if !current.isEmpty { turns.append(ConversationTurn(entries: current)) }
         turns.append(ConversationTurn(entries: [entry]))
         current = []

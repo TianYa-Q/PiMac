@@ -10,6 +10,13 @@ let sessionId = args.includes('--session-id') ? option('--session-id') : 'fixtur
 let sessionFile = args.includes('--session') ? option('--session') : '/tmp/pimac-fixture-session.jsonl';
 const directory = args.includes('--session-dir') ? option('--session-dir') : undefined;
 if (directory) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+// 模拟 Pi 原生 --fork 的独立会话文件，让父子生命周期测试走真实适配器链路。
+if (args.includes('--fork')) {
+  sessionId = 'fixture-fork-' + process.pid;
+  sessionFile = path.join(process.cwd(), sessionId + '.jsonl');
+  fs.writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3, id: sessionId,
+    timestamp: new Date().toISOString(), cwd: process.cwd() }) + '\n', { mode: 0o600 });
+}
 const file = directory && path.join(directory, sessionId + '.jsonl');
 let model = { provider: 'test', id: 'model', name: 'Test Model', reasoning: true,
   thinkingLevelMap: { xhigh: 'xhigh', max: 'max' }, contextWindow: 10000 }, running = false, completion;
@@ -38,7 +45,8 @@ process.stdin.on('data', chunk => {
         send({ type: 'compaction_start' }); send({ type: 'compaction_end', result }); response(result); break;
       }
       case 'get_commands': response({ commands: [{ name: 'pimac-fast', source: 'extension' }, { name: 'accounts', source: 'extension' }] }); break;
-      case 'get_available_models': response({ models: [model] }); break;
+      case 'get_available_models': response({ models: [model, ...(process.env.PIMAC_FIXTURE_EXTRA_MODEL === '1'
+        ? [{ ...model, id: 'fallback', name: 'Forbidden fallback' }] : [])] }); break;
       case 'set_model': model = { provider: command.provider, id: command.modelId, name: command.modelId, api: command.provider === 'openai' ? 'openai-responses' : command.provider === 'openai-codex' ? 'openai-codex-responses' : 'test' }; response(model); break;
       case 'set_thinking_level': thinkingLevel = command.level; response(); break;
       case 'set_session_name': case 'clear_queue': response(); break;
@@ -71,8 +79,13 @@ process.stdin.on('data', chunk => {
         response({ disposition: command.message === '/handled' ? 'handled' : 'started' });
         if (command.message === '/handled') break;
         running = true; send({ type: 'agent_start' });
+        if (command.message.startsWith('account-selection-')) {
+          send({ type: 'extension_ui_request', method: 'setStatus', statusKey: 'account-usage-gui',
+            statusText: JSON.stringify({ version: 2, provider: 'openai', activeAccount: command.message.slice('account-selection-'.length),
+              updatedAt: Date.now(), accounts: [], supportsAccountSwitch: true, managesSelectedAuth: true }) });
+        }
         if (command.message === 'wait') break;
-        if (command.message === 'mcp-discovery' || command.message === 'html-render') {
+        if (['mcp-discovery', 'html-render', 'mcp-model-lock'].includes(command.message)) {
           send({ type: 'message_start', message: { role: 'assistant', content: [] } });
           // 使用上游注入的会话凭据，只输出工具名；不把 token 写入日志或投影。
           void (async () => {
@@ -94,6 +107,24 @@ process.stdin.on('data', chunk => {
             };
             await request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {},
               clientInfo: { name: 'pimac-fixture', version: '1' } });
+            if (command.message === 'mcp-model-lock') {
+              const capabilities = await request(2, 'tools/call', { name: 'orchestrator_capabilities', arguments: {} });
+              const rejected = [];
+              for (const target of [{ model: 'test/fallback' }, { model: 'default' },
+                { providerInstanceId: 'other' }, { driverKind: 'codex' }]) {
+                rejected.push(await request(3, 'tools/call', { name: 'delegate_task', arguments: {
+                  task: 'forbidden child', target, mode: 'async' } }));
+              }
+              const accepted = [];
+              for (const target of [undefined, { providerInstanceId: 'pi', model: 'test/model', driverKind: 'pi' }]) {
+                accepted.push(await request(4, 'tools/call', { name: 'delegate_task', arguments: {
+                  task: 'same-model child', ...(target ? { target } : {}), mode: 'async' } }));
+              }
+              const text = JSON.stringify({ modelLock: true, capabilities, rejected, accepted });
+              send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text } });
+              send({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'stop' } });
+              return;
+            }
             if (command.message === 'html-render') {
               const html = '<!doctype html><html><head><style>h2{font-size:20px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.box{background:var(--secondary);padding:20px;border-radius:8px}p{color:var(--muted-foreground)}</style></head><body><h2>侧栏前后对比</h2><div class="grid"><div class="box">修改前<p>标题、项目、时间各占一行</p></div><div class="box">修改后<p>紧凑标题与单行元信息</p></div></div></body></html>';
               send({ type: 'tool_execution_start', toolCallId: 'html-1', toolName: 'mcp__t3-code__html_render', args: { title: '侧栏前后对比', html, height: 260 } });

@@ -29,6 +29,7 @@ final class T3DesktopClient: ObservableObject {
   private var toolDetailCache: [String: JSON] = [:]
   private var imageFailures: [String: Int] = [:]
   private var htmlDocumentCache: [String: String] = [:]
+  private var htmlRetryAfter: [String: Date] = [:]
   private let searchIndex = ServerSessionSearchIndex()
   private var hasDeliveredShell = false
   private let sessionCatalog = SessionCatalogCache()
@@ -128,6 +129,7 @@ final class T3DesktopClient: ObservableObject {
     replyImageCache.removeAll()
     toolDetailCache.removeAll()
     htmlDocumentCache.removeAll()
+    htmlRetryAfter.removeAll()
     imageFailures.removeAll()
     hasDeliveredShell = false
     taskStatusTracker = TaskStatusTracker()
@@ -157,6 +159,7 @@ final class T3DesktopClient: ObservableObject {
       replyImageCache.removeValue(forKey: key)
     }
     imageFailures.removeAll()
+    htmlRetryAfter.removeAll()
     threadRevisions.removeValue(forKey: id)
     requestRefresh()
   }
@@ -290,7 +293,11 @@ final class T3DesktopClient: ObservableObject {
       {
         defaults.set(data, forKey: "t3DesktopV2Metrics.\(id)")
       }
-      let (richNative, toolsComplete) = await hydrateToolImages(nativeDetail, threadID: id)
+      guard let base = service?.serverURL else { return }
+      let (richNative, toolsComplete) = await hydrateToolImages(
+        nativeDetail, threadID: id, base: base,
+        performRPC: { try await self.rpc($0, payload: $1) },
+        loadHTML: { try await self.htmlRenderDocument($0) })
       let detail = T3V2Presentation.detail(richNative)
       let ui = T3V2Presentation.requests(nativeDetail)
       for callback in watches.values.filter({ $0.0 == id }).map({ $0.2 }) { callback(ui) }
@@ -401,12 +408,15 @@ final class T3DesktopClient: ObservableObject {
     try await dispatch(command)
   }
 
-  func accountStatus(threadID: String, provider: String? = nil, force: Bool = false) async throws
+  func accountStatus(
+    threadID: String, provider: String? = nil, force: Bool = false, selectionOnly: Bool = false
+  ) async throws
     -> JSON?
   {
     guard let service, let provider, ["openai", "openai-codex", "antigravity"].contains(provider)
     else { return nil }
-    return try await service.accountStatus(provider: provider, force: force)
+    return try await service.accountStatus(
+      threadID: threadID, provider: provider, force: force, selectionOnly: selectionOnly)
   }
 
   func requestRefresh() {
@@ -564,10 +574,14 @@ final class T3DesktopClient: ObservableObject {
 
   /// Timeline snapshots deliberately omit output. Use official lazy detail reads,
   /// then download raster images through signed assets without putting bytes in chat text.
-  private func hydrateToolImages(_ native: JSON, threadID: String) async -> (JSON, Bool) {
+  func hydrateToolImages(
+    _ native: JSON, threadID: String, base: URL,
+    performRPC: (String, JSON) async throws -> JSON,
+    loadHTML: (T3HTMLRender) async throws -> String
+  ) async -> (JSON, Bool) {
     var native = native
     guard var projection = native["projection"] as? JSON,
-      var rows = projection["visibleTurnItems"] as? [JSON], let base = service?.serverURL
+      var rows = projection["visibleTurnItems"] as? [JSON]
     else { return (native, true) }
     let current = generation
     var complete = true
@@ -583,7 +597,11 @@ final class T3DesktopClient: ObservableObject {
       let key = "\(base.absoluteString)|\(ownerThreadID)|\(id)|\(revision)"
       if let cached = toolDetailCache[key] {
         rows[index]["item"] = cached
-        continue
+        guard let retryAfter = htmlRetryAfter[key] else { continue }
+        if retryAfter > Date() {
+          complete = false
+          continue
+        }
       }
       guard reads < 8 else {
         complete = false
@@ -592,19 +610,38 @@ final class T3DesktopClient: ObservableObject {
       reads += 1
       var images: [PromptAttachment] = []
       // 即使详情请求失败，也保留快照里的有效引用，让最终失败能显示而非无限留白。
-      item["htmlRender"] = T3HTMLRender.read(
-        toolName: item["toolName"] as? String ?? "", output: item["output"])
+      item["htmlRender"] =
+        T3HTMLRender.read(
+          toolName: item["toolName"] as? String ?? "", output: item["output"])
+        ?? toolDetailCache[key]?["htmlRender"] as? T3HTMLRender
+      let toolName = item["toolName"] as? String ?? ""
+      let isHTML = T3HTMLRender.isRenderTool(toolName)
       do {
-        let response = try await rpc(
-          "orchestration.getTurnItem",
-          payload: [
-            "threadId": ownerThreadID, "itemId": id, "revision": revision,
-          ])
-        guard let detail = response["item"] as? JSON else { throw ClientError.rejected }
-        if let page = T3HTMLRender.read(
-          toolName: item["toolName"] as? String ?? "", output: detail["output"]) {
+        // 快照已给出有效引用时直接下载，不让详情接口的暂时失败阻塞页面。
+        let detail: JSON
+        if item["htmlRender"] is T3HTMLRender {
+          // 重试时引用可能来自上次详情，原快照依然没有 output。
+          detail = item
+        } else {
+          let response = try await performRPC(
+            "orchestration.getTurnItem",
+            ["threadId": ownerThreadID, "itemId": id, "revision": revision])
+          guard let fetched = response["item"] as? JSON else { throw ClientError.rejected }
+          detail = fetched
+        }
+        // 完成快照可能领先于详情持久化；缺失输出不是合法的“没有页面”。
+        if isHTML, item["status"] as? String == "completed",
+          item["htmlRender"] == nil,
+          detail["output"] == nil || detail["output"] is NSNull
+            || T3V2Presentation.active.contains(detail["status"] as? String ?? "")
+        {
+          throw ClientError.rejected
+        }
+        if let page = item["htmlRender"] as? T3HTMLRender
+          ?? T3HTMLRender.read(toolName: toolName, output: detail["output"])
+        {
           item["htmlRender"] = page
-          item["htmlDocument"] = try await htmlRenderDocument(page)
+          item["htmlDocument"] = try await loadHTML(page)
         }
         for (imageIndex, mime) in T3ToolOutputImages.mimeTypes(detail["output"]).enumerated() {
           let imageKey = "\(key)|\(imageIndex)"
@@ -619,9 +656,9 @@ final class T3DesktopClient: ObservableObject {
             continue itemLoop
           }
           downloads += 1
-          let signed = try await rpc(
+          let signed = try await performRPC(
             "assets.createUrl",
-            payload: [
+            [
               "resource": [
                 "_tag": "tool-output-image", "threadId": ownerThreadID, "itemId": id,
                 "index": imageIndex,
@@ -637,16 +674,27 @@ final class T3DesktopClient: ObservableObject {
         item["localImages"] = images
         let attempts = (imageFailures[key] ?? 0) + 1
         imageFailures[key] = attempts
+        guard generation == current, !Task.isCancelled else { return (native, false) }
+        if isHTML {
+          // HTML 失败不能提交 revision，否则当前打开会话永远不会恢复。
+          // 前三次随正常轮询重试，之后降频；每轮读取预算仍限制为八条。
+          complete = false
+          if item["htmlRender"] is T3HTMLRender, attempts >= 3 {
+            item["htmlRenderError"] = "HTML 页面加载失败"
+          }
+          htmlRetryAfter[key] = Date().addingTimeInterval(attempts < 3 ? 0 : 10)
+          toolDetailCache[key] = item
+          rows[index]["item"] = item
+          continue
+        }
         if attempts < 3 {
           complete = false
           rows[index]["item"] = item
           continue
         }
-        if item["htmlRender"] is T3HTMLRender, item["htmlDocument"] == nil {
-          item["htmlRenderError"] = "HTML 页面加载失败"
-        }
       }
       guard generation == current else { return (native, false) }
+      htmlRetryAfter.removeValue(forKey: key)
       toolDetailCache[key] = item
       rows[index]["item"] = item
     }
@@ -729,13 +777,18 @@ final class T3DesktopClient: ObservableObject {
     let current = generation
     let key = "\(base.absoluteString)|\(reference.attachmentID)"
     if let cached = htmlDocumentCache[key] { return cached }
-    let signed = try await rpc("assets.createUrl", payload: [
-      "resource": ["_tag": "attachment", "attachmentId": reference.attachmentID,
-        "mimeType": "text/html", "disposition": "inline"]
-    ])
+    let signed = try await rpc(
+      "assets.createUrl",
+      payload: [
+        "resource": [
+          "_tag": "attachment", "attachmentId": reference.attachmentID,
+          "mimeType": "text/html", "disposition": "inline",
+        ]
+      ])
     guard let relative = signed["relativeUrl"] as? String, relative.hasPrefix("/api/assets/"),
       let url = URL(string: base.absoluteString + relative), url.host == base.host,
-      url.port == base.port, url.scheme == base.scheme else { throw ClientError.rejected }
+      url.port == base.port, url.scheme == base.scheme
+    else { throw ClientError.rejected }
     let (bytes, response) = try await session.bytes(from: url)
     let limit = 8 * 1024 * 1024
     guard let response = response as? HTTPURLResponse, response.statusCode == 200,
@@ -758,11 +811,13 @@ final class T3DesktopClient: ObservableObject {
     for itemKey in Array(toolDetailCache.keys) {
       guard var item = toolDetailCache[itemKey],
         (item["htmlRender"] as? T3HTMLRender)?.attachmentID == reference.attachmentID,
-        item["htmlRenderError"] != nil else { continue }
+        item["htmlRenderError"] != nil
+      else { continue }
       item["htmlDocument"] = html
       item.removeValue(forKey: "htmlRenderError")
       toolDetailCache[itemKey] = item
       imageFailures.removeValue(forKey: itemKey)
+      htmlRetryAfter.removeValue(forKey: itemKey)
       recovered = true
     }
     if recovered {

@@ -89,10 +89,12 @@ private struct ConversationScrollObserver: NSViewRepresentable {
       self.scrollView = scrollView
       if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
       // 真实滚轮输入优先于首次/异步布局的底部定位；普通布局通知仍不代表用户意图。
-      wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self, weak scrollView] event in
+      wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) {
+        [weak self, weak scrollView] event in
         guard let self, let scrollView, event.window === scrollView.window,
           scrollView.bounds.contains(scrollView.convert(event.locationInWindow, from: nil)),
-          event.scrollingDeltaY != 0 else { return event }
+          event.scrollingDeltaY != 0
+        else { return event }
         self.onUserScroll(false, true)
         return event
       }
@@ -333,7 +335,8 @@ struct ContentView: View {
           }
         }
         return .handled
-      })
+      }
+    )
     .sheet(
       item: Binding(
         get: { extensionUI.dialog.map { ExtensionDialogPresentation(dialog: $0) } },
@@ -423,7 +426,15 @@ struct ContentView: View {
 
   private var redesignedSidebar: some View {
     let tree = sessionTree
-    let visibleSessions = tree.rows(expandedPaths: expandedSessionPaths, rootLimit: visibleSessionCount)
+    let locallyRunningIDs = Set(
+      workspace.tabs.compactMap { tab -> String? in
+        guard tab.model.isBusy else { return nil }
+        return AppModel.threadID(from: tab.model.currentSessionPath)
+      })
+    let runningThreadIDs = T3V2Presentation.runningThreadIDs(
+      threads: workspace.server.threads, locallyRunningIDs: locallyRunningIDs)
+    let visibleSessions = tree.rows(
+      expandedPaths: expandedSessionPaths, rootLimit: visibleSessionCount)
     let searching = !SessionSearchQuery(sessionSearchText).isEmpty
     return VStack(spacing: 0) {
       VStack(alignment: .leading, spacing: 0) {
@@ -591,7 +602,8 @@ struct ContentView: View {
               .foregroundStyle(.secondary)
               .disabled(
                 !workspace.server.isConnected || workspace.isSettlingIdleSessions
-                  || workspace.idleSessionPaths.isEmpty)
+                  || workspace.idleSessionPaths.isEmpty
+              )
               .help("一键 Settle 所有项目中未在进行的会话（保留运行中、排队及等待处理的会话）")
               .accessibilityLabel(workspace.isSettlingIdleSessions ? "正在批量 Settle" : "一键 Settle")
             }
@@ -664,7 +676,9 @@ struct ContentView: View {
               ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: 3) {
                   ForEach(sessionSearchResults) { result in
-                    redesignedSessionRow(result.session, snippet: result.snippet, childCount: 0)
+                    redesignedSessionRow(
+                      result.session, snippet: result.snippet, childCount: 0,
+                      runningThreadIDs: runningThreadIDs)
                   }
                 }
                 .padding(.vertical, 6)
@@ -697,20 +711,28 @@ struct ContentView: View {
                           expandedSessionPaths.remove(row.id)
                         }
                       } label: {
-                        Image(systemName: expandedSessionPaths.contains(row.id) ? "chevron.down" : "chevron.right")
-                          .font(.system(size: 9, weight: .semibold))
-                          .foregroundStyle(.secondary)
-                          .frame(width: 12, height: 34)
-                          .contentShape(Rectangle())
+                        Image(
+                          systemName: expandedSessionPaths.contains(row.id)
+                            ? "chevron.down" : "chevron.right"
+                        )
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12, height: 34)
+                        .contentShape(Rectangle())
                       }
                       .buttonStyle(.plain)
-                      .help("\(expandedSessionPaths.contains(row.id) ? "折叠" : "展开") \(row.childCount) 个子会话")
-                      .accessibilityLabel("\(expandedSessionPaths.contains(row.id) ? "折叠" : "展开")子会话：\(row.session.title)")
+                      .help(
+                        "\(expandedSessionPaths.contains(row.id) ? "折叠" : "展开") \(row.childCount) 个子会话"
+                      )
+                      .accessibilityLabel(
+                        "\(expandedSessionPaths.contains(row.id) ? "折叠" : "展开")子会话：\(row.session.title)"
+                      )
                       .accessibilityValue("\(row.childCount) 个子会话")
                     } else {
                       Color.clear.frame(width: 12, height: 1)
                     }
-                    redesignedSessionRow(row.session, childCount: row.childCount)
+                    redesignedSessionRow(
+                      row.session, childCount: row.childCount, runningThreadIDs: runningThreadIDs)
                   }
                   .padding(.leading, CGFloat(min(row.depth, 6)) * 14)
                 }
@@ -873,85 +895,91 @@ struct ContentView: View {
   }
 
   private func redesignedSessionRow(
-    _ session: SessionItem, snippet: String? = nil, childCount: Int
+    _ session: SessionItem, snippet: String? = nil, childCount: Int,
+    runningThreadIDs: Set<String>
   ) -> some View {
     let selected = workspace.isSelectedSession(path: session.path)
     let thread = AppModel.threadID(from: session.path).flatMap { workspace.server.thread($0) }
-    let running = workspace.model(forSessionPath: session.path)?.isBusy == true
-      || T3V2Presentation.active.contains(thread?["status"] as? String ?? "")
+    let running =
+      AppModel.threadID(from: session.path).map { runningThreadIDs.contains($0) }
+      ?? (workspace.model(forSessionPath: session.path)?.isBusy == true)
     let settled = thread.map { WorkspaceModel.isSettled($0) } ?? false
     let autoSettleEnabled = !(thread?["autoSettleDisabledAt"] is String)
     let parentID = thread.flatMap { T3V2Presentation.subagentParentID($0) }
     let parentThread = parentID.flatMap { workspace.server.thread($0) }
-    let unreadDone = !selected && (thread.map { T3V2Presentation.hasUnreadCompletion($0) } ?? false)
+    let unreadDone =
+      !running && !selected
+      && (thread.map { T3V2Presentation.hasUnreadCompletion($0) } ?? false)
     return SidebarHoverRegion { hovered in
       ZStack(alignment: .topTrailing) {
         Button {
-          guard let projectURL = workspace.project(forSessionPath: session.path)?.url else { return }
+          guard let projectURL = workspace.project(forSessionPath: session.path)?.url else {
+            return
+          }
           workspace.openSession(path: session.path, in: projectURL)
         } label: {
           VStack(alignment: .leading, spacing: 6) {
-              if parentID != nil {
-                Text("子代理")
-                  .font(.caption2.weight(.semibold))
-                  .foregroundStyle(Color.accentColor)
-                  .padding(.horizontal, 5)
-                  .padding(.vertical, 1)
-                  .background(Color.accentColor.opacity(0.1), in: Capsule())
+            if parentID != nil {
+              Text("子代理")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.accentColor.opacity(0.1), in: Capsule())
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+              if unreadDone {
+                Circle()
+                  .fill(Color.green)
+                  .frame(width: 5, height: 5)
+                  .accessibilityLabel("未读完成")
               }
-              HStack(alignment: .firstTextBaseline, spacing: 6) {
-                if unreadDone {
-                  Circle()
-                    .fill(Color.green)
-                    .frame(width: 5, height: 5)
-                    .accessibilityLabel("未读完成")
-                }
-                Text(sidebarSessionTitle(session.title))
-                  .font(.system(size: 12, weight: selected ? .semibold : .regular))
-                  .foregroundStyle(selected ? Color.primary : Color.primary.opacity(0.86))
-                  .lineLimit(2)
-                  .frame(maxWidth: .infinity, alignment: .leading)
-              }
-              .padding(.trailing, 22)
-              .help(session.title)
-              if parentID != nil {
-                Text("隶属：\(parentThread?["title"] as? String ?? "父会话不在当前列表")")
-                  .font(.caption2)
-                  .foregroundStyle(.secondary)
+              Text(sidebarSessionTitle(session.title))
+                .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Color.primary : Color.primary.opacity(0.86))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.trailing, 22)
+            .help(session.title)
+            if parentID != nil {
+              Text("隶属：\(parentThread?["title"] as? String ?? "父会话不在当前列表")")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .help(parentThread?["title"] as? String ?? "父会话可能已归档或不在当前可见范围")
+            }
+            if let snippet {
+              Text(snippet)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            }
+            HStack(spacing: 5) {
+              if workspace.projectFilterPath == nil,
+                let project = workspace.project(forSessionPath: session.path)
+              {
+                Text(project.name)
                   .lineLimit(1)
-                  .help(parentThread?["title"] as? String ?? "父会话可能已归档或不在当前可见范围")
+                  .help(project.url.path)
+                Text("·").foregroundStyle(.tertiary)
               }
-              if let snippet {
-                Text(snippet)
-                  .font(.caption)
-                  .foregroundStyle(.secondary)
-                  .lineLimit(2)
-              }
-              HStack(spacing: 5) {
-                if workspace.projectFilterPath == nil,
-                  let project = workspace.project(forSessionPath: session.path)
-                {
-                  Text(project.name)
-                    .lineLimit(1)
-                    .help(project.url.path)
-                  Text("·").foregroundStyle(.tertiary)
-                }
-                SessionRelativeTime(date: session.modifiedAt)
-                  .lineLimit(1)
+              SessionRelativeTime(date: session.modifiedAt)
+                .lineLimit(1)
+                .fixedSize()
+              Spacer(minLength: 2)
+              if childCount > 0 {
+                Label("\(childCount)", systemImage: "arrow.triangle.branch")
                   .fixedSize()
-                Spacer(minLength: 2)
-                if childCount > 0 {
-                  Label("\(childCount)", systemImage: "arrow.triangle.branch")
-                    .fixedSize()
-                    .help("\(childCount) 个子会话")
-                }
-                if settled {
-                  Image(systemName: "checkmark.circle")
-                    .help("已完成")
-                }
+                  .help("\(childCount) 个子会话")
               }
-              .font(.system(size: 10))
-              .foregroundStyle(.secondary)
+              if settled && !running {
+                Image(systemName: "checkmark.circle")
+                  .help("已完成")
+              }
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(.secondary)
           }
           .padding(.horizontal, 12)
           .padding(.vertical, 10)
@@ -980,12 +1008,15 @@ struct ContentView: View {
       }
       .background {
         RoundedRectangle(cornerRadius: 8)
-          .fill(selected ? Color.accentColor.opacity(0.10)
-            : hovered ? Color.primary.opacity(0.045) : Color.clear)
+          .fill(
+            selected
+              ? Color.accentColor.opacity(0.10)
+              : hovered ? Color.primary.opacity(0.045) : Color.clear
+          )
           .overlay(alignment: .leading) {
             if selected || running {
               Capsule()
-                .fill(running ? Color.orange : Color.accentColor.opacity(0.85))
+                .fill(running ? Color.red : Color.accentColor.opacity(0.85))
                 .frame(width: 3, height: 20)
                 .accessibilityLabel(running ? "运行中" : "当前会话")
             }
@@ -1013,7 +1044,9 @@ struct ContentView: View {
         }
         Divider()
         Button("归档会话", systemImage: "archivebox") {
-          guard let projectURL = workspace.project(forSessionPath: session.path)?.url else { return }
+          guard let projectURL = workspace.project(forSessionPath: session.path)?.url else {
+            return
+          }
           workspace.archiveSession(path: session.path, in: projectURL)
         }
         .disabled(running)
@@ -1599,10 +1632,10 @@ struct ContentView: View {
   private func queuedPromptRow(_ prompt: ServerQueuedPrompt) -> some View {
     HStack(spacing: 7) {
       Text("Server 队列").foregroundStyle(.blue)
-      .font(.caption2.weight(.medium))
-      .padding(.horizontal, 6)
-      .padding(.vertical, 2)
-      .background(.quaternary, in: Capsule())
+        .font(.caption2.weight(.medium))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(.quaternary, in: Capsule())
 
       Text(prompt.text.replacingOccurrences(of: "\n", with: " "))
         .font(.caption)
@@ -1788,7 +1821,9 @@ struct ContentView: View {
           .font(.caption)
           .monospacedDigit()
           .foregroundStyle(.secondary)
-          .help("AA 近似口径：排除首个输出分块前的等待和最后分块后的收尾。完整思考流计入；隐藏思考时测可见输出后约 80%。按实际输出用量校准分块，任务内有效样本加权平均，每次响应结束更新；短响应或缓冲输出不测速。")
+          .help(
+            "AA 近似口径：排除首个输出分块前的等待和最后分块后的收尾。完整思考流计入；隐藏思考时测可见输出后约 80%。按实际输出用量校准分块，任务内有效样本加权平均，每次响应结束更新；短响应或缓冲输出不测速。"
+          )
       } else {
         Text("生成 -- tokens/s")
           .font(.caption)
@@ -1798,10 +1833,12 @@ struct ContentView: View {
       Divider().frame(height: 12)
       if let stats = app.stats {
         HStack(spacing: 12) {
-          Text(stats.contextPercent.map {
-            "上下文 \(stats.contextIsEstimated == true ? "≈" : "")\(Int($0))%"
-          } ?? "上下文 --")
-            .foregroundStyle(contextUsageColor(stats.contextPercent))
+          Text(
+            stats.contextPercent.map {
+              "上下文 \(stats.contextIsEstimated == true ? "≈" : "")\(Int($0))%"
+            } ?? "上下文 --"
+          )
+          .foregroundStyle(contextUsageColor(stats.contextPercent))
           Text(
             stats.contextWindow.map {
               "\(stats.totalTokens.formatted()) / \($0.formatted()) tokens"
@@ -1811,9 +1848,10 @@ struct ContentView: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .help(stats.contextIsEstimated == true
-          ? "压缩后的上下文估算值；收到更新的 token 用量后自动替换。"
-          : "Provider 返回的上下文和 token 用量")
+        .help(
+          stats.contextIsEstimated == true
+            ? "压缩后的上下文估算值；收到更新的 token 用量后自动替换。"
+            : "Provider 返回的上下文和 token 用量")
       } else {
         Text("上下文 -- · -- / -- tokens · 缓存命中 --")
           .font(.caption)
@@ -2236,8 +2274,10 @@ struct ConversationTurnView: View, Equatable {
       }
       ForEach(turn.htmlRenders) { entry in
         if let reference = entry.htmlRender {
-          HTMLRenderView(reference: reference, document: entry.htmlDocument, failure: entry.htmlRenderError)
-            .id(entry.id)
+          HTMLRenderView(
+            reference: reference, document: entry.htmlDocument, failure: entry.htmlRenderError
+          )
+          .id(entry.id)
         }
       }
       if let assistant = turn.finalAssistant {
@@ -2454,6 +2494,14 @@ private struct ActivityEntryView: View {
                 }
               }
               Spacer(minLength: 8)
+              if let timestamp = entry.timestamp, timestamp != .distantPast {
+                Text(timestamp.formatted(date: .omitted, time: .standard))
+                  .font(.caption2)
+                  .monospacedDigit()
+                  .foregroundStyle(.secondary)
+                  .lineLimit(1)
+                  .help(timestamp.formatted(date: .complete, time: .standard))
+              }
               if hasVisibleDetails {
                 Image(systemName: expanded ? "chevron.down" : "chevron.right")
                   .font(.caption2.weight(.semibold))
@@ -2499,8 +2547,9 @@ private struct ActivityEntryView: View {
             if hasExpandableInput, let input = entry.toolInput {
               ToolDetailView(
                 title: entry.toolName == "codemode" ? "脚本 · JavaScript" : "调用参数",
-                text: input)
-                .padding(.leading, 31)
+                text: input
+              )
+              .padding(.leading, 31)
             }
             activityContent
               .padding(.leading, 31)

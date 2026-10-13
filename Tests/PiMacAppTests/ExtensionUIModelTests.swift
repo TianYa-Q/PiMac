@@ -139,7 +139,45 @@ struct ExtensionUIModelTests {
     #expect(ui.codexAccountsUpdatedAt == Date(timeIntervalSince1970: 2))
   }
 
-  private func hostStatusEvent(updatedAt: Double, remainingPercent: Double) throws -> PiRPCClient.JSON {
+  @Test
+  func hostThreadSelectionFollowsRotationWithoutReplacingQuota() throws {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    source.selectedModelId = "openai-codex/test"
+    ui.selectSource(source)
+    ui.handle(
+      try statusEvent(activeAccount: "X", updatedAt: 1_000, remainingPercent: 10), from: source)
+    ui.handle(try hostStatusEvent(updatedAt: 9_000, remainingPercent: 40), from: source)
+
+    func publishSelection(_ name: String, at time: Double) throws {
+      let payload: PiRPCClient.JSON = [
+        "version": 2, "provider": "openai-codex", "source": "host-query",
+        "selectionOnly": true, "accounts": [], "updatedAt": 10_000,
+        "sessionSelection": [
+          "provider": "openai-codex", "activeAccount": name,
+          "updatedAt": time, "supportsAccountSwitch": true, "managesSelectedAuth": true,
+        ],
+      ]
+      ui.handle(
+        [
+          "method": "setStatus", "id": UUID().uuidString, "statusKey": "account-usage-gui",
+          "statusText": String(
+            decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self),
+        ], from: source)
+    }
+    try publishSelection("Y", at: 2_000)
+    #expect(ui.codexAccounts.first(where: \.isActive)?.name == "Y")
+    #expect(ui.codexAccounts.count == 2)
+    #expect(ui.codexAccounts.first(where: { $0.name == "X" })?.primary?.remainingPercent == 40)
+    #expect(ui.codexAccountsUpdatedAt == Date(timeIntervalSince1970: 9))
+    #expect(ui.supportsAccountSwitch(for: source))
+    try publishSelection("X", at: 1_500)
+    #expect(ui.codexAccounts.first(where: \.isActive)?.name == "Y")
+  }
+
+  private func hostStatusEvent(updatedAt: Double, remainingPercent: Double) throws
+    -> PiRPCClient.JSON
+  {
     let payload: PiRPCClient.JSON = [
       "version": 2, "provider": "openai-codex", "source": "host-query",
       "supportsAccountSwitch": false, "managesSelectedAuth": false,

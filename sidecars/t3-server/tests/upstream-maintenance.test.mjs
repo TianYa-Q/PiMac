@@ -23,7 +23,7 @@ test('every pinned upstream file is pristine and every host patch still matches'
   }
 });
 
-test('Pi lifecycle stays upstream-owned with bounded telemetry and image projection exceptions', () => {
+test('Pi lifecycle stays upstream-owned with bounded telemetry, account selection and image projection exceptions', () => {
   const adapter = 'apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts';
   const contract = 'packages/contracts/src/orchestrationV2.ts';
   for (const file of Object.keys(patches)) {
@@ -37,11 +37,15 @@ test('Pi lifecycle stays upstream-owned with bounded telemetry and image project
   assert(imageProjection, 'Image blocks must survive the native tool output projection');
   assert(imageProjection.newText.includes('? { output: resultRecord }'));
   assert(imageProjection.newText.includes(': outputText.length > 0 ? { output: outputText } : {}'));
-  assert.equal(patches[adapter].length - imagePatches.length, 6);
-  assert.equal(patches[contract].length, 1);
-  assert(patches[contract][0].newText.includes('piMetrics: Schema.optional'));
+  assert.equal(patches[adapter].length - imagePatches.length, 7);
+  const selection = patches[adapter].filter(entry => entry.newText.includes('accountSelections.record'));
+  assert.equal(selection.length, 1);
+  assert(selection[0].newText.includes('state?.providerThread.appThreadId ?? input.threadId'));
+  assert.equal(patches[contract].length, 3);
+  assert.equal(patches[contract].filter(entry => entry.newText.includes("latestMessageAt: Schema.optional")).length, 2);
+  assert(patches[contract].some(entry => entry.newText.includes('piMetrics: Schema.optional')));
   for (const entry of patches[adapter]) {
-    assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage|toolOutputImages/.test(entry.newText));
+    assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage|toolOutputImages|accountSelections\.record/.test(entry.newText));
     assert(!/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText));
   }
   const discovery = patches['apps/server/src/provider/PiProvider.ts'];

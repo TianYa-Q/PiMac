@@ -14,7 +14,7 @@ async function eventually(fn) {
 }
 async function open(directory) {
   const binary = join(directory, 'fixture-pi');
-  await writeFile(binary, `#!/bin/sh\nexec '${process.execPath}' '${new URL('./fixtures/pi.mjs', import.meta.url).pathname}' "$@"\n`);
+  await writeFile(binary, `#!/bin/sh\nif [ -f '${join(directory, 'fixture-extra-model')}' ]; then export PIMAC_FIXTURE_EXTRA_MODEL=1; fi\nexec '${process.execPath}' '${new URL('./fixtures/pi.mjs', import.meta.url).pathname}' "$@"\n`);
   await chmod(binary, 0o700);
   const gateway = await createServerGateway({ token, directory, piConfig: { binaryPath: binary } });
   await new Promise(r => gateway.server.listen(0, '127.0.0.1', r));
@@ -49,6 +49,104 @@ async function open(directory) {
   return { gateway, get, ws, rpc, dispatch, create, message, snapshot, close: () => gateway.close() };
 }
 
+test('settled threads can return to active and resume the preserved Pi conversation', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-settlement-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const threadId = await f.create();
+  await f.dispatch(f.message(threadId, 'before settlement'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
+  const projection = await f.snapshot(threadId);
+  const lastMessageAt = [
+    ...projection.messages.map(message => message.createdAt),
+    ...projection.visibleTurnItems.map(row => row.item)
+      .filter(item => ['user_message', 'assistant_message', 'reasoning', 'compaction'].includes(item.type))
+      .map(item => item.startedAt ?? item.updatedAt),
+  ].sort().at(-1);
+  assert(projection.visibleTurnItems.some(row => row.item.type === 'assistant_message'));
+  const shellRow = async () => (await f.get('/api/orchestration/shell')).threads.find(row => row.id === threadId);
+  assert.equal((await shellRow()).latestMessageAt, lastMessageAt);
+  await f.dispatch({ type: 'thread.settle', threadId });
+  assert.equal((await f.snapshot(threadId)).thread.settledOverride, 'settled');
+  const settledRow = await shellRow();
+  assert.equal(settledRow.latestMessageAt, lastMessageAt);
+  assert.notEqual(settledRow.latestMessageAt, settledRow.settledAt);
+  await f.dispatch({ type: 'thread.unsettle', threadId, reason: 'user' });
+  const reopened = (await f.snapshot(threadId)).thread;
+  assert.equal(reopened.settledOverride, 'active');
+  assert.equal(reopened.settledAt, null);
+  assert.equal((await shellRow()).latestMessageAt, lastMessageAt);
+  await f.dispatch(f.message(threadId, 'after settlement'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.filter(r => r.status === 'completed').length === 2);
+  const records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert(records.some(r => r.command === 'switch_session'));
+});
+
+test('parent settlement covers descendants atomically and leaves unrelated threads active', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-settlement-tree-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const parent = await f.create(), unrelated = await f.create();
+  await f.dispatch(f.message(parent, 'fork source'));
+  await eventually(async () => (await f.snapshot(parent)).runs.some(r => r.status === 'completed'));
+  const fork = async sourceThreadId => {
+    const targetThreadId = randomUUID();
+    await f.dispatch({ type: 'thread.fork', sourceThreadId, targetThreadId,
+      sourcePoint: { type: 'latest_stable' }, createdBy: 'user', creationSource: 'web' });
+    return targetThreadId;
+  };
+  const child = await fork(parent);
+  await f.dispatch(f.message(child, 'nested fork source'));
+  const childResult = await eventually(async () => {
+    const projection = await f.snapshot(child);
+    return projection.runs.some(r => ['completed', 'failed'].includes(r.status)) ? projection : null;
+  });
+  assert(childResult.runs.some(r => r.status === 'completed'), JSON.stringify(childResult.runs));
+  const grandchild = await fork(child);
+  await f.dispatch(f.message(grandchild, 'active descendant'));
+  await assert.rejects(f.dispatch({ type: 'thread.settle', threadId: parent }));
+  for (const id of [parent, child, grandchild]) {
+    assert.notEqual((await f.snapshot(id)).thread.settledOverride, 'settled');
+  }
+  await eventually(async () => (await f.snapshot(grandchild)).runs.some(r => r.status === 'completed'));
+  const command = { type: 'thread.settle', threadId: parent, commandId: randomUUID() };
+  await f.dispatch(command);
+  for (const id of [parent, child, grandchild]) {
+    assert.equal((await f.snapshot(id)).thread.settledOverride, 'settled');
+  }
+  assert.notEqual((await f.snapshot(unrelated)).thread.settledOverride, 'settled');
+  await f.dispatch(command);
+  // 恢复父会话不擅自恢复已完成的子任务。
+  await f.dispatch({ type: 'thread.unsettle', threadId: parent, reason: 'user' });
+  assert.equal((await f.snapshot(parent)).thread.settledOverride, 'active');
+  assert.equal((await f.snapshot(child)).thread.settledOverride, 'settled');
+});
+
+test('account rotation status survives native adapter and private gateway without quota queries', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-account-selection-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const first = await f.create(), second = await f.create();
+  const selection = async threadID => {
+    const response = await fetch(`http://127.0.0.1:${f.gateway.server.address().port}/internal/auth/account-status`, {
+      method: 'POST', headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+      body: JSON.stringify({ threadID, provider: 'openai', selectionOnly: true }),
+    });
+    assert.equal(response.status, 200);
+    return JSON.parse((await response.json()).payload);
+  };
+  assert.equal((await selection(first)).sessionSelection, undefined);
+  for (const [threadId, name] of [[first, 'X'], [second, 'X'], [first, 'Y']]) {
+    await f.dispatch(f.message(threadId, 'account-selection-' + name));
+    await eventually(async () => (await selection(threadId)).sessionSelection?.activeAccount === name);
+    await eventually(async () => (await f.snapshot(threadId)).runs.every(run => run.status === 'completed'));
+  }
+  assert.equal((await selection(first)).sessionSelection.activeAccount, 'Y');
+  assert.equal((await selection(second)).sessionSelection.activeAccount, 'X');
+  assert.equal((await selection(first)).selectionOnly, true);
+  assert.deepEqual((await selection(first)).accounts, []);
+});
+
 test('Pi session discovers T3 MCP scheduling tools while invalid credentials remain rejected', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-mcp-scheduling-'));
   const f = await open(directory);
@@ -73,6 +171,55 @@ test('Pi session discovers T3 MCP scheduling tools while invalid credentials rem
   assert(task, 'schedule_task must persist a real task through the official scheduler');
   assert.equal(task.threadId, threadId);
   assert(task.nextRunAt);
+});
+
+test('MCP capabilities and delegation are locked to the running parent model', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-model-lock-'));
+  await writeFile(join(directory, 'fixture-extra-model'), 'advertise a forbidden model');
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const threadId = await f.create();
+  await f.gateway.official.management.modelCatalog();
+  const { providers } = await f.rpc('server.getConfig');
+  assert(providers.find(provider => provider.instanceId === 'pi').models.some(model => model.slug === 'test/fallback'));
+  await f.dispatch(f.message(threadId, 'mcp-model-lock'));
+  const projection = await eventually(async () => {
+    const p = await f.snapshot(threadId);
+    const items = p.visibleTurnItems.map(row => row.item);
+    if (items.some(item => item.text?.includes('"modelLock":true'))) return p;
+    if (p.runs.some(run => ['completed', 'failed'].includes(run.status))) {
+      assert.fail(JSON.stringify({ runs: p.runs, items }));
+    }
+    return null;
+  });
+  const report = JSON.parse(projection.visibleTurnItems.map(row => row.item)
+    .find(item => item.text?.includes('"modelLock":true')).text);
+  const decode = result => JSON.parse(result.content.find(block => block.type === 'text').text);
+  assert(!report.capabilities.isError);
+  const caps = decode(report.capabilities);
+  assert.equal(caps.inheritedModel, 'test/model');
+  assert.equal(caps.providers.length, 1);
+  assert.equal(caps.providers[0].providerInstanceId, 'pi');
+  assert.deepEqual(caps.providers[0].models.map(model => model.id), ['test/model']);
+  assert.equal(caps.providers[0].canRunCrossProviderChildTask, false);
+  for (const result of report.rejected) {
+    assert.equal(result.isError, true);
+    assert.match(JSON.stringify(result.content), /model fallback is not allowed/);
+  }
+  for (const result of report.accepted) {
+    assert(!result.isError, JSON.stringify(result));
+    assert.equal(decode(result).model, 'test/model');
+    assert.equal(decode(result).providerInstanceId, 'pi');
+  }
+  assert.equal(projection.subagents.length, 2, 'Rejected overrides must not create child tasks');
+  const children = await eventually(async () => {
+    const p = await f.snapshot(threadId);
+    return p.subagents.length === 2 && p.subagents.every(child => child.childThreadId !== null)
+      ? p.subagents : null;
+  });
+  for (const child of children) {
+    assert.equal((await f.snapshot(encodeURIComponent(child.childThreadId))).thread.modelSelection.model, 'test/model');
+  }
 });
 
 test('server names a desktop draft on its first mobile message without overwriting custom titles', async t => {
