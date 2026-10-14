@@ -12,6 +12,20 @@ struct AccountSwitchCommandTests {
     #expect(try T3DesktopClient.sessionControlText(operation: "manage-accounts") == "/accounts")
   }
 
+  @Test func managementSteersWithoutInterruptingWhileOtherControlsKeepTheirPolicy() throws {
+    for operation in ["manage-accounts", "compact", "switch-account"] {
+      let command = try T3DesktopClient.sessionControlCommand(
+        threadID: "thread", messageID: "message", operation: operation,
+        accountName: operation == "switch-account" ? "work" : nil)
+      #expect(command["threadId"] as? String == "thread")
+      #expect(command["messageId"] as? String == "message")
+      #expect(command["text"] as? String == (operation == "manage-accounts" ? "/accounts" :
+        operation == "compact" ? "/compact" : "/accounts switch work"))
+      #expect(command["deliveryIntent"] as? String == (operation == "manage-accounts" ? "steer" : nil))
+      #expect((command["dispatchMode"] as? [String: String])?["type"] == "start_immediately")
+    }
+  }
+
   @Test func invalidOrSyntheticAccountsCannotBecomeCommands() {
     for name in [
       "", "Pi 已保存授权", "a b", "a\n/stop", "a\n", "a\r", "a/b", String(repeating: "a", count: 65),

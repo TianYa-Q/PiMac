@@ -19,7 +19,7 @@ test('wildcard validation works offline but rejects malformed ports and arbitrar
 test('one wildcard listener serves current destinations and rejects spoofed Host headers', { timeout: 5000 }, async t => {
   const upstream = http.createServer((req, res) => res.end(req.headers.host));
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
-  const lan = createLANListener({ localURL: `http://127.0.0.1:${upstream.address().port}`, allowed: () => true });
+  const lan = createLANListener({ localURL: `http://127.0.0.1:${upstream.address().port}` });
   t.after(async () => {
     await lan.close();
     upstream.closeAllConnections();

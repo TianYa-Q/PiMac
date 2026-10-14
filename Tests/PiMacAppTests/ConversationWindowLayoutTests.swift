@@ -57,6 +57,59 @@ struct ConversationWindowLayoutTests {
     #expect(range == 1..<2)
   }
 
+  @Test func pixelScrollingOnlyPublishesWindowTransitions() {
+    let layout = ConversationWindowLayout(ids: (0..<10_000).map(String.init), heights: [:])
+    var published = CGRect(x: 0, y: 1_500_000, width: 800, height: 900)
+    var updates = 0
+    for delta in 1...1000 {
+      let current = CGRect(x: 0, y: 1_500_000 + delta, width: 800, height: 900)
+      if layout.requiresWindowUpdate(from: published, to: current) {
+        published = current
+        updates += 1
+      }
+      // 未发布的像素移动不能漏掉任何需要挂载的消息。
+      let mounted = layout.window(viewport: published)
+      #expect(mounted.contains(layout.index(at: current.minY)))
+      #expect(mounted.contains(layout.index(at: current.maxY)))
+    }
+    #expect(updates > 0)
+    #expect(updates < 10)
+  }
+
+  @Test func rowBoundaryJitterStaysInsideThePrefetchedWindow() {
+    let layout = ConversationWindowLayout(ids: (0..<1000).map(String.init), heights: [:])
+    let previous = CGRect(x: 0, y: 10_000, width: 800, height: 900)
+    for delta in [-100, -1, 1, 100] {
+      #expect(!layout.requiresWindowUpdate(from: previous, to: previous.offsetBy(dx: 0, dy: CGFloat(delta))))
+    }
+    #expect(layout.requiresWindowUpdate(from: previous, to: previous.offsetBy(dx: 0, dy: 2000)))
+  }
+
+  @Test func viewportInitializationResizeAndLargeJumpsAlwaysPublish() {
+    let layout = ConversationWindowLayout(ids: (0..<100).map(String.init), heights: [:])
+    let rect = CGRect(x: 0, y: 4000, width: 800, height: 900)
+    #expect(layout.requiresWindowUpdate(from: nil, to: rect))
+    #expect(!layout.requiresWindowUpdate(from: rect, to: rect))
+    #expect(layout.requiresWindowUpdate(from: rect, to: rect.offsetBy(dx: 0, dy: 10_000)))
+    var resized = rect
+    resized.size.width = 600
+    #expect(layout.window(viewport: rect) == layout.window(viewport: resized))
+    #expect(layout.requiresWindowUpdate(from: rect, to: resized))
+    resized = rect
+    resized.size.height += 1
+    #expect(layout.requiresWindowUpdate(from: rect, to: resized))
+  }
+
+  @Test func scrollingInsideTallTurnDoesNotRebuildMessageViews() {
+    let layout = ConversationWindowLayout(ids: ["a", "b", "c"], heights: ["b": 20_000])
+    let before = CGRect(x: 0, y: 10_000, width: 800, height: 800)
+    let after = before.offsetBy(dx: 0, dy: 2000)
+    #expect(!layout.requiresWindowUpdate(from: before, to: after))
+    let updated = ConversationWindowLayout(ids: ["a", "b", "c"], heights: ["a": 500, "b": 20_000])
+    let correction = layout.anchorCorrection(to: updated, viewportY: after.minY)
+    #expect(after.minY + correction - updated.offsets[1] == after.minY - layout.offsets[1])
+  }
+
   @Test func windowIsClampedDuringOverscrollAndResize() {
     let layout = ConversationWindowLayout(ids: ["a", "b"], heights: [:])
     #expect(layout.window(viewport: CGRect(x: 0, y: -500, width: 800, height: 2000)) == 0..<2)

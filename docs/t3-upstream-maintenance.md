@@ -33,9 +33,9 @@ speed instead of depending on the deleted enhancements. If upstream supplies
 `turnTokenUsage`, the desktop can use its official turn timestamps; it does not
 inject missing usage.
 
-Upstream now authorizes RPC scopes in connection-scoped group middleware. The
-host's deny-by-default RPC allowlist and credential-free diagnostics supplement
-that official middleware, including streaming methods. The retired per-handler
+Upstream authorizes RPC scopes in connection-scoped group middleware. PiMac no
+longer adds an RPC/HTTP endpoint allowlist or replaces capability declarations;
+credential-free diagnostics observe the official result, including streams. The retired per-handler
 scope wrappers in `ws.ts` are no longer patched. Dynamic device-list checks and
 HTTP authorization remain upstream-owned.
 
@@ -47,7 +47,7 @@ remain official.
 ## Remaining compatibility / host patches
 
 - Pi-only driver exposure; disabled native terminal, search and unsupported SDKs.
-- Native supervisor management, loopback/tunnel authentication policy, browser
+- Native supervisor management, loopback/tunnel transport isolation, browser
   authorization, private readiness and credential-safe subprocess environment.
 - Managed tunnel health/publication diagnostics, not a second tunnel runtime.
 - Desktop model visibility/preferences and config-change notifications.
@@ -92,5 +92,5 @@ including modules not reached by the current bundle, and explicitly validates
 the bounded telemetry/image/discovery exceptions while keeping Pi transport,
 driver and lifecycle changes forbidden. Protocol fixtures exercise
 native runs, persistence/restart, scheduler, attachments, model selection, Git,
-DPoP, host-policy denial and read-only scopes. They do not establish real-model,
+DPoP, official scope denial and read-only scopes. They do not establish real-model,
 public tunnel or App Store acceptance.

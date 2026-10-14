@@ -23,15 +23,14 @@ test('RPC arrival, queue mode, success and rejection are recorded without prompt
   const failure = { _tag: 'OrchestratorDispatchError', message: 'SECRET TOKEN AND PROMPT', cause: { _tag: 'ProviderError', message: 'PRIVATE' } };
   const result = await Effect.runPromise(observeNativeRpc('orchestration.dispatchCommand', Effect.fail(failure), attributes).pipe(Effect.result));
   assert.equal(result._tag, 'Failure');
-  await Effect.runPromise(observeNativeRpc('orchestration.dispatchCommand', Effect.fail({ _tag: 'EnvironmentAuthorizationError' }), attributes, { allowed: false }).pipe(Effect.result));
-  await Effect.runPromise(observeNativeRpc('orchestration.dispatchCommand', Effect.fail({ _tag: 'EnvironmentAuthorizationError' }), attributes, { allowed: true, authorized: false }).pipe(Effect.result));
+  await Effect.runPromise(observeNativeRpc('orchestration.dispatchCommand', Effect.fail({ _tag: 'EnvironmentAuthorizationError' }), attributes, { authorized: false }).pipe(Effect.result));
   const log = await readFile(join(directory, 'connection-diagnostics.log'), 'utf8');
   assert.match(log, /rpc-received/);
   assert.match(log, /rpc-succeeded/);
   assert.match(log, /rpc-failed/);
   assert.match(log, /queue_after_active/);
   assert.match(log, /OrchestratorDispatchError\/ProviderError/);
-  assert.match(log, /host-policy/);
+  assert.doesNotMatch(log, /host-policy/);
   assert.match(log, /missing-scope/);
   assert.doesNotMatch(log, /PRIVATE|SECRET|TOKEN|PROMPT/);
 });

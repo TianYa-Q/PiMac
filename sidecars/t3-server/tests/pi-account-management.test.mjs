@@ -109,7 +109,32 @@ test('native duplicates preserve managed visibility and provider isolation', asy
   f.write('openai-chatgpt-account-usage.json', { hiddenAccounts: ['X'] });
   f.write('codex-accounts.json', { version: 1, accounts: { Legacy: f.credential } });
   const result = await f.manager.accountStatus({ provider: 'openai' });
-  assert.deepEqual(result.accounts.map(r => r.name), ['X']); assert.equal(result.accounts[0].hidden, true); assert.equal(f.calls(), 0);
+  assert.deepEqual(result.accounts, []); assert.equal(f.calls(), 0);
+});
+test('visibility filters cached responses immediately and restores accounts on refresh', async t => {
+  const f = fixture(t);
+  f.write('openai-chatgpt-accounts.json', { version: 1, accounts: {
+    X: f.credential, Y: { ...f.credential, accountId: 'another-id' },
+  } });
+  const first = await f.manager.accountStatus({ provider: 'openai' });
+  assert.deepEqual(first.accounts.map(row => row.name), ['X', 'Y']);
+  const calls = f.calls();
+  f.write('openai-chatgpt-account-usage.json', { hiddenAccounts: ['X'] });
+  const cached = await f.manager.accountStatus({ provider: 'openai' });
+  assert.equal(cached.cached, true);
+  assert.deepEqual(cached.accounts.map(row => row.name), ['Y']);
+  assert.equal(f.calls(), calls);
+  const refreshed = await f.manager.accountStatus({ provider: 'openai', force: true });
+  assert.deepEqual(refreshed.accounts.map(row => row.name), ['Y']);
+  assert.equal(f.calls(), calls + 2);
+  f.write('openai-chatgpt-account-usage.json', { hiddenAccounts: [] });
+  assert.deepEqual((await f.manager.accountStatus({ provider: 'openai', force: true })).accounts.map(row => row.name), ['X', 'Y']);
+});
+test('corrupt visibility settings cannot silently expose cached accounts', async t => {
+  const f = fixture(t);
+  await f.manager.accountStatus({ provider: 'openai' });
+  f.write('openai-chatgpt-account-usage.json', { hiddenAccounts: 'invalid' });
+  await assert.rejects(f.manager.accountStatus({ provider: 'openai' }), /显示设置格式无效/);
 });
 test('TTL, force and concurrent refresh coalescing', async t => {
   const f = fixture(t);
@@ -136,7 +161,7 @@ test('hidden managed accounts do not trigger quota requests', async t => {
   f.write('openai-chatgpt-accounts.json', { version: 1, accounts: { work: f.credential } });
   f.write('openai-chatgpt-account-usage.json', { hiddenAccounts: ['work'] });
   const result = await f.manager.accountStatus({ provider: 'openai' });
-  assert.equal(result.accounts[0].hidden, true); assert.equal(f.calls(), 0);
+  assert.deepEqual(result.accounts, []); assert.equal(f.calls(), 0);
 });
 test('HTTP errors and invalid response shapes never expose provider body', async t => {
   for (const response of [() => new Response('secret-response', { status: 401 }), () => new Response('{"secret":"private"}')]) {
@@ -292,7 +317,7 @@ test('old quota cannot transfer to a replacement identity, hidden or removed acc
   await f.manager.accountStatus({ provider: 'openai', force: true });
   f.write('openai-chatgpt-account-usage.json', { hiddenAccounts: ['Pi 已保存授权'] });
   const hidden = await f.manager.accountStatus({ provider: 'openai', force: true });
-  assert.equal(hidden.accounts[0].primary, undefined);
+  assert.deepEqual(hidden.accounts, []);
   f.write('auth.json', {});
   assert.deepEqual((await f.manager.accountStatus({ provider: 'openai', force: true })).accounts, []);
 });

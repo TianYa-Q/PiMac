@@ -24,14 +24,6 @@ private func isWhitespace(in text: NSString, before location: Int) -> Bool {
   return CharacterSet.whitespacesAndNewlines.contains(scalar)
 }
 
-private struct ConversationBottomPreferenceKey: PreferenceKey {
-  static var defaultValue: CGFloat = 0
-
-  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-    value = nextValue()
-  }
-}
-
 private enum ConversationScrollMode {
   case pinnedToBottom
   case manual
@@ -45,98 +37,6 @@ private enum MainPage {
 private enum ConversationLayout {
   static let contentInset: CGFloat = 20
   static let bottomAnchorID = "conversation-bottom"
-}
-
-/// SwiftUI does not expose scroll phases on macOS 14. Observe AppKit's live-scroll
-/// notifications so content growth is never mistaken for a user's scroll gesture.
-private struct ConversationScrollObserver: NSViewRepresentable {
-  let onUserScroll: (_ isAtBottom: Bool, _ isUserGesture: Bool) -> Void
-
-  func makeCoordinator() -> Coordinator {
-    Coordinator(onUserScroll: onUserScroll)
-  }
-
-  func makeNSView(context: Context) -> NSView {
-    let view = NSView(frame: .zero)
-    DispatchQueue.main.async { context.coordinator.attach(to: view.enclosingScrollView) }
-    return view
-  }
-
-  func updateNSView(_ view: NSView, context: Context) {
-    context.coordinator.onUserScroll = onUserScroll
-    DispatchQueue.main.async { context.coordinator.attach(to: view.enclosingScrollView) }
-  }
-
-  final class Coordinator {
-    var onUserScroll: (Bool, Bool) -> Void
-    private weak var scrollView: NSScrollView?
-    private var observers: [NSObjectProtocol] = []
-    private var wheelMonitor: Any?
-
-    init(onUserScroll: @escaping (Bool, Bool) -> Void) {
-      self.onUserScroll = onUserScroll
-    }
-
-    deinit {
-      observers.forEach(NotificationCenter.default.removeObserver)
-      if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
-    }
-
-    func attach(to scrollView: NSScrollView?) {
-      guard let scrollView, self.scrollView !== scrollView else { return }
-      observers.forEach(NotificationCenter.default.removeObserver)
-      observers.removeAll()
-      self.scrollView = scrollView
-      if let wheelMonitor { NSEvent.removeMonitor(wheelMonitor) }
-      // 真实滚轮输入优先于首次/异步布局的底部定位；普通布局通知仍不代表用户意图。
-      wheelMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) {
-        [weak self, weak scrollView] event in
-        guard let self, let scrollView, event.window === scrollView.window,
-          scrollView.bounds.contains(scrollView.convert(event.locationInWindow, from: nil)),
-          event.scrollingDeltaY != 0
-        else { return event }
-        self.onUserScroll(false, true)
-        return event
-      }
-      // 对话底部是一个真实的内容边界，不允许橡皮筋效果把最后一条消息
-      // 临时拖到固定留白之外。
-      scrollView.verticalScrollElasticity = .none
-
-      observers.append(
-        NotificationCenter.default.addObserver(
-          forName: NSScrollView.willStartLiveScrollNotification,
-          object: scrollView,
-          queue: .main
-        ) { [weak self] notification in
-          self?.onUserScroll(false, notification.userInfo?["userGesture"] as? Bool == true)
-        })
-      for name in [
-        NSScrollView.didLiveScrollNotification,
-        NSScrollView.didEndLiveScrollNotification,
-      ] {
-        observers.append(
-          NotificationCenter.default.addObserver(
-            forName: name,
-            object: scrollView,
-            queue: .main
-          ) { [weak self, weak scrollView] _ in
-            guard let self, let scrollView else { return }
-            self.onUserScroll(Self.isAtBottom(scrollView), false)
-          })
-      }
-    }
-
-    private static func isAtBottom(_ scrollView: NSScrollView) -> Bool {
-      guard let documentView = scrollView.documentView else { return true }
-      let visible = scrollView.contentView.documentVisibleRect
-      let document = documentView.bounds
-      let tolerance: CGFloat = 2
-      if scrollView.contentView.isFlipped {
-        return visible.maxY >= document.maxY - tolerance
-      }
-      return visible.minY <= document.minY + tolerance
-    }
-  }
 }
 
 private struct SessionRelativeTime: View {
@@ -244,6 +144,14 @@ struct ContentView: View {
       ZStack {
         VStack(spacing: 0) {
           conversation
+            .environment(\.messageQuoteAction, { quote in
+              guard let result = MessageQuote.inserting(
+                quote, into: app.composerText, selection: composerSelection
+              ) else { return }
+              app.composerText = result.text
+              composerSelection = result.selection
+              composerFocused = true
+            })
           Divider()
           composer
         }
@@ -419,7 +327,6 @@ struct ContentView: View {
       autoScrollScheduled = false
       autoScrollGeneration += 1
       initialSessionScrollPending = true
-      conversationBottomIsVisible = false
       previewedAttachment = nil
     }
   }
@@ -1024,6 +931,14 @@ struct ContentView: View {
       }
       .contentShape(RoundedRectangle(cornerRadius: 9))
       .contextMenu {
+        if let threadID = AppModel.threadID(from: session.path) {
+          Button("复制 Thread ID", systemImage: "doc.on.doc") {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(threadID, forType: .string)
+          }
+          Divider()
+        }
         if let parentID {
           Button("打开父会话", systemImage: "arrow.turn.up.left") {
             let path = "t3:\(parentID)"
@@ -1206,19 +1121,35 @@ struct ContentView: View {
   }
 
   private var conversation: some View {
-    let turns = app.conversationTurns
+    let children = app.threadID.map {
+      ConversationSubagent.children(parentID: $0, threads: workspace.server.threads)
+    } ?? []
+    let rows = ConversationTimelineRow.build(messages: app.messages, children: children)
+    let activeTurnID = rows.reversed().compactMap { row -> String? in
+      if case .turn(let turn) = row { return turn.id }
+      return nil
+    }.first
 
     return GeometryReader { viewport in
       ScrollViewReader { proxy in
         ScrollView {
           VStack(alignment: .leading, spacing: 14) {
             VirtualConversationStack(
-              ids: turns.map(\.id),
+              ids: rows.map(\.id),
               pinnedToBottom: conversationScrollMode == .pinnedToBottom
             ) { index in
-              conversationTurnView(
-                turns[index], isActive: app.isStreaming && index == turns.count - 1
-              )
+              switch rows[index] {
+              case .turn(let turn):
+                conversationTurnView(
+                  turn, isActive: app.isStreaming && turn.id == activeTurnID
+                )
+              case .subagents(let tasks):
+                ConversationSubagentsView(tasks: tasks) { id in
+                  let path = "t3:\(id)"
+                  guard let projectURL = workspace.project(forSessionPath: path)?.url else { return }
+                  workspace.openSession(path: path, in: projectURL)
+                }
+              }
             }
             // Height caches and viewport coordinates must never leak across sessions.
             .id("\(tabID)-\(app.currentSessionPath)")
@@ -1231,28 +1162,28 @@ struct ContentView: View {
             Color.clear
               .frame(height: ConversationLayout.contentInset)
               .id(ConversationLayout.bottomAnchorID)
-              .background {
-                GeometryReader { marker in
-                  Color.clear.preference(
-                    key: ConversationBottomPreferenceKey.self,
-                    value: marker.frame(in: .named("conversation-scroll")).maxY
-                  )
-                }
-              }
           }
           .frame(maxWidth: .infinity, alignment: .leading)
           .padding(.horizontal, ConversationLayout.contentInset)
           .padding(.top, ConversationLayout.contentInset)
           .background {
-            ConversationScrollObserver(onUserScroll: updateScrollModeAfterUserScroll)
-              .frame(width: 0, height: 0)
+            ConversationScrollObserver(
+              onUserScroll: updateScrollModeAfterUserScroll,
+              onBottomVisibilityChange: { visible in
+                if conversationBottomIsVisible != visible { conversationBottomIsVisible = visible }
+                // 页面状态只在可见性翻转时写入；文档异步增高仍可请求一次底部校正。
+                if !visible { scheduleAutoScroll(proxy) }
+              }
+            )
+            // 背景覆盖文档以保证原生观察器进入滚动层级；零尺寸背景可能没有
+            // enclosingScrollView（长会话的原生回归已复现），导致整套监听失效。
+            .allowsHitTesting(false)
           }
         }
         .environment(\.htmlRenderViewportHeight, viewport.size.height)
-        .coordinateSpace(name: "conversation-scroll")
         .scrollIndicators(.hidden)
         .overlay(alignment: .bottomTrailing) {
-          if conversationScrollMode == .manual && !conversationBottomIsVisible && !turns.isEmpty {
+          if conversationScrollMode == .manual && !conversationBottomIsVisible && !rows.isEmpty {
             Button {
               initialScrollGeneration += 1
               initialSessionScrollPending = false
@@ -1281,20 +1212,7 @@ struct ContentView: View {
         .onAppear {
           // 会话内容通过 RPC 异步到达；保持首次滚动待处理，直到消息完成首轮布局。
           initialSessionScrollPending = true
-          conversationBottomIsVisible = false
           scheduleInitialSessionScroll(proxy)
-        }
-        .onPreferenceChange(ConversationBottomPreferenceKey.self) { bottomY in
-          guard bottomY.isFinite, bottomY > 0 else { return }
-          conversationBottomIsVisible = bottomY <= viewport.size.height + 1
-          if bottomY <= viewport.size.height + 1 {
-            // 手动滚回底部后，重新进入固定底部模式。
-            conversationScrollMode = .pinnedToBottom
-          }
-          // Follow actual layout changes rather than speculative repeated corrections.
-          if !conversationBottomIsVisible && !initialSessionScrollPending {
-            scheduleAutoScroll(proxy)
-          }
         }
         .onChange(of: app.messages.count) {
           if initialSessionScrollPending {
@@ -1319,7 +1237,6 @@ struct ContentView: View {
           autoScrollScheduled = false
           conversationScrollMode = .pinnedToBottom
           initialSessionScrollPending = true
-          conversationBottomIsVisible = false
           scheduleInitialSessionScroll(proxy)
         }
         .onChange(of: tabID) {
@@ -1330,7 +1247,6 @@ struct ContentView: View {
           autoScrollScheduled = false
           conversationScrollMode = .pinnedToBottom
           initialSessionScrollPending = true
-          conversationBottomIsVisible = false
           scheduleInitialSessionScroll(proxy)
         }
       }
@@ -1379,7 +1295,7 @@ struct ContentView: View {
     // 等布局稳定后再执行最终定位；若期间消息继续到达，旧任务会自动失效。
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
       guard generation == initialScrollGeneration, !app.messages.isEmpty else { return }
-      // 会话切换时 preference 可能仍短暂携带上一个会话的“底部可见”值，不能用它
+      // 会话切换时位置报告可能仍短暂携带上一个会话的“底部可见”值，不能用它
       // 决定是否定位。首次稳定布局后始终滚到新会话底部；每次切换只执行一次。
       proxy.scrollTo(ConversationLayout.bottomAnchorID, anchor: .bottom)
       conversationScrollMode = .pinnedToBottom
@@ -1415,12 +1331,15 @@ struct ContentView: View {
     guard !initialSessionScrollPending || isUserGesture else { return }
 
     if isAtBottom {
-      // AppKit's end-of-scroll notification can arrive after the geometry preference update.
-      // Re-pin directly so returning to the bottom always resumes following new output.
-      conversationScrollMode = .pinnedToBottom
+      // 返回底部或边界手势结束时恢复跟随；可见性由同一观察器的位置报告更新。
+      if conversationScrollMode != .pinnedToBottom { conversationScrollMode = .pinnedToBottom }
       return
     }
 
+    // 一个手势会包含很多滚轮/惯性通知；仅在首次进入手动模式时取消任务。
+    // 重复递增 generation 会让整个会话视图在每次边界输入时重新求值。
+    guard conversationScrollMode != .manual || autoScrollScheduled || initialSessionScrollPending
+    else { return }
     conversationScrollMode = .manual
     autoScrollGeneration += 1
     autoScrollScheduled = false
@@ -2782,6 +2701,8 @@ private struct ChatEntryView: View, Equatable {
   let onEdit: (() -> Void)?
   @State private var expanded: Bool
   @State private var copied = false
+  @State private var selectedQuote = ""
+  @Environment(\.messageQuoteAction) private var quoteAction
 
   static func == (lhs: Self, rhs: Self) -> Bool {
     // The edit closure is recreated whenever ContentView updates, but its behavior is tied to
@@ -2824,6 +2745,20 @@ private struct ChatEntryView: View, Equatable {
               .help(timestamp.formatted(date: .complete, time: .standard))
           }
           if entry.kind == .assistant, !entry.text.isEmpty {
+            if let quoteAction {
+              Button {
+                quoteAction(selectedQuote)
+              } label: {
+                Label("引用", systemImage: "text.quote")
+                  .font(.caption)
+                  .contentShape(Rectangle())
+              }
+              .buttonStyle(.plain)
+              .foregroundStyle(selectedQuote.isEmpty ? Color.secondary : Color.accentColor)
+              .disabled(selectedQuote.isEmpty)
+              .help("框选回复中的文字，再点击引用到输入框")
+              .accessibilityLabel("引用所选文字")
+            }
             Button(action: copyReply) {
               Image(systemName: copied ? "checkmark" : "doc.on.doc")
             }
@@ -2856,6 +2791,11 @@ private struct ChatEntryView: View, Equatable {
           }
         } else if !entry.text.isEmpty {
           content
+            .background {
+              if entry.kind == .assistant, quoteAction != nil {
+                MessageSelectionReader { selectedQuote = $0 }
+              }
+            }
         }
       }
       .padding(12)
@@ -2954,6 +2894,9 @@ private struct MessageAttachmentsView: View {
                   .font(.caption2)
                   .foregroundStyle(.secondary)
                   .lineLimit(1)
+                  .truncationMode(.middle)
+                  // 横向滚动提供无限宽度，标题须与缩略图同宽，避免长文件名撑大图片间距。
+                  .frame(width: 118, alignment: .leading)
               }
             }
             .buttonStyle(.plain)

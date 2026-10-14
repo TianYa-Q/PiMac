@@ -57,6 +57,21 @@ struct ConversationWindowLayout {
     return first..<max(first + 1, last + 1)
   }
 
+  /// 滚动的逐像素坐标留在 AppKit 中；只有挂载范围或视口尺寸改变才更新 SwiftUI。
+  /// 否则每个滚轮事件都会重建全部历史的 offsets，并重新求值消息子树。
+  func requiresWindowUpdate(from previous: CGRect?, to current: CGRect) -> Bool {
+    guard let previous else { return true }
+    guard previous.size == current.size else { return true }
+    guard count > 0 else { return false }
+    let mounted = window(viewport: previous)
+    // 已挂载的预取区域就是缓冲区：移动一行不应立刻销毁/重建边缘消息。
+    // 只有可见区加半屏预取越过缓存边界时才重新取完整窗口，避免边界抖动。
+    let margin = max(300, current.height / 2)
+    let first = index(at: max(0, current.minY - margin))
+    let last = index(at: current.maxY + margin)
+    return !mounted.contains(first) || !mounted.contains(last)
+  }
+
   func anchorCorrection(to updated: Self, viewportY: CGFloat) -> CGFloat {
     guard count > 0, updated.count == count else { return 0 }
     let anchor = index(at: viewportY)
@@ -134,7 +149,7 @@ struct VirtualConversationStack<Row: View>: View {
     }
     .background {
       ConversationViewportReader(controller: scroll) { rect, _ in
-        if viewport != rect { viewport = rect }
+        if layout.requiresWindowUpdate(from: viewport, to: rect) { viewport = rect }
       }
     }
     .onPreferenceChange(ConversationRowHeights.self) { measured in
@@ -152,7 +167,7 @@ struct VirtualConversationStack<Row: View>: View {
           updated[id] = measurement.height
         }
       }
-      replaceHeights(updated, layout: layout, viewportY: viewport?.minY ?? 0)
+      replaceHeights(updated, layout: layout)
     }
     .onChange(of: ids) {
       let validIDs = Set(ids)
@@ -184,21 +199,24 @@ struct VirtualConversationStack<Row: View>: View {
   }
 
   private func replaceHeights(
-    _ updated: [String: CGFloat], layout: ConversationWindowLayout, viewportY: CGFloat
+    _ updated: [String: CGFloat], layout: ConversationWindowLayout
   ) {
     guard heights != updated else { return }
+    // SwiftUI 的 viewport 只记录上次窗口切换，不能用它校正阅读锚点。
+    // 高度变化时读取 AppKit 最近报告的精确位置，避免同一窗口内滚动后回跳。
+    let currentViewport = scroll.latestViewport ?? viewport
     let next = ConversationWindowLayout(ids: ids, heights: updated)
-    let correction = layout.anchorCorrection(to: next, viewportY: viewportY)
+    let correction = layout.anchorCorrection(to: next, viewportY: currentViewport?.minY ?? 0)
     // Capture the reading position before changing document height. In bottom-follow
     // mode the parent owns scrolling; while reading history only preceding rows matter.
     if !pinnedToBottom {
       // Also restore a zero-delta anchor: live-tail growth below the viewport
       // must not let SwiftUI's default bottom anchor move the reader.
       scroll.preservePosition(adding: correction)
-      if var rect = viewport {
-        rect.origin.y += correction
-        viewport = rect
-      }
+    }
+    if var rect = currentViewport {
+      if !pinnedToBottom { rect.origin.y += correction }
+      viewport = rect
     }
     heights = updated
   }
@@ -206,6 +224,7 @@ struct VirtualConversationStack<Row: View>: View {
 
 private final class ConversationViewportController {
   weak var view: NSView?
+  var latestViewport: CGRect?
   private var pendingOrigin: NSPoint?
   private var pendingUserGeneration = 0
   var userGeneration = 0
@@ -213,6 +232,12 @@ private final class ConversationViewportController {
 
   func preservePosition(adding delta: CGFloat) {
     guard let scrollView = view?.enclosingScrollView else { return }
+    // 同一轮布局可能连续测得多行高度；恢复前也同步预期坐标，
+    // 让后续校正以已经累计的锚点为准，而不是再次使用旧位置。
+    if var rect = latestViewport {
+      rect.origin.y += delta
+      latestViewport = rect
+    }
     if pendingOrigin != nil, pendingUserGeneration == userGeneration {
       pendingOrigin!.y += delta
       return
@@ -320,7 +345,9 @@ private struct ConversationViewportReader: NSViewRepresentable {
         let view, let clip = view.enclosingScrollView?.contentView,
         view.bounds.width > 0, clip.bounds.height > 0
       else { return }
-      onChange?(view.convert(clip.bounds, from: clip), view.bounds.width)
+      let rect = view.convert(clip.bounds, from: clip)
+      controller?.latestViewport = rect
+      onChange?(rect, view.bounds.width)
     }
   }
 }

@@ -15,7 +15,7 @@ export function proxyHeaders(headers, websocket = false) {
   return result;
 }
 
-export function createLANListener({ localURL, allowed }) {
+export function createLANListener({ localURL }) {
   let active = null, closed = false, pending = Promise.resolve(), closing;
   const status = () => ({ endpoint: active?.endpoint ?? null });
   const closeListener = listener => {
@@ -33,8 +33,8 @@ export function createLANListener({ localURL, allowed }) {
       const authority = `${local}:${endpoint.port}`;
       return !closed && (isPrivateAddress(peer) || isLoopbackPeer(peer)) &&
         req.headers.host === authority && req.url?.startsWith('/') && !req.url.startsWith('//') &&
-        !['/api/connect/preferences', '/api/connect/unlink'].includes(req.url.split('?')[0]) &&
-        allowed(req.method, req.url);
+        // 仅隔离 PiMac 私有监督器；官方接口直接转发，由 T3 决定访问权限。
+        !req.url.startsWith('/internal/');
     };
     const server = http.createServer((req, res) => {
       if (!accept(req)) { res.writeHead(403); res.end(); req.resume(); return; }

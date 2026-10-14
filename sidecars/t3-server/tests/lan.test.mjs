@@ -56,12 +56,19 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
     headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401);
   assert.equal((await request(base, '/.well-known/t3/environment', { headers: { host: 'attacker.invalid' } })).status, 403);
   assert.equal((await request(base, '/.well-known/t3/environment', { headers: { origin: base } })).status, 403);
-  for (const path of ['/internal/auth/desktop-session', '/internal/auth/pairing', '/api/connect/unlink', '/api/connect/preferences']) {
+  for (const path of ['/internal/auth/desktop-session', '/internal/auth/pairing']) {
     assert.equal((await request(base, path, { method: 'POST', body: '{}', headers: {
       authorization: 'Bearer ' + 'ab'.repeat(32), 'content-type': 'application/json',
-      'x-pimac-control': gateway.official.broker.controlToken,
+      'x-pimac-control': 'spoofed-supervisor-control',
     } })).status, 403);
   }
+  for (const path of ['/api/connect/unlink', '/api/connect/preferences']) {
+    const response = await request(base, path, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
+    assert.equal(response.status, 401, 'official auth must reject missing credentials');
+  }
+  const descriptor = JSON.parse((await request(base, '/.well-known/t3/environment')).body);
+  assert.equal(descriptor.capabilities.pullRequests, true);
+  assert.equal(descriptor.capabilities.repositoryIdentity, true);
   const { privateKey, publicKey } = await generateKeyPair('ES256', { extractable: true });
   const jwk = await exportJWK(publicKey);
   const proof = (route, token, scheme = 'http', method = 'POST') => new SignJWT({
@@ -88,7 +95,7 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
   const ticket = async () => { const r = await mint(); assert.equal(r.status, 200, r.body); return JSON.parse(r.body).ticket; };
   const wsURL = secret => base.replace('http:', 'ws:') + '/ws?orchestrationProtocol=2&wsTicket=' + secret;
   await call(wsURL(await ticket()), 'server.probe', {});
-  // Earlier activity is HTTP (not WS): verify the LAN allowlist reaches upstream
+  // Earlier activity is HTTP (not WS): verify the LAN transport reaches upstream
   // handlers, while DPoP authentication and cursor validation remain enforced.
   const projectId = randomUUID();
   await call(wsURL(await ticket()), 'projects.mutate', {
@@ -117,8 +124,9 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
   for (const suffix of ['bounded', 'history?cursor=invalid']) {
     assert.equal((await readThread(suffix, false)).status, 401);
   }
-  await assert.rejects(call(wsURL(await ticket()), 'server.getProcessDiagnostics', {}),
-    error => error._tag === 'EnvironmentAuthorizationError');
+  await call(wsURL(await ticket()), 'server.getProcessDiagnostics', {});
+  const prs = await call(wsURL(await ticket()), 'pullRequests.list', { state: 'open', involvement: 'all', filters: {}, limit: 20 });
+  assert(Array.isArray(prs.entries));
   const denied = new WebSocket(wsURL(await ticket()), { origin: 'http://attacker.invalid' });
   denied.on('error', () => {});
   await new Promise((resolve, reject) => {

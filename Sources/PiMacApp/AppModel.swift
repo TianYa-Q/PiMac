@@ -128,7 +128,11 @@ final class AppModel: ObservableObject {
   @Published var accountQuotaMessage = ""
   @Published private(set) var isRefreshingAccountQuota = false
   var canManageAccounts: Bool {
-    accountUsageProvider != nil && isProcessRunning && canRestartSafely && threadID != nil
+    AccountManagementAccess.canOpen(
+      hasAvailableSession: accountUsageProvider != nil && isProcessRunning,
+      isLoadingConfiguration: isLoadingConfiguration,
+      isAlreadyPresenting: startingAccountManagement || isManagingAccounts
+        || extensionUI?.hasPendingDialog(for: self) == true)
   }
   var supportsAccountSwitch: Bool {
     isProcessRunning && (accountUsageProvider == .chatGPT || accountUsageProvider == .legacyCodex)

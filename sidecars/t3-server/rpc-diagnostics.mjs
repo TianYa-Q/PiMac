@@ -18,8 +18,7 @@ export function observeNativeRpc(method, effect, attributes = {}, access = {}) {
   };
   return Effect.sync(() => {
     record('rpc-received');
-    if (access.allowed === false) record('rpc-denied', { reason: 'host-policy' });
-    else if (access.authorized === false) record('rpc-denied', { reason: 'missing-scope' });
+    if (access.authorized === false) record('rpc-denied', { reason: 'missing-scope' });
   }).pipe(
     Effect.andThen(effect),
     Effect.tap(() => Effect.sync(() => record('rpc-succeeded'))),

@@ -12,14 +12,14 @@ struct AccountQuotaPresentationTests {
       primary: nil, secondary: nil, resetCredits: nil, error: error, capturedAt: nil)
   }
 
-  @Test func allAccountsRemainVisibleWithActiveFirstThenNaturalNameOrder() {
+  @Test func hiddenAccountsAreExcludedWithActiveFirstThenNaturalNameOrder() {
     let rows = [
       account("work10"), account("hidden", hidden: true), account("work2"),
       account("failed", error: "offline"), account("current", active: true),
     ]
     #expect(
       AccountQuotaPresentation.accounts(rows).map(\.name)
-        == ["current", "failed", "hidden", "work2", "work10"])
+        == ["current", "failed", "work2", "work10"])
     #expect(rows[1].isHidden)
   }
 
@@ -32,6 +32,11 @@ struct AccountQuotaPresentationTests {
       }
     }
     #expect(!AccountQuotaPresentation.showsGeminiFirst(nil))
+  }
+
+  @Test func hiddenActiveAccountAndAllHiddenAccountsAreExcluded() {
+    #expect(AccountQuotaPresentation.accounts([account("current", active: true, hidden: true), account("work")]).map(\.name) == ["work"])
+    #expect(AccountQuotaPresentation.accounts([account("only", active: true, hidden: true)]).isEmpty)
   }
 
   @Test func emptyAccountsRemainEmpty() {

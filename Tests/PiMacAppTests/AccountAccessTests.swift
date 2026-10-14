@@ -11,6 +11,17 @@ struct AccountAccessTests {
     #expect(!app.supportsAccountRotation)
   }
 
+  @Test func managementAccessOnlyBlocksUnavailableOrDuplicatePresentations() {
+    #expect(AccountManagementAccess.canOpen(
+      hasAvailableSession: true, isLoadingConfiguration: false, isAlreadyPresenting: false))
+    for (available, loading, presenting) in [
+      (false, false, false), (true, true, false), (true, false, true),
+    ] {
+      #expect(!AccountManagementAccess.canOpen(
+        hasAvailableSession: available, isLoadingConfiguration: loading, isAlreadyPresenting: presenting))
+    }
+  }
+
   @Test func loginLabelsDistinguishCredentialTypesWithoutChangingWireActions() throws {
     let options = ["切换账户", "刷新额度", "登录新账户", "删除账户", "额度显示设置", "自动启动记录", "关闭"]
     let legacy = try #require(

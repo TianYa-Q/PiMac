@@ -36,7 +36,7 @@ test('proxy streams chunked bodies and sanitizes response hop headers', { timeou
     res.end(Buffer.concat(chunks));
   });
   const upstreamPort = await listen(upstream);
-  const lan = createLANListener({ localURL: `http://127.0.0.1:${upstreamPort}`, allowed: () => true });
+  const lan = createLANListener({ localURL: `http://127.0.0.1:${upstreamPort}` });
   t.after(async () => { await lan.close(); upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)); });
   const port = await freePort();
   await lan.configure({ host: '127.0.0.1', port });
@@ -65,7 +65,7 @@ test('concurrent shutdowns share a barrier and close stalled websocket handshake
   const upstream = http.createServer();
   upstream.on('upgrade', (_req, socket) => { upstreamSockets.add(socket); started(); });
   const upstreamPort = await listen(upstream);
-  const lan = createLANListener({ localURL: `http://127.0.0.1:${upstreamPort}`, allowed: () => true });
+  const lan = createLANListener({ localURL: `http://127.0.0.1:${upstreamPort}` });
   t.after(async () => { await lan.close(); for (const socket of upstreamSockets) socket.destroy(); await new Promise(resolve => upstream.close(resolve)); });
   const port = await freePort();
   await lan.configure({ host: '127.0.0.1', port });

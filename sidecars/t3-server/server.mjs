@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomBytes } from 'node:crypto';
 import * as Effect from 'effect/Effect';
 import * as Layer from 'effect/Layer';
 import * as Logger from 'effect/Logger';
@@ -14,7 +13,6 @@ import { configureNative } from './native.mjs';
 import { migratePiSettings } from './settings-migration.mjs';
 import { configureModelPreferences } from './model-preferences.mjs';
 import { prepareServerPort } from './server-port.mjs';
-export { rpcAllowed, httpAllowed } from './native.mjs';
 export { originAllowed } from './origin-policy.mjs';
 
 function checkPrivateTree(directory, toolsDirectory, inTools = false) {
@@ -48,7 +46,6 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
     configureModelPreferences(directory);
     binding = await prepareServerPort(directory, broker.connectionDiagnostics);
   } catch (error) { broker.close(); throw error; }
-  broker.controlToken = randomBytes(32).toString('hex');
   const configLayer = Layer.effect(ServerConfig, Effect.gen(function* () {
     const derived = yield* deriveServerPaths(directory, undefined, { baseDirIsExplicit: true });
     yield* ensureServerDirectories(derived);

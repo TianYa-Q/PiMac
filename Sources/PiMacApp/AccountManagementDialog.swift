@@ -98,11 +98,9 @@ struct AccountManagementDialogView: View {
           .frame(maxWidth: .infinity).padding(.vertical, 20)
           .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
         } else {
-          if presentation.accounts.count > 4 {
-            TextField("搜索账户", text: $searchQuery)
-              .textFieldStyle(.roundedBorder)
-              .accessibilityLabel("搜索已登录账户")
-          }
+          TextField("搜索账户", text: $searchQuery)
+            .textFieldStyle(.roundedBorder)
+            .accessibilityLabel("搜索已登录账户")
           ScrollView {
             LazyVStack(spacing: 0) {
               if visibleAccounts.isEmpty {
@@ -114,7 +112,7 @@ struct AccountManagementDialogView: View {
               }
             }
           }
-          .frame(height: min(CGFloat(max(visibleAccounts.count, 1)) * 58, 232))
+          .frame(height: min(CGFloat(max(presentation.accounts.count, 1)) * 58, 232))
           .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
           .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.06)))
         }
@@ -122,15 +120,20 @@ struct AccountManagementDialogView: View {
 
       VStack(spacing: 10) {
         HStack(spacing: 10) {
-          action("切换账户", icon: "arrow.triangle.2.circlepath", prominent: true)
+          action("切换账户", icon: "arrow.triangle.2.circlepath", prominent: true, detail: "下一步选择要使用的账户")
             .disabled(presentation.accounts.isEmpty)
-          action("登录新账户", icon: "person.badge.plus", label: presentation.loginTitle)
+          action("登录新账户", icon: "person.badge.plus", prominent: presentation.accounts.isEmpty,
+            label: presentation.loginTitle, detail: "添加账户并完成授权")
         }
         HStack(spacing: 10) {
-          action("刷新额度", icon: "arrow.clockwise")
-          action("额度显示设置", icon: "slider.horizontal.3")
+          action("刷新额度", icon: "arrow.clockwise", detail: "查询已显示账户的最新额度")
+          action("额度显示设置", icon: "eye", detail: "隐藏或恢复侧栏与手机端展示")
+            .disabled(presentation.accounts.isEmpty)
         }
       }
+
+      Text("当前会话用于此会话；新会话默认用于以后创建的会话。")
+        .font(.caption).foregroundStyle(.secondary)
 
       Text(
         presentation.provider == "Codex legacy"
@@ -141,28 +144,19 @@ struct AccountManagementDialogView: View {
 
       Divider()
       HStack(spacing: 16) {
-        if presentation.supportsHealthCheck {
-          Button {
-            answer("健康检查")
-          } label: {
-            Label("健康检查", systemImage: "stethoscope")
+        Menu {
+          if presentation.supportsHealthCheck {
+            Button("健康检查", systemImage: "stethoscope") { answer("健康检查") }
           }
-          .buttonStyle(.plain).foregroundStyle(.secondary)
-          .help("只读诊断，不请求网络、不切换账户")
-        }
-        Button {
-          answer("自动启动记录")
+          Button("启动记录", systemImage: "clock.arrow.circlepath") { answer("自动启动记录") }
+          Divider()
+          Button("删除账户…", systemImage: "trash", role: .destructive) { answer("删除账户") }
+            .disabled(presentation.accounts.isEmpty)
         } label: {
-          Label("启动记录", systemImage: "clock.arrow.circlepath")
+          Label("更多操作", systemImage: "ellipsis.circle")
         }
-        .buttonStyle(.plain).foregroundStyle(.secondary)
-        Button(role: .destructive) {
-          answer("删除账户")
-        } label: {
-          Label("删除账户", systemImage: "trash")
-        }
-        .buttonStyle(.plain).foregroundStyle(.red)
-        .disabled(presentation.accounts.isEmpty)
+        .menuStyle(.borderlessButton).fixedSize()
+        .help("诊断、启动记录和删除账户；删除前仍需选择并确认")
         Spacer()
         Button("关闭") { answer("关闭") }
           .keyboardShortcut(.cancelAction)
@@ -178,11 +172,15 @@ struct AccountManagementDialogView: View {
       Image(systemName: account.isCurrent ? "person.crop.circle.fill" : "person.crop.circle")
         .font(.title3)
         .foregroundStyle(account.isCurrent ? Color.accentColor : Color.secondary)
-      Text(account.name).font(.body.weight(.medium)).lineLimit(1)
-        .truncationMode(.middle).help(account.name)
+      VStack(alignment: .leading, spacing: 4) {
+        Text(account.name).font(.body.weight(.medium)).lineLimit(1)
+          .truncationMode(.middle).help(account.name)
+        HStack(spacing: 6) {
+          if account.isCurrent { badge("当前会话", accent: true) }
+          if account.isDefault { badge("新会话默认", accent: false) }
+        }
+      }
       Spacer(minLength: 8)
-      if account.isCurrent { badge("当前会话", accent: true) }
-      if account.isDefault { badge("新会话默认", accent: false) }
     }
     .padding(.horizontal, 14)
     .frame(height: 58)
@@ -199,16 +197,21 @@ struct AccountManagementDialogView: View {
       .fixedSize()
   }
 
-  private func action(_ title: String, icon: String, prominent: Bool = false, label: String? = nil)
-    -> some View
+  private func action(
+    _ title: String, icon: String, prominent: Bool = false, label: String? = nil, detail: String
+  ) -> some View
   {
     Button {
       answer(title)
     } label: {
-      Label(label ?? title, systemImage: icon)
-        .font(.callout.weight(.medium))
-        .frame(maxWidth: .infinity, minHeight: 38)
-        .contentShape(Rectangle())
+      VStack(alignment: .leading, spacing: 5) {
+        Label(label ?? title, systemImage: icon).font(.callout.weight(.medium))
+        Text(detail).font(.caption).opacity(0.75)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+      .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+      .padding(.horizontal, 12).padding(.vertical, 8)
+      .contentShape(Rectangle())
     }
     .buttonStyle(AccountManagementActionStyle(prominent: prominent))
   }

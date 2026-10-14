@@ -15,8 +15,7 @@ import { CloudLink } from './upstream/apps/server/src/cloud/CloudLink.ts';
 import { setCliDesiredCloudLink } from './upstream/apps/server/src/cloud/CliState.ts';
 import * as CloudConfig from './upstream/apps/server/src/cloud/config.ts';
 import { RelayClient } from '@t3tools/shared/relayClient';
-import { getNative, httpAllowed } from './native.mjs';
-import { loopbackOAuthCallbackAllowed } from './oauth-policy.mjs';
+import { getNative } from './native.mjs';
 export { oauthAwareCommandReadiness } from './oauth-readiness.mjs';
 
 import { originAllowed } from './origin-policy.mjs';
@@ -39,13 +38,9 @@ export const NativeHttpPolicy = HttpRouter.middleware(effect => Effect.flatMap(H
     record('denied', { status: 403, reason: 'origin-policy' });
     return Effect.succeed(HttpServerResponse.empty({ status: 403 }));
   }
-  const localControl = request.headers['x-pimac-control'] === broker.controlToken && !!broker.controlToken;
-  // Global router middleware also wraps the official CLI's separate OAuth
-  // listener. Keep /callback off the environment/public server, but let the
-  // loopback listener validate the OAuth state and authorization code.
-  return loopbackOAuthCallbackAllowed(request) || httpAllowed(request.method, request.url) || (localControl && request.url.startsWith('/api/connect/'))
-    ? effect.pipe(Effect.tap(response => Effect.sync(() => record('response', { status: response.status }))))
-    : Effect.sync(() => { record('denied', { status: 404, reason: 'http-policy' }); return HttpServerResponse.empty({ status: 404 }); });
+  // 不再按接口名限制请求：路由存在性、凭据和 scope 全部由官方 T3 校验。
+  // 此处仅保留浏览器 Origin 防护及不含凭据的传输诊断。
+  return effect.pipe(Effect.tap(response => Effect.sync(() => record('response', { status: response.status }))));
 }), { global: true });
 
 export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* () {
@@ -72,7 +67,7 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
   const localRequest = async (pathname, method = 'GET', body) => {
     if (!adminToken) adminToken = (await run(auth.issueSession({ subject: 'pimac-internal-administration', scopes: AuthAdministrativeScopes }))).token;
     const result = await fetch(localURL + pathname, { method, redirect: 'error', signal: AbortSignal.timeout(45000),
-      headers: { authorization: `Bearer ${adminToken}`, 'x-pimac-control': broker.controlToken,
+      headers: { authorization: `Bearer ${adminToken}`,
         ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
     if (!result.ok) throw new Error('Official T3 control request failed'); return result.json();
   };

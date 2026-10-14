@@ -185,7 +185,8 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
     for (const [name, credential] of accounts) {
       controller.signal.throwIfAborted();
       const row = { name, hidden: settings.hiddenAccounts?.includes(name) === true, capturedAt: now() };
-      if (row.hidden) { rows.push(row); continue; }
+      // 隐藏账户不查询，也不向桌面/iOS 的额度接口返回占位或旧缓存。
+      if (row.hidden) continue;
       const id = accountID(credential);
       if (!id || typeof credential.access !== 'string') row.error = '授权缺少 ChatGPT account ID，无法查询额度。';
       else if (!Number.isFinite(credential.expires) || credential.expires <= now()) row.error = '授权已过期，请通过 Pi 登录或账户扩展刷新授权。';
@@ -229,14 +230,26 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
       updatedAt: now(), accounts: rows, gemini: await geminiTask, source: 'host-query',
       message: rows.length ? '只读额度查询；不代表当前线程的授权绑定。' : '未找到可查询的 OAuth 账户；API key 不提供订阅额度。' };
   }
+  // 可见性可能在缓存 TTL 或网络查询期间变化，每次出站按最新设置过滤。
+  function visibleSnapshot(value, provider) {
+    if (provider === 'antigravity') return value;
+    const prefix = provider === 'openai' ? 'openai-chatgpt' : 'codex';
+    const settings = privateJSON(path.join(agentDirectory, `${prefix}-account-usage.json`));
+    if (settings.hiddenAccounts !== undefined && (!Array.isArray(settings.hiddenAccounts) ||
+        settings.hiddenAccounts.some(name => typeof name !== 'string'))) {
+      throw new Error('账户显示设置格式无效。');
+    }
+    const hidden = new Set(settings.hiddenAccounts ?? []);
+    return { ...value, accounts: value.accounts.filter(row => !row.hidden && !hidden.has(row.name)) };
+  }
   return {
     async accountStatus({ provider, force = false } = {}) {
       if (!providers.has(provider)) throw new Error('Unsupported account provider');
       if (controller.signal.aborted) throw new Error('Closed');
       if (pending.has(provider)) return pending.get(provider);
       const previous = cache.get(provider);
-      if (!force && previous && now() - previous.updatedAt < 60000) return { ...previous, cached: true };
-      const task = query(provider).then(value => { cache.set(provider, value); return { ...value, cached: false }; }).finally(() => pending.delete(provider));
+      if (!force && previous && now() - previous.updatedAt < 60000) return { ...visibleSnapshot(previous, provider), cached: true };
+      const task = query(provider).then(value => { cache.set(provider, value); return { ...visibleSnapshot(value, provider), cached: false }; }).finally(() => pending.delete(provider));
       pending.set(provider, task); return task;
     },
     close() { controller.abort(); cache.clear(); successfulAccounts.clear(); successfulGemini = undefined; },

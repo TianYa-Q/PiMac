@@ -115,9 +115,17 @@ enum T3V2Presentation {
         "system_notice":
         let status = item["status"] as? String ?? "completed"
         let tool = !["error", "system_notice", "compaction"].contains(type)
-        let name =
+        let nativeName =
           item["toolName"] as? String ?? item["title"] as? String
           ?? (type == "file_change" ? "edit" : type == "command_execution" ? "bash" : type)
+        // 只翻译服务端错误状态标题，不改工具名、原始诊断或未知标题。
+        let name: String
+        switch (type, nativeName) {
+        case ("error", "Provider retry"): name = "正在重试"
+        case ("error", "Provider recovered"): name = "已恢复"
+        case ("error", "Provider retry stopped"): name = "重试已停止"
+        default: name = nativeName
+        }
         var data: JSON = ["toolName": name, "input": item["input"] ?? [:]]
         if status == "completed",
           let page = item["htmlRender"] as? T3HTMLRender

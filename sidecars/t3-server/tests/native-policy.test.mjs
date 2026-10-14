@@ -1,121 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { httpAllowed, rpcAllowed } from '../native.mjs';
+import { readFile } from 'node:fs/promises';
 
-test('Pi MCP discovery and calls pass host policy without opening other routes or methods', () => {
-  assert.equal(httpAllowed('POST', '/mcp'), true);
-  assert.equal(httpAllowed('POST', '/mcp?session=opaque'), true);
-  for (const method of ['GET', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']) {
-    assert.equal(httpAllowed(method, '/mcp'), false, method);
-  }
-  for (const route of ['/mcp/', '/mcp/tools', '/api/mcp', '/mcp-other']) {
-    assert.equal(httpAllowed('POST', route), false, route);
-  }
-});
-
-test('mobile dispatch and projection refresh are allowed narrowly', () => {
-  assert.equal(rpcAllowed('orchestration.dispatchCommand'), true);
-  assert.equal(rpcAllowed('orchestration.getThreadProjection'), true);
-  assert.equal(rpcAllowed('orchestration.getTurnItem'), true);
-  assert.equal(rpcAllowed('orchestration.getTurnItems'), false);
-  assert.equal(rpcAllowed('secrets.answerRequest'), false);
-  assert.equal(rpcAllowed('scheduledTasks.rotateWebhookToken'), false);
-  assert.equal(rpcAllowed('orchestration.getUnknownProjection'), false);
-});
-
-test('mobile history HTTP reads are allowed without opening thread writes or unknown routes', () => {
-  for (const suffix of ['', '/bounded', '/history?cursor=opaque-page']) {
-    const route = '/api/orchestration/threads/thread-id' + suffix;
-    assert.equal(httpAllowed('GET', route), true, route);
-    for (const method of ['POST', 'PUT', 'DELETE', 'OPTIONS']) {
-      assert.equal(httpAllowed(method, route), false, method + ' ' + route);
-    }
-  }
-  for (const route of ['/api/orchestration/threads/', '/api/orchestration/threads//history',
-    '/api/orchestration/threads/thread-id/unknown', '/api/orchestration/threads/thread-id/history/extra',
-    '/api/orchestration/threads/thread-id/bounded/extra']) {
-    assert.equal(httpAllowed('GET', route), false, route);
-  }
-});
-
-test('mobile archive snapshot and stream are allowed without opening the namespace', () => {
-  for (const method of ['orchestration.getArchivedShellSnapshot', 'orchestration.subscribeArchivedShell']) {
-    assert.equal(rpcAllowed(method), true, method);
-  }
-  for (const method of ['orchestration.getUnknownShellSnapshot', 'orchestration.subscribeUnknownShell']) {
-    assert.equal(rpcAllowed(method), false, method);
-  }
-});
-
-test('mobile activity is allowed without host power or process administration', () => {
-  assert.equal(rpcAllowed('server.reportClientActivity'), true);
-  for (const method of ['server.reportHostPowerState', 'server.getBackgroundPolicy', 'server.signalProcess']) {
-    assert.equal(rpcAllowed(method), false);
-  }
-});
-
-test('mobile thread launch is allowed without opening the orchestration namespace', () => {
-  assert.equal(rpcAllowed('orchestration.launchThread'), true);
-  assert.equal(rpcAllowed('orchestration.unknown'), false);
-  assert.equal(rpcAllowed('orchestration.launchThreads'), false);
-});
-
-test('official scheduled-task RPCs are allowed without opening the namespace or HTTP routes', () => {
-  for (const action of ['list', 'subscribe', 'upsert', 'setEnabled', 'delete', 'runNow']) {
-    assert.equal(rpcAllowed(`scheduledTasks.${action}`), true);
-  }
-  for (const method of ['scheduledTasks', 'scheduledTasks.unknown', 'scheduledTasks.deleteAll']) {
-    assert.equal(rpcAllowed(method), false);
-  }
-  for (const method of ['GET', 'POST', 'PUT', 'DELETE']) {
-    assert.equal(httpAllowed(method, '/api/scheduledTasks'), false);
-  }
-});
-
-test('Git and diff RPCs are explicit, without shell or administration access', () => {
-  for (const method of ['subscribeVcsStatus', 'subscribeWorktreeSetup', 'worktreeSetup.cancel',
-    'vcs.refreshStatus', 'vcs.listRefs', 'vcs.pull', 'vcs.createRef', 'vcs.switchRef', 'vcs.init',
-    'vcs.createWorktree', 'vcs.removeWorktree', 'git.runStackedAction', 'git.resolvePullRequest',
-    'git.preparePullRequestThread', 'review.getDiffPreview', 'review.getDiffFileContents']) {
-    assert.equal(rpcAllowed(method), true, method);
-  }
-  for (const method of ['vcs.unknown', 'git.unknown', 'review.open', 'terminal.open', 'shell.openInEditor']) {
-    assert.equal(rpcAllowed(method), false, method);
-  }
-  assert.equal(httpAllowed('POST', '/api/git'), false);
-});
-
-test('mobile Usage / Limits RPCs are allowed without opening server administration', () => {
-  for (const method of ['server.refreshProviders', 'server.getUsageSummary', 'server.refreshUsageRates']) {
-    assert.equal(rpcAllowed(method), true);
-  }
-  for (const method of ['server.updateProvider', 'server.updateSettings', 'server.unknown', 'provider.consumeResetCredit']) {
-    assert.equal(rpcAllowed(method), false);
-  }
-  assert.equal(httpAllowed('POST', '/api/usage'), false);
-});
-
-test('mobile project files are readable without opening writes or filesystem administration', () => {
-  for (const method of ['projects.listEntries', 'projects.readFile']) {
-    assert.equal(rpcAllowed(method), true, method);
-  }
-  for (const method of ['projects.writeFile', 'projects.unknown', 'filesystem.browse', 'shell.openInEditor']) {
-    assert.equal(rpcAllowed(method), false, method);
-  }
-  assert.equal(httpAllowed('GET', '/api/projects/readFile'), false);
-});
-
-test('mobile attachment RPCs and signed POST uploads are allowed narrowly', () => {
-  for (const method of ['attachments.createUploadUrl', 'attachments.delete', 'assets.persistChatAttachments', 'assets.createUrl']) {
-    assert.equal(rpcAllowed(method), true);
-  }
-  assert.equal(rpcAllowed('attachments.unknown'), false);
-  assert.equal(httpAllowed('POST', '/api/attachments/upload/signed-token'), true);
-  assert.equal(httpAllowed('POST', '/api/attachments/upload/signed-token?ignored=1'), true);
-  for (const method of ['GET', 'PUT', 'DELETE', 'OPTIONS']) {
-    assert.equal(httpAllowed(method, '/api/attachments/upload/signed-token'), false);
-  }
-  for (const path of ['/api/attachments/upload', '/api/attachments/upload/', '/api/attachments/upload/token/extra', '/api/attachments/other/token']) {
-    assert.equal(httpAllowed('POST', path), false);
-  }
+test('host does not replace official authorization or capability declarations', async () => {
+  const root = new URL('../', import.meta.url);
+  const native = await readFile(new URL('native.mjs', root), 'utf8');
+  const management = await readFile(new URL('management.mjs', root), 'utf8');
+  const patches = JSON.parse(await readFile(new URL('patches.json', root), 'utf8'));
+  assert.doesNotMatch(native, /rpcAllowed|httpAllowed|nativeCapabilities/);
+  assert.doesNotMatch(management, /httpAllowed|localControl/);
+  const authorization = patches['apps/server/src/auth/RpcAuthorization.ts'];
+  assert(authorization.every(entry => !/rpcAllowed|allowed &&|PiNative/.test(entry.newText)));
+  assert(authorization.some(entry => entry.newText.includes('authorized ? effect : Effect.fail(rpcAuthorizationError(requiredScope))')));
+  assert(patches['apps/server/src/environment/ServerEnvironment.ts'].every(entry =>
+    !/nativeCapabilities|capabilities: \{/.test(entry.newText)));
+  const lan = await readFile(new URL('../../../Sources/PiMacApp/Resources/t3-bridge/lan-listener.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(lan, /allowed\(req|api\/connect\/unlink/);
 });

@@ -53,8 +53,7 @@ test('Pi lifecycle stays upstream-owned with bounded telemetry, account selectio
   assert(discovery.every(entry => entry.newText.includes('createModelContextSettings')));
   assert(discovery.some(entry => entry.newText.includes('.recordModels(modelsData)')));
   assert(discovery.every(entry => !/\.set\(|connection\.|type: "prompt"/.test(entry.newText)));
-  // The host allowlist supplements the official connection-scoped middleware;
-  // it must not resurrect ws.ts's retired per-handler scope checks.
+  // RPC 补丁只添加诊断，不改变官方 scope 判定或恢复旧版逐 handler 授权。
   assert(Object.hasOwn(patches, 'apps/server/src/auth/RpcAuthorization.ts'));
   for (const entry of patches['apps/server/src/ws.ts']) {
     assert(!entry.newText.includes('authorizeEffect(requiredScopeForRpcMethod'));

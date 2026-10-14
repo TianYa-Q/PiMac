@@ -178,7 +178,6 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     // RPC 客户端可以用结构化数据绘制原生账户卡片；TUI 使用上面的
     // 彩色单行状态。每种界面只发布自己需要的一种状态，避免重复事件。
     if (ctx.mode === "rpc") {
-      const hidden = new Set(settings.hiddenAccounts);
       ctx.ui.setStatus(
         GUI_STATUS_KEY,
         JSON.stringify({
@@ -192,18 +191,21 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
           defaultAccount: state.activeAccount,
           updatedAt: Date.now(),
           gemini: antigravityGUIStatus(antigravityUsage, geminiIsActive),
-          accounts: state.accounts.map((account) => {
-            const usage = usages.get(account.name);
-            return {
-              name: account.name,
-              hidden: hidden.has(account.name),
-              capturedAt: usage?.capturedAt,
-              primary: usage?.primary,
-              secondary: usage?.secondary,
-              resetCredits: usage?.resetCredits,
-              error: usage?.error,
-            };
-          }),
+          // 隐藏账户不进入 RPC 额度快照；管理菜单仍使用完整账户列表。
+          accounts: state.accounts
+            .filter((account) => visibleNames.has(account.name))
+            .map((account) => {
+              const usage = usages.get(account.name);
+              return {
+                name: account.name,
+                hidden: false,
+                capturedAt: usage?.capturedAt,
+                primary: usage?.primary,
+                secondary: usage?.secondary,
+                resetCredits: usage?.resetCredits,
+                error: usage?.error,
+              };
+            }),
         }),
       );
     }

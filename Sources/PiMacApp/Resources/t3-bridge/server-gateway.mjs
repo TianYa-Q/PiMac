@@ -7,7 +7,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { acquireChildLease } from './child-lease.mjs';
 import { isLoopbackPeer } from './network.mjs';
-import { startPiServer, httpAllowed } from './vendor/t3-server.mjs';
+import { startPiServer } from './vendor/t3-server.mjs';
 import { createLANListener } from './lan-listener.mjs';
 import { createPiAccountManagement } from './pi-account-management.mjs';
 
@@ -92,7 +92,7 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
   try {
     official = await startPiServer({ directory: path.join(directory, 'server-owned'), environmentId: identity(directory), piConfig, signal,
       onFailure: () => { void close(); onFailure?.(); } });
-    lan = createLANListener({ localURL: official.localURL, allowed: httpAllowed });
+    lan = createLANListener({ localURL: official.localURL });
     if (publicEndpoint) await lan.configure(publicEndpoint);
     return { server, serverURL: official.localURL, official, lan, close };
   } catch (error) { await close(); throw error; }

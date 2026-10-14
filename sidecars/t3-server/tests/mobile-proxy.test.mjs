@@ -62,6 +62,8 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
   });
   const descriptor = await (await request('/.well-known/t3/environment')).json();
   assert.equal(descriptor.label, 'Pi Mac');
+  assert.equal(descriptor.capabilities.pullRequests, true);
+  assert.equal(descriptor.capabilities.repositoryIdentity, true);
   const { privateKey, publicKey } = await generateKeyPair('ES256', { extractable: true });
   const jwk = await exportJWK(publicKey);
   const proof = (url, accessToken) => new SignJWT({ htu: url, htm: 'POST', jti: randomUUID(),
@@ -113,15 +115,13 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
     const { ticket } = await result.json();
     return call(gateway.serverURL.replace('http:', 'ws:') + '/ws?orchestrationProtocol=2&wsTicket=' + ticket, method, input);
   };
-  // The host allowlist must apply in upstream's group middleware to ordinary
-  // and streaming RPCs alike, before any handler or subscription is entered.
-  await assert.rejects(rpc('server.getProcessDiagnostics', {}),
-    error => error._tag === 'EnvironmentAuthorizationError');
+  // 官方 scope 允许的普通和流式读取不应再被 PiMac 白名单拦截。
+  await rpc('server.getProcessDiagnostics', {});
   const deniedTicket = await mintTicket();
   const { ticket: deniedSecret } = await deniedTicket.json();
-  await assert.rejects(readStream(gateway.serverURL.replace('http:', 'ws:') +
+  await readStream(gateway.serverURL.replace('http:', 'ws:') +
     '/ws?orchestrationProtocol=2&wsTicket=' + deniedSecret, 'subscribeTerminalMetadata',
-    {}, { count: 1 }), error => error._tag === 'EnvironmentAuthorizationError');
+    {}, { count: 1 });
   // The stock phone's visibility/liveness report must reach background policy,
   // not fail as an unrelated authorization error on every reconnect.
   await rpc('server.reportClientActivity', {
@@ -189,7 +189,7 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
   assert(Number.isFinite(Date.parse(enabled.task.nextRunAt)));
   await rpc('scheduledTasks.setEnabled', { id: task.id, enabled: false });
   assert.equal((await rpc('scheduledTasks.list', {})).tasks[0].id, task.id);
-  // Allowlisting must not grant operate access to a read-only phone session.
+  // 移除宿主限制不能给只读会话增加官方 operate 权限。
   const readPairing = await gateway.official.management.pairing({ label: 'Read-only phone' });
   const readExchange = await request('/oauth/token', { method: 'POST', headers: {
     'content-type': 'application/x-www-form-urlencoded', dpop: await proof(publicBase + '/oauth/token'),
@@ -217,6 +217,8 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
   await assert.rejects(readRpc('server.getUsageSummary', invalidUsageWindow),
     error => error._tag === 'UsageReadError' && error.reason === 'invalidWindow');
   assert.equal((await readRpc('scheduledTasks.list', {})).tasks[0].id, task.id);
+  assert(Array.isArray((await readRpc('pullRequests.list', { state: 'open' })).entries));
+  await readRpc('server.getProcessDiagnostics', {});
   for (const [method, payload] of [
     ['upsert', input], ['setEnabled', { id: task.id, enabled: true }],
     ['delete', { id: task.id }], ['runNow', { id: task.id }],
@@ -241,9 +243,10 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
       error => error._tag === 'ProjectReadFileError' && error.failure === 'workspace_path_outside_root');
     await assert.rejects(fileRpc('projects.readFile', { ...fileInput, relativePath: 'vendor/missing.mjs' }),
       error => error._tag === 'ProjectReadFileError' && error.failure === 'operation_failed');
-    await assert.rejects(fileRpc('projects.writeFile', { ...fileInput, contents: 'overwrite' }),
-      error => error._tag === 'EnvironmentAuthorizationError');
   }
+  await rpc('projects.writeFile', { ...fileInput, contents: fileContents });
+  await assert.rejects(readRpc('projects.writeFile', { ...fileInput, contents: 'overwrite' }),
+    error => error._tag === 'EnvironmentAuthorizationError' && error.requiredScope === 'orchestration:operate');
   assert.equal(await readFile(join(directory, fileInput.relativePath), 'utf8'), fileContents);
   // Native Git reads cross the same DPoP/ticket transport; writes retain upstream scopes.
   assert.equal((await rpc('vcs.refreshStatus', { cwd: directory })).isRepo, false);

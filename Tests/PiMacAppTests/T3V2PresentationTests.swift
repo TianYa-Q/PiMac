@@ -5,6 +5,34 @@ import Testing
 
 @MainActor
 struct T3V2PresentationTests {
+  @Test func retryStateTitlesAreChineseWithoutChangingDiagnosticsOrToolNames() throws {
+    for (title, status, expected) in [
+      ("Provider retry", "running", "正在重试"),
+      ("Provider recovered", "completed", "已恢复"),
+      ("Provider retry stopped", "interrupted", "重试已停止"),
+      ("Provider retry stopped", "cancelled", "重试已停止"),
+      ("Custom error", "failed", "Custom error"),
+    ] {
+      for type in ["error", "dynamic_tool"] {
+        let mapped = T3V2Presentation.detail(["projection": [
+          "thread": ["id": "thread"],
+          "visibleTurnItems": [["item": [
+            "id": "notice", "type": type, "title": title, "status": status,
+            "failure": ["message": "terminated"],
+          ]]],
+        ]])
+        let thread = try #require(mapped["thread"] as? [String: Any])
+        let activities = try #require(thread["activities"] as? [[String: Any]])
+        let payload = try #require(activities.first?["payload"] as? [String: Any])
+        let displayTitle = type == "error" ? expected : title
+        #expect(activities.first?["summary"] as? String == displayTitle)
+        #expect(payload["title"] as? String == displayTitle)
+        #expect(payload["detail"] as? String == "terminated")
+        #expect(payload["status"] as? String == (status == "running" ? "inProgress" : status))
+      }
+    }
+  }
+
   @Test func serverQueueUsesRunIdentityAndDeliveryOrder() throws {
     let thread = try #require(T3V2Presentation.detail(["projection": [
       "thread": ["id": "thread"],

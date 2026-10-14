@@ -122,12 +122,12 @@ threads use the Server-owned database and private per-instance Pi sessions.
 
 ## Mobile Usage / Limits
 
-The host allowlist permits `server.refreshProviders`, `server.getUsageSummary`
-and `server.refreshUsageRates`, used by the stock phone's Usage / Limits screen.
+The stock phone's Usage / Limits screen uses official `server.refreshProviders`,
+`server.getUsageSummary` and `server.refreshUsageRates` without a host allowlist.
 Limits refresh uses the official provider/source service, with upstream
 `orchestration:operate` authorization; summary and pricing use
-`orchestration:read`. No server administration namespace or HTTP routes are opened.
-Previously the host rejected refresh even for authorized Tunnel sessions.
+`orchestration:read`. All other official endpoints also retain their official
+scopes; PiMac no longer rejects authorized requests using a second allowlist.
 
 Usage now scans only the configured Pi agent's `sessions` tree, rather than
 unrelated native CLI history. Final assistant usage maps input/output/cache
@@ -196,13 +196,14 @@ Rebuild the Server bundle before testing or packaging these changes.
 ## Mobile project files
 
 The stock phone can browse project directories and open source/text files through
-`projects.listEntries` and `projects.readFile`. Both are explicitly allowlisted;
-upstream still requires `orchestration:read` and owns path resolution, UTF-8
-reading, binary-file rejection and large-file truncation. `projects.writeFile`,
-host filesystem browsing and editor launch remain denied. The previous host
+`projects.listEntries` and `projects.readFile`. Upstream requires
+`orchestration:read` and owns path resolution, UTF-8 reading, binary-file rejection
+and large-file truncation. Writes and other official operations are controlled
+by T3's own scopes, not a PiMac endpoint whitelist. The previous host
 allowlist rejected file reads with a misleading missing-scope error even for
 authorized sessions. DPoP/ticket integration tests cover normal and read-only
-sessions, `.mjs`/UTF-8 contents, missing files, relative path escape and write denial.
+sessions, `.mjs`/UTF-8 contents, missing files, relative path escape, authorized
+writes and read-only write denial.
 Physical-phone rendering still needs manual acceptance.
 
 ## Scheduled tasks
@@ -210,8 +211,8 @@ Physical-phone rendering still needs manual acceptance.
 The stock phone's Scheduled Tasks screen can list/subscribe, create/edit, enable/
 disable, delete and run tasks immediately through the six official
 `scheduledTasks.*` RPCs. Upstream retains `orchestration:read` checks for reads
-and `orchestration:operate` checks for mutations; no scheduler HTTP routes or
-blanket namespace access are added. The previous host allowlist rejected these
+and `orchestration:operate` checks for mutations. Endpoint routing and access
+remain official; PiMac adds no endpoint allowlist. The previous host allowlist rejected these
 RPCs with a misleading missing-scope error, even for authorized sessions.
 
 Schedules, run metadata and restart persistence belong to the official Server,

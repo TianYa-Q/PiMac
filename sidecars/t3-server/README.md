@@ -18,16 +18,18 @@ Lifecycle remains upstream-owned.
 The former custom Pi
 adapter, transport, runtime controls, and their tests have been removed.
 
-Pi Mac retains only host policy and management: loopback Server/administration,
-a default-on LAN HTTP/WebSocket transport, explicit RPC/HTTP allowlists, supervisor
-credentials, managed T3 Connect, diagnostics, and desktop model preferences.
+Pi Mac retains host integration and management: loopback Server/administration,
+a default-on LAN HTTP/WebSocket transport, supervisor credentials, managed T3
+Connect, diagnostics, and desktop model preferences. Official T3 owns endpoint
+routing, authentication, scopes and capability declarations; no PiMac RPC/HTTP
+allowlist or capability replacement is applied.
 LAN shares upstream authentication and the same environment identity; it never
 publishes administration routes or introduces another orchestration engine. The supervisor has no workspace/Pi command API.
 Provider subprocesses must not inherit supervisor secrets.
 
 Pi's upstream-owned extension discovers T3 tools through `POST /mcp`, including
-`schedule_task` for chat-created timers. Host HTTP policy must allow that exact
-route; upstream still validates the thread-bound MCP bearer credential. Missing,
+`schedule_task` for chat-created timers. Upstream validates the thread-bound
+MCP bearer credential without an additional PiMac endpoint gate. Missing,
 invalid, and supervisor credentials are rejected. Host policy restricts
 `orchestrator_capabilities` to the running parent's provider/model (or its current
 selection when idle), never the full catalog. `delegate_task` enforces that same

@@ -360,12 +360,25 @@ final class T3DesktopClient: ObservableObject {
 
   func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws
   {
-    let text = try Self.sessionControlText(operation: operation, accountName: accountName)
-    try await dispatch([
+    try await dispatch(Self.sessionControlCommand(
+      threadID: threadID, messageID: UUID().uuidString,
+      operation: operation, accountName: accountName))
+  }
+
+  static func sessionControlCommand(
+    threadID: String, messageID: String, operation: String, accountName: String?
+  ) throws -> JSON {
+    let text = try sessionControlText(operation: operation, accountName: accountName)
+    var command: JSON = [
       "type": "message.dispatch", "threadId": threadID,
-      "messageId": UUID().uuidString, "text": text, "attachments": [],
+      "messageId": messageID, "text": text, "attachments": [],
       "dispatchMode": ["type": "start_immediately"],
-    ])
+    ]
+    // Server 在线程锁内选择空闲启动或活跃 steering。仅提交 /accounts：
+    // Pi 优先执行扩展命令，不把管理请求排到当前任务结束，也不停止任务。
+    // 切换/登录的空闲限制仍由各自的入口及扩展检查。
+    if operation == "manage-accounts" { command["deliveryIntent"] = "steer" }
+    return command
   }
 
   static func isSwitchableAccountName(_ name: String) -> Bool {

@@ -187,16 +187,6 @@
   ],
   "apps/server/src/environment/ServerEnvironment.ts": [
     {
-      "oldText": "import * as Context from \"effect/Context\";",
-      "newText": "import * as PiNative from \"pimac:native\";\nimport * as Context from \"effect/Context\";",
-      "count": 1
-    },
-    {
-      "oldText": "capabilities: { ...descriptor.capabilities, agentActivityPublishing },",
-      "newText": "capabilities: { ...PiNative.nativeCapabilities(), agentActivityPublishing },",
-      "count": 1
-    },
-    {
       "oldText": "        ...descriptor,\n        capabilities:",
       "newText": "        ...descriptor,\n        label: \"Pi Mac\",\n        capabilities:",
       "count": 1
@@ -377,11 +367,11 @@
   "apps/server/src/auth/RpcAuthorization.ts": [
     {
       "oldText": "import * as Effect from \"effect/Effect\";",
-      "newText": "import * as Effect from \"effect/Effect\";\nimport * as PiNative from \"pimac:native.mjs\";\nimport { observeNativeRpc } from \"pimac:rpc-diagnostics.mjs\";"
+      "newText": "import * as Effect from \"effect/Effect\";\nimport { observeNativeRpc } from \"pimac:rpc-diagnostics.mjs\";"
     },
     {
       "oldText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc }) => {\n    const requiredScope = requiredScopeForRpcMethod(rpc._tag);\n    return scopes.includes(requiredScope)\n      ? effect\n      : Effect.fail(rpcAuthorizationError(requiredScope));\n  });",
-      "newText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    const requiredScope = requiredScopeForRpcMethod(rpc._tag);\n    const allowed = PiNative.rpcAllowed(rpc._tag);\n    const authorized = scopes.includes(requiredScope);\n    const command = rpc._tag === \"orchestration.dispatchCommand\" ? (payload as any) : undefined;\n    return observeNativeRpc(rpc._tag,\n      allowed && authorized ? effect : Effect.fail(rpcAuthorizationError(requiredScope)),\n      {\n        \"orchestration_v2.command_id\": command?.commandId,\n        \"orchestration_v2.command_type\": command?.type,\n        \"orchestration_v2.thread_id\": command?.threadId,\n        \"pimac.dispatch_mode\": command?.type === \"message.dispatch\" ? command.dispatchMode?.type : undefined,\n        \"pimac.delivery_intent\": command?.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n      }, { allowed, authorized });\n  });"
+      "newText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    const requiredScope = requiredScopeForRpcMethod(rpc._tag);\n    const authorized = scopes.includes(requiredScope);\n    const command = rpc._tag === \"orchestration.dispatchCommand\" ? (payload as any) : undefined;\n    return observeNativeRpc(rpc._tag,\n      authorized ? effect : Effect.fail(rpcAuthorizationError(requiredScope)),\n      {\n        \"orchestration_v2.command_id\": command?.commandId,\n        \"orchestration_v2.command_type\": command?.type,\n        \"orchestration_v2.thread_id\": command?.threadId,\n        \"pimac.dispatch_mode\": command?.type === \"message.dispatch\" ? command.dispatchMode?.type : undefined,\n        \"pimac.delivery_intent\": command?.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n      }, { authorized });\n  });"
     }
   ]
 }

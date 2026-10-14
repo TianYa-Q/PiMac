@@ -228,7 +228,9 @@ private struct CodexAccountsCard: View, Equatable {
 
   @ViewBuilder
   private var expandedAccounts: some View {
-    if snapshot.accounts.isEmpty && snapshot.gemini == nil {
+    if AccountQuotaPresentation.accounts(snapshot.accounts).isEmpty
+      && snapshot.gemini?.isConfigured != true
+    {
       emptyStatus
     } else {
       let accounts = AccountQuotaPresentation.accounts(snapshot.accounts)
@@ -255,9 +257,9 @@ private struct CodexAccountsCard: View, Equatable {
   private var currentAccount: some View {
     if let gemini = snapshot.gemini, gemini.isConfigured, gemini.isActive {
       geminiRow(gemini)
-    } else if let account = snapshot.accounts.first(where: \.isActive)
-      ?? snapshot.accounts.first(where: \.isDefault)
-      ?? snapshot.accounts.first
+    } else if let account = AccountQuotaPresentation.accounts(snapshot.accounts).first(where: \.isActive)
+      ?? AccountQuotaPresentation.accounts(snapshot.accounts).first(where: \.isDefault)
+      ?? AccountQuotaPresentation.accounts(snapshot.accounts).first
     {
       accountRow(account)
     } else if let gemini = snapshot.gemini, gemini.isConfigured {
@@ -268,7 +270,9 @@ private struct CodexAccountsCard: View, Equatable {
   }
 
   private var emptyStatus: some View {
-    Text(snapshot.emptyStatus ?? "暂无账户额度数据，可点击刷新查询。")
+    Text(snapshot.accounts.contains(where: \.isHidden)
+      ? "账户额度均已隐藏，可在管理中恢复显示。"
+      : snapshot.emptyStatus ?? "暂无账户额度数据，可点击刷新查询。")
       .font(.caption2)
       .foregroundStyle(.secondary)
       .lineLimit(5)

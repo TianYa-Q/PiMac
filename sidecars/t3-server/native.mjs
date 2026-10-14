@@ -14,52 +14,6 @@ export function configureNative({ environmentId, directory }) {
   return host;
 }
 export function getNative() { if (!host) throw new Error('Server host unavailable'); return host; }
-const methods = new Set(['server.probe', 'server.getConfig', 'server.getSettings', 'subscribeServerConfig', 'subscribeServerLifecycle',
-  'orchestration.dispatchCommand', 'orchestration.launchThread', 'orchestration.subscribeShell', 'orchestration.subscribeThread',
-  // Mobile refreshes the authoritative projection after submitting a message.
-  // The official read scope still applies; do not open the whole namespace.
-  'orchestration.getThreadProjection', 'auth.subscribeAccess',
-  // New mobile clients lazily fetch full tool details omitted from wire projections.
-  // The official read scope and thread/item lookup remain upstream-owned.
-  'orchestration.getTurnItem',
-  // Mobile archive uses its own snapshot and stream; upstream still enforces read scope.
-  'orchestration.getArchivedShellSnapshot', 'orchestration.subscribeArchivedShell',
-  // Stock mobile liveness feeds upstream's background subscription policy.
-  // Host power state and all other administration remain denied.
-  'server.reportClientActivity',
-  // Mobile project browser / file viewer; upstream retains read scope and file safety checks.
-  // Keep writeFile and unrelated filesystem/host methods denied.
-  'projects.listEntries', 'projects.readFile',
-  'projects.mutate', 'assets.persistChatAttachments', 'assets.createUrl',
-  'attachments.createUploadUrl', 'attachments.delete',
-  // Mobile Usage / Limits use official services; upstream still enforces scopes.
-  'server.refreshProviders', 'server.getUsageSummary', 'server.refreshUsageRates',
-  // Official scheduler owns persistence/execution; upstream still checks read/operate scopes.
-  'scheduledTasks.list', 'scheduledTasks.subscribe', 'scheduledTasks.upsert',
-  'scheduledTasks.setEnabled', 'scheduledTasks.delete', 'scheduledTasks.runNow',
-  // Native VCS / Git workflows, including progress streams. Never allow namespaces wholesale.
-  // Upstream retains read/operate/review scope checks for every method.
-  'subscribeVcsStatus', 'subscribeWorktreeSetup', 'worktreeSetup.cancel',
-  'vcs.refreshStatus', 'vcs.listRefs', 'vcs.pull', 'vcs.createRef', 'vcs.switchRef',
-  'vcs.init', 'vcs.createWorktree', 'vcs.removeWorktree',
-  'git.runStackedAction', 'git.resolvePullRequest', 'git.preparePullRequestThread',
-  'review.getDiffPreview', 'review.getDiffFileContents']);
-export const rpcAllowed = method => methods.has(method);
-export const httpAllowed = (method, url) => {
-  const pathname = url.split('?')[0];
-  // Pi 启动时通过此路由发现并注册 T3 工具；不能被宿主白名单提前拦成 404。
-  // 仅放行 MCP POST，凭据有效性及线程权限仍由上游 McpHttpServer 校验。
-  return (method === 'POST' && pathname === '/mcp') ||
-    (method === 'GET' && (pathname === '/ws' || pathname === '/.well-known/t3/environment' || pathname.startsWith('/api/auth/') ||
-    pathname.startsWith('/api/assets/') || pathname === '/api/orchestration/shell' ||
-    // Mobile bounded snapshots and earlier-history pages retain upstream DPoP/read checks.
-    /^\/api\/orchestration\/threads\/[^/]+(?:\/(?:bounded|history))?$/.test(pathname) || pathname === '/api/connect/link-state')) ||
-    // The official route validates the signed upload token and enforces its byte limit.
-    (method === 'POST' && (pathname === '/oauth/token' || pathname.startsWith('/api/auth/') ||
-      /^\/api\/attachments\/upload\/[^/]+$/.test(pathname) ||
-      ['/api/orchestration/dispatch', '/api/t3-connect/health', '/api/t3-connect/mint-credential', '/api/connect/mint-credential', '/api/connect/preferences'].includes(pathname)));
-};
-export const nativeCapabilities = () => ({ repositoryIdentity: false, connectionProbe: true, attachmentUploads: true, agentActivityPublishing: false });
 export function browserAuthorization(url) {
   const target = new URL(url);
   if (target.origin !== 'https://app.t3.codes' || target.pathname !== '/connect') throw new Error('Unexpected browser authorization');
