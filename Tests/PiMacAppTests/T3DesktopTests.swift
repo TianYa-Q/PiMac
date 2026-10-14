@@ -104,6 +104,39 @@ struct T3DesktopTests {
     #expect(client.shell["refreshProbe"] == nil)
     client.onShell = nil
     #expect(!client.providers.isEmpty)
+    let projectID = try await client.ensureProject(root)
+    let threadID = UUID().uuidString
+    try await client.dispatch([
+      "type": "thread.create", "threadId": threadID, "projectId": projectID,
+      "title": "Settlement transport", "modelSelection": ["instanceId": "pi", "model": "test/model"],
+      "runtimeMode": "full-access", "interactionMode": "default",
+      "branch": NSNull(), "worktreePath": NSNull(),
+    ], refreshAfter: false)
+    try await client.refreshShell()
+    #expect(client.thread(threadID) != nil)
+    try await client.dispatch([
+      "type": "thread.settle", "threadId": threadID,
+    ], refreshAfter: false)
+    try await client.refreshShell()
+    #expect(WorkspaceModel.isSettled(try #require(client.thread(threadID))))
+    try await client.dispatch([
+      "type": "thread.unsettle", "threadId": threadID, "reason": "user",
+    ], refreshAfter: false)
+    // 列表专用刷新也必须保留读取途中发出的后续请求，不能把旧快照当成写入确认。
+    var shellFollowUp: Task<Void, Error>?
+    client.onShell = { [weak client] snapshot in
+      guard let client, shellFollowUp == nil else { return }
+      shellFollowUp = Task { try await client.refreshShell() }
+      var probe = snapshot
+      probe["shellProbe"] = true
+      client.applyShell(probe)
+    }
+    try await client.refreshShell()
+    try await shellFollowUp?.value
+    #expect(shellFollowUp != nil)
+    #expect(client.shell["shellProbe"] == nil)
+    #expect(!WorkspaceModel.isSettled(try #require(client.thread(threadID))))
+    client.onShell = nil
     // This is the same shutdown barrier used by development hot reload.
     #expect(await service.stopAndWait())
     let marker = state.appendingPathComponent("child-owner.json")

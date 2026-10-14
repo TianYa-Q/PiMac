@@ -21,6 +21,8 @@ final class T3DesktopClient: ObservableObject {
   private var loop: Task<Void, Never>?
   private var refreshTask: Task<Void, Error>?
   private var refreshRequested = false
+  private var shellRefreshTask: Task<Void, Error>?
+  private var shellRefreshRequested = false
   private var generation = UUID()
   private var watches: [UUID: (String, (JSON) -> Void, (JSON) -> Void)] = [:]
   private var imageCache: [String: PromptAttachment] = [:]
@@ -117,6 +119,9 @@ final class T3DesktopClient: ObservableObject {
     refreshTask?.cancel()
     refreshTask = nil
     refreshRequested = false
+    shellRefreshTask?.cancel()
+    shellRefreshTask = nil
+    shellRefreshRequested = false
     token = ""
     connectedServerURL = nil
     providers = []
@@ -197,7 +202,9 @@ final class T3DesktopClient: ObservableObject {
   }
 
   @discardableResult
-  func dispatch(_ fields: JSON, commandID: String = UUID().uuidString) async throws -> JSON {
+  func dispatch(
+    _ fields: JSON, commandID: String = UUID().uuidString, refreshAfter: Bool = true
+  ) async throws -> JSON {
     try await waitUntilReady()
     var command = fields
     command["commandId"] = commandID
@@ -211,7 +218,7 @@ final class T3DesktopClient: ObservableObject {
     // outcome, never permission for the UI to replay or create another thread.
     let result = try await rpc(
       Self.mutationMethod(for: command["type"] as? String), payload: command)
-    requestRefresh()
+    if refreshAfter { requestRefresh() }
     return result
   }
 
@@ -261,6 +268,10 @@ final class T3DesktopClient: ObservableObject {
     }
     let current = generation
     let task = Task {
+      // 在任务返回前清除句柄，避免新请求误加入已完成、但调用方尚未清理的任务。
+      defer {
+        if self.generation == current { self.refreshTask = nil }
+      }
       while self.generation == current, self.refreshRequested {
         try Task.checkCancellation()
         self.refreshRequested = false
@@ -268,17 +279,36 @@ final class T3DesktopClient: ObservableObject {
       }
     }
     refreshTask = task
-    defer {
-      // 旧连接结束时不能清除新连接已经创建的刷新任务。
-      if generation == current { refreshTask = nil }
+    try await task.value
+  }
+
+  /// 生命周期确认只依赖列表，不应等待所有打开会话的转录、工具详情和图片下载。
+  /// 写入发生在读取途中时保留一次后续读取；与完整轮询共享列表请求，避免刷新风暴。
+  func refreshShell() async throws {
+    shellRefreshRequested = true
+    if let shellRefreshTask {
+      try await shellRefreshTask.value
+      return
     }
+    let current = generation
+    let task = Task {
+      defer {
+        if self.generation == current { self.shellRefreshTask = nil }
+      }
+      while self.generation == current, self.shellRefreshRequested {
+        try Task.checkCancellation()
+        self.shellRefreshRequested = false
+        let next = try await self.request("/api/orchestration/shell")
+        self.applyShell(T3V2Presentation.shell(next))
+      }
+    }
+    shellRefreshTask = task
     try await task.value
   }
 
   private func refreshSnapshot() async throws {
     let current = generation
-    let next = try await request("/api/orchestration/shell")
-    applyShell(T3V2Presentation.shell(next))
+    try await refreshShell()
     for id in Set(watches.values.map { $0.0 }) {
       guard thread(id) != nil else { continue }
       let escaped = id.addingPercentEncoding(

@@ -40,6 +40,38 @@ struct BulkSettlementTests {
     #expect(WorkspaceModel.canBulkSettle(thread))
   }
 
+  @Test func batchOverlapsRequestsWithBoundedConcurrencyAndRechecksState() async {
+    let workspace = WorkspaceModel(restoreUserState: false)
+    defer { workspace.disconnectAll() }
+    var threads: [[String: Any]] = (0..<8).map {
+      ["id": "\($0)", "status": "idle"]
+    }
+    workspace.server.applyShell(["threads": threads])
+    var inFlight = 0
+    var peak = 0
+    var submitted: [String] = []
+    let result = await workspace.performSettlement(paths: workspace.idleSessionPaths) { id in
+      submitted.append(id)
+      inFlight += 1
+      peak = max(peak, inFlight)
+      defer { inFlight -= 1 }
+      // 首批请求挂起时，会话 4 开始工作；后续补位必须重新校验而不是照旧快照提交。
+      threads[4]["status"] = "running"
+      workspace.server.applyShell(["threads": threads])
+      try await Task.sleep(for: .milliseconds(20))
+      if id == "1" { throw T3DesktopClient.ClientError.rejected }
+    }
+    #expect(peak == 4)
+    #expect(inFlight == 0)
+    #expect(submitted.count == 7)
+    #expect(Set(submitted).count == 7)
+    #expect(!submitted.contains("4"))
+    #expect(result.completed == 6)
+    #expect(result.unconfirmed == 1)
+    // 未确认失败不得伪造本地已完成状态。
+    #expect(!WorkspaceModel.isSettled(workspace.server.thread("1")!))
+  }
+
   @Test func bulkScopeIncludesAllProjectsRegardlessOfSidebarFilter() {
     let workspace = WorkspaceModel(restoreUserState: false)
     defer { workspace.disconnectAll() }

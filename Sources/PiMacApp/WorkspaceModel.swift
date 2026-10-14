@@ -437,26 +437,51 @@ final class WorkspaceModel: ObservableObject {
     isSettlingIdleSessions = true
     Task {
       defer { isSettlingIdleSessions = false }
-      var completed = 0
-      var unconfirmed = 0
-      // 固定本次范围，逐个重查；某个会话失败不阻断其余会话，Server 仍作最终原子校验。
-      for path in paths {
-        guard let id = AppModel.threadID(from: path), let thread = server.thread(id),
-          canSettleIdleSession(thread)
-        else { continue }
-        do {
-          try await server.dispatch(["type": "thread.settle", "threadId": id])
-          completed += 1
-        } catch { unconfirmed += 1 }
+      let (completed, unconfirmed) = await performSettlement(paths: paths) { id in
+        try await self.server.dispatch(
+          ["type": "thread.settle", "threadId": id], refreshAfter: false)
       }
       do {
-        try await server.refresh()
+        try await server.refreshShell()
         selectedModel?.statusText =
           "已 Settle \(completed) 个会话"
           + (unconfirmed > 0 ? "；\(unconfirmed) 个未确认，可能已开始运行或等待处理。" : "。")
       } catch {
         selectedModel?.statusText = "批量 Settle 已提交，但列表刷新失败；请检查 Server 状态，勿重复提交。"
       }
+    }
+  }
+
+  /// 固定本次范围，最多四个请求在途，避免逐个握手的累积延迟或无限并发。
+  /// 每次真正提交前重查本地状态；Server 仍原子校验子树，失败不重试、不阻断其他会话。
+  func performSettlement(
+    paths: [String], dispatch: @escaping @MainActor (String) async throws -> Void
+  ) async -> (completed: Int, unconfirmed: Int) {
+    await withTaskGroup(of: Int.self) { group in
+      var iterator = paths.makeIterator()
+      var completed = 0
+      var unconfirmed = 0
+      func enqueue(_ path: String) {
+        group.addTask { @MainActor in
+          guard !Task.isCancelled,
+            let id = AppModel.threadID(from: path), let thread = self.server.thread(id),
+            self.canSettleIdleSession(thread)
+          else { return 0 }
+          do {
+            try await dispatch(id)
+            return 1
+          } catch { return -1 }
+        }
+      }
+      for _ in 0..<4 {
+        if let path = iterator.next() { enqueue(path) }
+      }
+      while let result = await group.next() {
+        if result == 1 { completed += 1 }
+        if result == -1 { unconfirmed += 1 }
+        if let path = iterator.next() { enqueue(path) }
+      }
+      return (completed, unconfirmed)
     }
   }
 
@@ -481,8 +506,8 @@ final class WorkspaceModel: ObservableObject {
         var payload = action.payload
         payload["threadId"] = id
         // 运行中、等待用户等限制由 Server 原子校验，不能仅依赖已打开的桌面标签。
-        try await server.dispatch(payload)
-        try await server.refresh()
+        try await server.dispatch(payload, refreshAfter: false)
+        try await server.refreshShell()
       } catch { selectedModel?.statusText = "会话状态更新未确认；运行中或等待处理的任务不能收起，请检查 Server 状态。" }
     }
   }
