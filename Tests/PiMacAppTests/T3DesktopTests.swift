@@ -41,6 +41,56 @@ struct T3DesktopTests {
     #expect(deliveries == 3)
   }
 
+  @Test func snapshotIdentityIncludesContentBeyondThreadEventSequence() throws {
+    let before: [String: Any] = [
+      "snapshotSequence": 42,
+      "projection": ["messages": [["id": "inherited-message", "text": "Before"]]],
+    ]
+    let reordered: [String: Any] = [
+      "projection": ["messages": [["text": "Before", "id": "inherited-message"]]],
+      "snapshotSequence": 42,
+    ]
+    let after: [String: Any] = [
+      "snapshotSequence": 42,
+      "projection": ["messages": [["id": "inherited-message", "text": "After"]]],
+    ]
+    let first = try T3DesktopClient.snapshotFingerprint(before)
+    #expect(first == (try T3DesktopClient.snapshotFingerprint(reordered)))
+    #expect(first != (try T3DesktopClient.snapshotFingerprint(after)))
+  }
+
+  @Test func snapshotAcknowledgementBelongsToEachSubscriptionAndRetriesIncompleteAssets() throws {
+    let fingerprint = try T3DesktopClient.snapshotFingerprint(["snapshotSequence": 42])
+    var deliveries = 0
+    let first = T3DesktopClient.ThreadWatch(
+      threadID: "thread", receive: { _ in deliveries += 1 }, receiveUI: { _ in })
+    first.deliver([:], fingerprint: fingerprint, complete: true)
+    #expect(first.deliveredSnapshot == fingerprint)
+    let reopened = T3DesktopClient.ThreadWatch(
+      threadID: "thread", receive: { _ in deliveries += 1 }, receiveUI: { _ in })
+    #expect(reopened.deliveredSnapshot == nil)
+    // 旧读取完成，不能把新观察者标成已更新。
+    first.deliver([:], fingerprint: fingerprint, complete: true)
+    #expect(reopened.deliveredSnapshot == nil)
+    reopened.deliver([:], fingerprint: fingerprint, complete: false)
+    #expect(reopened.deliveredSnapshot == nil)
+    reopened.deliver([:], fingerprint: fingerprint, complete: true)
+    #expect(reopened.deliveredSnapshot == fingerprint)
+    reopened.invalidate()
+    #expect(reopened.deliveredSnapshot == nil)
+    #expect(first.deliveredSnapshot == fingerprint)
+    #expect(deliveries == 4)
+  }
+
+  @Test func snapshotCallbackInvalidationIsNotOverwritten() throws {
+    let fingerprint = try T3DesktopClient.snapshotFingerprint(["snapshotSequence": 42])
+    var observer: T3DesktopClient.ThreadWatch!
+    observer = T3DesktopClient.ThreadWatch(
+      threadID: "thread", receive: { _ in observer.invalidate() }, receiveUI: { _ in })
+    observer.deliver([:], fingerprint: fingerprint, complete: true)
+    #expect(observer.deliveredSnapshot == nil)
+  }
+
   @Test func connectionFailuresShowStageWithoutLeakingErrorDetails() {
     let error = NSError(
       domain: NSURLErrorDomain, code: URLError.timedOut.rawValue,
@@ -114,6 +164,22 @@ struct T3DesktopTests {
     ], refreshAfter: false)
     try await client.refreshShell()
     #expect(client.thread(threadID) != nil)
+    let firstOwner = UUID()
+    let secondOwner = UUID()
+    var firstDeliveries = 0
+    var secondDeliveries = 0
+    client.watch(threadID, owner: firstOwner) { _ in firstDeliveries += 1 }
+    try await client.refresh()
+    #expect(firstDeliveries == 1)
+    try await client.refresh()
+    #expect(firstDeliveries == 1)
+    // 同一快照必须交付给新观察者，但不能重复刷新已有页面。
+    client.watch(threadID, owner: secondOwner) { _ in secondDeliveries += 1 }
+    try await client.refresh()
+    #expect(firstDeliveries == 1)
+    #expect(secondDeliveries == 1)
+    client.unwatch(owner: firstOwner)
+    client.unwatch(owner: secondOwner)
     try await client.dispatch([
       "type": "thread.settle", "threadId": threadID,
     ], refreshAfter: false)

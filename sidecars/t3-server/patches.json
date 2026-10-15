@@ -1,4 +1,20 @@
 {
+  "apps/server/src/provider/piThinkingCapabilities.ts": [
+  {
+    "oldText": "  if (levels.length === 0) return EMPTY_PI_MODEL_CAPABILITIES;",
+    "newText": "  // 非推理模型仍可能支持 Fast；两种能力相互独立。"
+  },
+  {
+    "oldText": "      {\n        id: \"thinking\",\n        label: \"Thinking\",\n        type: \"select\",\n        options: levels.map((level): ProviderOptionChoice => ({\n          id: level,\n          label: PI_THINKING_LEVEL_LABELS[level],\n          ...(level === defaultLevel ? { isDefault: true } : {}),\n        })),\n      },",
+    "newText": "      ...(levels.length === 0 ? [] : [{\n        id: \"thinking\" as const, label: \"Thinking\", type: \"select\" as const,\n        options: levels.map((level): ProviderOptionChoice => ({\n          id: level, label: PI_THINKING_LEVEL_LABELS[level],\n          ...(level === defaultLevel ? { isDefault: true } : {}),\n        })),\n      }]),\n      // 按真实 provider/API 判断，不依赖会变化的模型名，也不让虚拟路由误报。\n      ...([\"openai\", \"openai-codex\"].includes(String(recordField(model, \"provider\"))) &&\n        [\"openai-responses\", \"openai-codex-responses\"].includes(String(recordField(model, \"api\")))\n        ? [{ id: \"fastMode\", label: \"Fast\", type: \"select\" as const,\n            options: [{ id: \"off\", label: \"Off\", isDefault: true }, { id: \"on\", label: \"On\" }] }]\n        : []),"
+  }
+],
+  "apps/server/src/orchestration-v2/Adapters/piT3McpExtensionSource.ts": [
+  {
+    "oldText": "export default async function t3McpExtension(pi: ExtensionAPI) {",
+    "newText": "export default async function t3McpExtension(pi: ExtensionAPI) {\n  let enabled = process.env.PIMAC_FAST_MODE === \"1\";\n  const publish = (ctx: { ui: { setStatus(key: string, value: string): void } }) =>\n    ctx.ui.setStatus(\"pimac-fast\", enabled ? \"on\" : \"off\");\n\n  pi.on(\"session_start\", (_event, ctx) => publish(ctx));\n  pi.registerCommand(\"pimac-fast\", {\n    description: \"Set Pi Mac OpenAI/Codex Fast mode (on/off)\",\n    handler: async (args, ctx) => {\n      if (!ctx.isIdle()) throw new Error(\"Wait until the current task finishes.\");\n      if (args.trim() !== \"on\" && args.trim() !== \"off\")\n        throw new Error(\"Expected on or off.\");\n      enabled = args.trim() === \"on\";\n      publish(ctx);\n    },\n  });\n  pi.on(\"before_provider_request\", (event, ctx) => {\n    // Only native Responses models support this wire contract. ctx.model is the\n    // selected model, not a virtual router's dispatched model: never alter a\n    // request based on a virtual selection's provider alone.\n    const model = ctx.model;\n    if (!enabled || !model) return;\n    if (model.provider !== \"openai\" && model.provider !== \"openai-codex\") return;\n    if (model.api !== \"openai-responses\" && model.api !== \"openai-codex-responses\") return;\n    if (event.payload && typeof event.payload === \"object\" && !Array.isArray(event.payload))\n      return { ...event.payload, service_tier: \"priority\" };\n  });\n"
+  }
+],
   "apps/server/src/orchestration-v2/ProjectionStore.ts": [
 {
   "oldText": "  readonly getThreadsWithPullRequests: (",
@@ -87,7 +103,15 @@
   {
     "oldText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),",
     "newText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),\n            ...(metrics.turnTokenUsage ? { turnTokenUsage: metrics.turnTokenUsage, piMetrics: metrics.telemetry } : {}),"
-  }
+  },
+{
+  "oldText": "      const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {",
+  "newText": "      let fastStatus: string | undefined;\n      const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {\n        if (recordString(event, \"method\") === \"setStatus\" &&\n            recordString(event, \"statusKey\") === \"pimac-fast\") {\n          fastStatus = recordString(event, \"statusText\");\n          return;\n        }"
+},
+{
+  "oldText": "        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&",
+  "newText": "        // 每次选项应用都明确同步开/关，防止切模型或恢复会话沿用旧进程状态。\n        const fast = getModelSelectionStringOptionValue(modelSelection, \"fastMode\") ?? \"off\";\n        if (fast !== \"on\" && fast !== \"off\") return yield* protocolError(\"Invalid Fast mode\");\n        if (fast === \"on\" || fastStatus === \"on\") {\n          const commands = recordField(yield* request({ type: \"get_commands\" }), \"commands\");\n          if (!Array.isArray(commands) || !commands.some(command =>\n            recordString(command, \"name\") === \"pimac-fast\" &&\n            recordString(command, \"source\") === \"extension\")) {\n            return yield* protocolError(\"Fast extension unavailable; no prompt was sent\");\n          }\n          if (fast === \"on\") {\n            const current = recordField(yield* request({ type: \"get_state\" }), \"model\");\n            if (![\"openai\", \"openai-codex\"].includes(recordString(current, \"provider\") ?? \"\") ||\n                ![\"openai-responses\", \"openai-codex-responses\"].includes(recordString(current, \"api\") ?? \"\")) {\n              return yield* protocolError(\"Model does not support Fast mode\");\n            }\n          }\n          fastStatus = undefined;\n          const result = yield* request({ type: \"prompt\", message: \"/pimac-fast \" + fast });\n          // UI 事件由另一条 fiber 消费；只接受有明确状态确认的命令，不把 handled 当作成功。\n          for (let attempt = 0; attempt < 50 && fastStatus !== fast; attempt++) {\n            yield* Effect.sleep(\"20 millis\");\n          }\n          if (recordString(result, \"disposition\") !== \"handled\" || fastStatus !== fast) {\n            return yield* protocolError(\"Fast mode not confirmed; extension unavailable or command failed\");\n          }\n        }\n        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&"
+}
 ],
   "packages/contracts/src/orchestrationV2.ts": [
 {

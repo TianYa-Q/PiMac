@@ -24,9 +24,8 @@ final class T3DesktopClient: ObservableObject {
   private var shellRefreshTask: Task<Void, Error>?
   private var shellRefreshRequested = false
   private var generation = UUID()
-  private var watches: [UUID: (String, (JSON) -> Void, (JSON) -> Void)] = [:]
+  private var watches: [UUID: ThreadWatch] = [:]
   private var imageCache: [String: PromptAttachment] = [:]
-  private var threadRevisions: [String: Int] = [:]
   private var replyImageCache: [String: [PromptAttachment]] = [:]
   private var toolDetailCache: [String: JSON] = [:]
   private var imageFailures: [String: Int] = [:]
@@ -35,6 +34,38 @@ final class T3DesktopClient: ObservableObject {
   private let searchIndex = ServerSessionSearchIndex()
   private var hasDeliveredShell = false
   private let sessionCatalog = SessionCatalogCache()
+
+  /// 每次 watch 都创建独立对象；刷新期间取消、重新订阅，不会误确认新订阅已收到快照。
+  final class ThreadWatch {
+    let threadID: String
+    let receive: (JSON) -> Void
+    let receiveUI: (JSON) -> Void
+    private(set) var deliveredSnapshot: Data?
+
+    init(threadID: String, receive: @escaping (JSON) -> Void, receiveUI: @escaping (JSON) -> Void) {
+      self.threadID = threadID
+      self.receive = receive
+      self.receiveUI = receiveUI
+    }
+
+    func deliver(_ detail: JSON, fingerprint: Data, complete: Bool) {
+      // 先记账再回调；回调可能重新订阅或使附件缓存失效，不能在返回后覆盖其结果。
+      deliveredSnapshot = complete ? fingerprint : nil
+      receive(detail)
+    }
+
+    func invalidate() { deliveredSnapshot = nil }
+  }
+
+  static func snapshotFingerprint(_ snapshot: JSON) throws -> Data {
+    // JSON 字典顺序无语义，规范化后只保存摘要，避免为每个页面保留完整转录副本。
+    let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
+    return Data(SHA256.hash(data: data))
+  }
+
+  private func invalidateThreadSnapshots() {
+    for observer in watches.values { observer.invalidate() }
+  }
 
   static func pollIntervalMilliseconds(hasRunningThread: Bool) -> Int {
     hasRunningThread ? 500 : 2000
@@ -80,7 +111,7 @@ final class T3DesktopClient: ObservableObject {
             self.syncedModelPreferences = nil
             self.providers = []
             self.modelContextSettings = .empty
-            self.threadRevisions.removeAll()
+            self.invalidateThreadSnapshots()
             self.searchIndex.reset()
             self.isConnected = false
           }
@@ -129,7 +160,6 @@ final class T3DesktopClient: ObservableObject {
     syncedModelPreferences = nil
     isConnected = false
     watches.removeAll()
-    threadRevisions.removeAll()
     imageCache.removeAll()
     replyImageCache.removeAll()
     toolDetailCache.removeAll()
@@ -157,7 +187,7 @@ final class T3DesktopClient: ObservableObject {
     _ id: String, owner: UUID, receiveUI: @escaping (JSON) -> Void = { _ in },
     receive: @escaping (JSON) -> Void
   ) {
-    watches[owner] = (id, receive, receiveUI)
+    watches[owner] = ThreadWatch(threadID: id, receive: receive, receiveUI: receiveUI)
     // Reopening a thread retries failed images without re-downloading successful ones.
     for key in imageFailures.keys {
       toolDetailCache.removeValue(forKey: key)
@@ -165,7 +195,6 @@ final class T3DesktopClient: ObservableObject {
     }
     imageFailures.removeAll()
     htmlRetryAfter.removeAll()
-    threadRevisions.removeValue(forKey: id)
     requestRefresh()
   }
   func unwatch(owner: UUID) { watches.removeValue(forKey: owner) }
@@ -309,15 +338,19 @@ final class T3DesktopClient: ObservableObject {
   private func refreshSnapshot() async throws {
     let current = generation
     try await refreshShell()
-    for id in Set(watches.values.map { $0.0 }) {
+    for id in Set(watches.values.map { $0.threadID }) {
       guard thread(id) != nil else { continue }
       let escaped = id.addingPercentEncoding(
         withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
       let nativeDetail = try await request("/api/orchestration/threads/\(escaped)")
       guard generation == current else { return }
-      // Check the native revision before traversing the full transcript or writing metrics.
-      let revision = nativeDetail["snapshotSequence"] as? Int ?? -1
-      if revision >= 0, threadRevisions[id] == revision { continue }
+      // 快照含继承历史等跨线程派生数据，当前线程的事件序号不能完整代表内容。
+      // 按实际载荷去重，且每个观察者独立确认，避免新订阅被旧订阅的缓存跳过。
+      let fingerprint = try Self.snapshotFingerprint(nativeDetail)
+      let observers = watches.filter {
+        $0.value.threadID == id && $0.value.deliveredSnapshot != fingerprint
+      }
+      if observers.isEmpty { continue }
       if let stats = T3V2Presentation.stats(nativeDetail),
         let data = try? JSONEncoder().encode(stats)
       {
@@ -330,13 +363,17 @@ final class T3DesktopClient: ObservableObject {
         loadHTML: { try await self.htmlRenderDocument($0) })
       let detail = T3V2Presentation.detail(richNative)
       let ui = T3V2Presentation.requests(nativeDetail)
-      for callback in watches.values.filter({ $0.0 == id }).map({ $0.2 }) { callback(ui) }
+      for (owner, observer) in observers where watches[owner] === observer {
+        observer.receiveUI(ui)
+      }
       let (withReplies, repliesComplete) = await hydrateReplyImages(detail, threadID: id)
       let (hydrated, complete) = await hydrateImages(withReplies)
       guard generation == current else { return }
-      if complete, repliesComplete, toolsComplete, revision >= 0 { threadRevisions[id] = revision }
-      let callbacks = watches.values.filter { $0.0 == id }.map { $0.1 }
-      for callback in callbacks { callback(hydrated) }
+      for (owner, observer) in observers where watches[owner] === observer {
+        observer.deliver(
+          hydrated, fingerprint: fingerprint,
+          complete: complete && repliesComplete && toolsComplete)
+      }
     }
   }
   // Do not invalidate the entire desktop or rewrite its cache on identical polls.
@@ -864,7 +901,7 @@ final class T3DesktopClient: ObservableObject {
       recovered = true
     }
     if recovered {
-      threadRevisions.removeAll()
+      invalidateThreadSnapshots()
       requestRefresh()
     }
     return html

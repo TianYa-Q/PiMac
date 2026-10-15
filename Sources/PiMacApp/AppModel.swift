@@ -290,7 +290,8 @@ final class AppModel: ObservableObject {
   private var modelSelection: [String: Any] {
     [
       "instanceId": "pi", "model": selectedModelId,
-      "options": [["id": "thinking", "value": selectedThinkingLevel]],
+      "options": [["id": "thinking", "value": selectedThinkingLevel]]
+        + (fastModeAvailable ? [["id": "fastMode", "value": fastModeEnabled ? "on" : "off"]] : []),
     ]
   }
   func sendPrompt(delivery: QueuedPromptDelivery = .steer) {

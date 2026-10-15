@@ -37,14 +37,17 @@ test('Pi lifecycle stays upstream-owned with bounded telemetry, account selectio
   assert(imageProjection, 'Image blocks must survive the native tool output projection');
   assert(imageProjection.newText.includes('? { output: resultRecord }'));
   assert(imageProjection.newText.includes(': outputText.length > 0 ? { output: outputText } : {}'));
-  assert.equal(patches[adapter].length - imagePatches.length, 7);
+  const fastPatches = patches[adapter].filter(entry => entry.newText.includes("fastStatus"));
+  assert.equal(fastPatches.length, 2);
+  assert(fastPatches.some(entry => entry.newText.includes('Fast mode not confirmed')));
+  assert.equal(patches[adapter].length - imagePatches.length - fastPatches.length, 7);
   const selection = patches[adapter].filter(entry => entry.newText.includes('accountSelections.record'));
   assert.equal(selection.length, 1);
   assert(selection[0].newText.includes('state?.providerThread.appThreadId ?? input.threadId'));
   assert.equal(patches[contract].length, 3);
   assert.equal(patches[contract].filter(entry => entry.newText.includes("latestMessageAt: Schema.optional")).length, 2);
   assert(patches[contract].some(entry => entry.newText.includes('piMetrics: Schema.optional')));
-  for (const entry of patches[adapter]) {
+  for (const entry of patches[adapter].filter(entry => !fastPatches.includes(entry))) {
     assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage|toolOutputImages|accountSelections\.record/.test(entry.newText));
     assert(!/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText));
   }
