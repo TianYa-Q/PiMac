@@ -229,8 +229,11 @@ else:
                 self.assertEqual(binary.read_text(), 'new executable')
                 self.assertEqual((copied / 'resource').read_text(), 'second')
                 self.assertFalse((copied / 'obsolete').exists())
-                self.assertEqual(command.call_args_list[0].args[0][0], 'codesign')
-                self.assertEqual(command.call_args_list[1].args[0][-2:], ['-f', str(contents.parent)])
+                native_signing = command.call_args_list[0].args[0]
+                self.assertEqual(native_signing[:2], ['zsh', str(dev.root / 'scripts/sign-native-runtime.sh')])
+                self.assertEqual(native_signing[2], str(contents / 'Resources'))
+                self.assertEqual(command.call_args_list[1].args[0][0], 'codesign')
+                self.assertEqual(command.call_args_list[2].args[0][-2:], ['-f', str(contents.parent)])
 
     def test_running_apps_matches_bundle_paths_with_spaces_and_old_debug_app(self):
         dev = self.load_dev()
@@ -250,8 +253,52 @@ else:
             icon = dev.root / 'Sources/PiMacApp/Resources/AppIcon.icns'
             icon.parent.mkdir(parents=True)
             icon.touch()
-            with patch.object(dev, 'run_build_command', return_value=(1, '')):
-                self.assertIsNone(dev.bundle_development_app(binary_dir))
+            for failed_command in ['zsh', 'codesign']:
+                with self.subTest(failed_command=failed_command):
+                    def run(command, capture=False):
+                        return (1 if command[0] == failed_command else 0, '')
+                    with patch.object(dev, 'run_build_command', side_effect=run) as command:
+                        self.assertIsNone(dev.bundle_development_app(binary_dir))
+                        self.assertFalse(any(call.args[0][-2:-1] == ['-f'] for call in command.call_args_list))
+
+    def test_native_signing_includes_owner_only_helpers_and_any_execute_bit(self):
+        temporary_root = SCRIPT.parents[1] / 'tmp'
+        temporary_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temporary_root) as directory:
+            root = Path(directory)
+            resources = root / 'Resources with spaces'
+            resources.mkdir()
+            commands = root / 'commands'
+            commands.mkdir()
+            fixtures = {
+                'owner-helper': 0o700,
+                'group-helper': 0o610,
+                'other-helper': 0o601,
+                'library.node': 0o600,
+                'plain-script': 0o755,
+                'README': 0o644,
+            }
+            for name, mode in fixtures.items():
+                path = resources / name
+                path.write_text('fixture')
+                path.chmod(mode)
+            (commands / 'file').write_text(
+                '#!/bin/sh\ncase "${2##*/}" in owner-*|group-*|other-*|*.node) '
+                'echo "Mach-O 64-bit arm64 executable";; *) echo "ASCII text";; esac\n')
+            (commands / 'codesign').write_text(
+                '#!/bin/sh\nfor last do :; done\nprintf "%s\\n" "$last" >> "$SIGN_LOG"\n')
+            for path in commands.iterdir():
+                path.chmod(0o700)
+            log = root / 'signed.log'
+            environment = {**os.environ, 'PATH': str(commands) + ':' + os.environ['PATH'], 'SIGN_LOG': str(log)}
+            subprocess.run(['zsh', str(SCRIPT.with_name('sign-native-runtime.sh')), str(resources), '-'],
+                           check=True, env=environment, capture_output=True, text=True)
+            self.assertEqual(set(log.read_text().splitlines()),
+                             {str(resources / name) for name in fixtures if name not in ['plain-script', 'README']})
+            (commands / 'codesign').write_text('#!/bin/sh\nexit 23\n')
+            failed = subprocess.run(['zsh', str(SCRIPT.with_name('sign-native-runtime.sh')), str(resources), '-'],
+                                    env=environment, capture_output=True, text=True)
+            self.assertNotEqual(failed.returncode, 0, 'native signing failure must stop outer bundle publication')
 
     def test_change_summary_includes_added_modified_and_removed_files(self):
         dev = self.load_dev()

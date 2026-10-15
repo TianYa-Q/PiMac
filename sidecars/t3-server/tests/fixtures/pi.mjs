@@ -46,7 +46,7 @@ process.stdin.on('data', chunk => {
       }
       case 'get_commands': response({ commands: [{ name: 'pimac-fast', source: 'extension' }, { name: 'accounts', source: 'extension' }] }); break;
       case 'get_available_models': response({ models: [model, ...(process.env.PIMAC_FIXTURE_EXTRA_MODEL === '1'
-        ? [{ ...model, id: 'fallback', name: 'Forbidden fallback' }] : [])] }); break;
+        ? [{ ...model, id: 'alternate', name: 'Alternate Model' }] : [])] }); break;
       case 'set_model': model = { provider: command.provider, id: command.modelId, name: command.modelId, api: command.provider === 'openai' ? 'openai-responses' : command.provider === 'openai-codex' ? 'openai-codex-responses' : 'test' }; response(model); break;
       case 'set_thinking_level': thinkingLevel = command.level; response(); break;
       case 'set_session_name': case 'clear_queue': response(); break;
@@ -85,7 +85,7 @@ process.stdin.on('data', chunk => {
               updatedAt: Date.now(), accounts: [], supportsAccountSwitch: true, managesSelectedAuth: true }) });
         }
         if (command.message === 'wait') break;
-        if (['mcp-discovery', 'html-render', 'mcp-model-lock'].includes(command.message)) {
+        if (['mcp-discovery', 'html-render', 'mcp-model-targets'].includes(command.message)) {
           send({ type: 'message_start', message: { role: 'assistant', content: [] } });
           // 使用上游注入的会话凭据，只输出工具名；不把 token 写入日志或投影。
           void (async () => {
@@ -107,20 +107,16 @@ process.stdin.on('data', chunk => {
             };
             await request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {},
               clientInfo: { name: 'pimac-fixture', version: '1' } });
-            if (command.message === 'mcp-model-lock') {
+            if (command.message === 'mcp-model-targets') {
               const capabilities = await request(2, 'tools/call', { name: 'orchestrator_capabilities', arguments: {} });
-              const rejected = [];
-              for (const target of [{ model: 'test/fallback' }, { model: 'default' },
-                { providerInstanceId: 'other' }, { driverKind: 'codex' }]) {
-                rejected.push(await request(3, 'tools/call', { name: 'delegate_task', arguments: {
-                  task: 'forbidden child', target, mode: 'async' } }));
-              }
               const accepted = [];
-              for (const target of [undefined, { providerInstanceId: 'pi', model: 'test/model', driverKind: 'pi' }]) {
-                accepted.push(await request(4, 'tools/call', { name: 'delegate_task', arguments: {
-                  task: 'same-model child', ...(target ? { target } : {}), mode: 'async' } }));
+              // 省略 target 仍继承父设置；模型覆盖和完整 target 都交给官方解析器处理。
+              for (const [index, target] of [undefined, { model: 'test/alternate' },
+                { providerInstanceId: 'pi', model: 'test/alternate', driverKind: 'pi' }].entries()) {
+                accepted.push(await request(3 + index, 'tools/call', { name: 'delegate_task', arguments: {
+                  task: 'catalog-selected child', ...(target ? { target } : {}), mode: 'async' } }));
               }
-              const text = JSON.stringify({ modelLock: true, capabilities, rejected, accepted });
+              const text = JSON.stringify({ modelTargets: true, capabilities, accepted });
               send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: text } });
               send({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }], stopReason: 'stop' } });
               return;

@@ -41,9 +41,10 @@ struct FastModeTests {
       service.stop()
       workspace.disconnectAll()
     }
-    try service.start(
-      workspace: workspace, token: T3NetworkEndpoint.secret(),
-      stateDirectory: root.appendingPathComponent("state"))
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace,
+      stateDirectory: root.appendingPathComponent("state"), binary: binary,
+      model: "openai-codex/gpt-6.1-sol")
     client.start(service: service)
     try await client.waitUntilReady()
     model.attach(to: client)
@@ -73,6 +74,7 @@ struct FastModeTests {
     try await client.refresh()
     #expect(model.fastModeEnabled)
     #expect(model.selectedThinkingLevel == "high")
+    let previousSettledTurn = model.lastSettledTurnID
     model.composerText = "Fast request"
     model.sendPrompt()
     for _ in 0..<200 {
@@ -85,7 +87,13 @@ struct FastModeTests {
       }
       try await Task.sleep(for: .milliseconds(25))
     }
-    for _ in 0..<200 where model.isBusy { try await Task.sleep(for: .milliseconds(25)) }
+    // 扩展确认发生在真实 prompt 之前；isBusy 尚未投影时可能仍为 false。
+    // 必须等本轮 settlement，而不是把启动前的空闲误当作执行完成。
+    for _ in 0..<400 where model.lastSettledTurnID == previousSettledTurn || model.isBusy {
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    #expect(model.lastSettledTurnID != previousSettledTurn)
+    #expect(!model.isBusy)
     let records = try String(
       contentsOf: root.appendingPathComponent("fixture-rpc.ndjson"), encoding: .utf8)
     #expect(records.contains("/pimac-fast on"))

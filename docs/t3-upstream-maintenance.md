@@ -3,82 +3,75 @@
 ## Current upgrade
 
 - Repository: https://github.com/pingdotgg/t3code, branch `main`.
-- Previous pin: `8d846660cecfc69ef4e192322fced29fa07f374c`.
-- New pin: `442735897f6f92af33798075baa12d4fd4d710dd` (2026-10-06 UTC).
-- Target client: T3 iOS build **109**. EAS manages build numbers remotely;
-  this is an upgrade target, not a verified build-to-commit mapping.
-- SHA-256 manifest: 1,798 pristine upstream files, including the workspace
-  dependency catalog. Generated caches and bundles are not source-controlled.
-- Effect/platform dependencies advance together to `4.0.1`, following upstream.
-  Host/test imports use the stable `effect/http`, `effect/rpc`, `effect/socket`
-  and `effect/process` paths. Orchestration protocol remains 2.
-- Server composition patches follow the renamed upstream layers. Connect
-  reconciliation now calls the official `CloudLink` service rather than a
-  retired HTTP-module helper.
-- Explicitly allow `orchestration.getTurnItem` for lazy full-tool-detail reads;
-  tests cover successful retrieval, missing items and cross-thread isolation.
-  New secret/webhook administration methods remain denied by default.
-- Archive the previous upstream cache before restoring the new pin; do not
-  bypass fetcher's hash checks or restart an active production Server.
+- Previous pin: `442735897f6f92af33798075baa12d4fd4d710dd` (2026-10-06 UTC).
+- New pin: `26fffe5aee22ea9bdd39c5b4c400f643c560b4a0` (2026-10-15 UTC).
+- The commit, pristine source hashes and dependency catalog are recorded in
+  `sidecars/t3-server/upstream-pin.json`. Generated sources/bundles and installed
+  dependencies are not source-controlled.
+- Effect and its Node platform dependencies advance together to `4.0.4`.
+  Orchestration protocol remains 2.
+- Upstream extracted providers and source-control implementations into workspace
+  packages. Local presentation/host patches follow those packages rather than
+  recreating the removed Server modules. The new outer process-runner layer
+  receives Node services before starting upstream.
+- This is a Server source revision, not an iOS build number or a verified
+  build-to-commit mapping. Physical-device acceptance remains separate.
 
-## Official implementations, not local enhancements
+## Product boundary: a personal UI over official T3
 
-At the upgrade baseline, PiDriver, PiRpc, PiAdapterV2 and wire contracts were
-unpatched; subsequent bounded presentation exceptions are listed below. Removed the
-local file-change detail/diff helper, tool-parent inference, output-usage helper,
-assistant-duration wire field, and their helper-only tests. Native tool events,
-file changes, token usage, steering, cancellation and settlement use official
-projection semantics. Desktop tests cover flat Pi tool items and absent output
-speed instead of depending on the deleted enhancements. If upstream supplies
-`turnTokenUsage`, the desktop can use its official turn timestamps; it does not
-inject missing usage.
+PiMac is a single-user UI and host integration for the official Server. It must
+not introduce its own model lock, delegation target filter, endpoint allowlist,
+Provider restriction or terminal/search capability disablement. Upstream owns
+capability discovery, Provider configuration, permission modes, authentication
+and RPC/HTTP scopes. User settings and actual installed/authenticated Provider
+availability still apply; absence of credentials is not a reason to fabricate
+availability or bypass upstream checks.
 
-Upstream authorizes RPC scopes in connection-scoped group middleware. PiMac no
-longer adds an RPC/HTTP endpoint allowlist or replaces capability declarations;
-credential-free diagnostics observe the official result, including streams. The retired per-handler
-scope wrappers in `ws.ts` are no longer patched. Dynamic device-list checks and
-HTTP authorization remain upstream-owned.
+The former parent-model-only MCP catalog/delegation patches are removed.
+Ordinary and delegated work can select the officially available instances and
+models. The host also preserves the official browser launcher for ordinary
+links and other Provider authorization flows; it captures only a desktop-started
+T3 Connect login for the native authorization UI.
 
-Provider model visibility follows the new config snapshot layout. Pi-only
-mobile history integration preserves Pi dedupe keys with upstream's new
-multi-file Codex deduplication path. Pricing, aggregation and summary contracts
-remain official.
+Upstream authentication, credential isolation, transport protections and private
+supervisor administration are retained. This does not mean exposing an
+unauthenticated Server or passing supervisor secrets into Provider processes.
+Pi account quota snapshots remain a data-source integration: they do not invent
+redemption credentials or implement unsupported account operations.
 
-## Remaining compatibility / host patches
+## Remaining presentation / host patches
 
-- Pi-only driver exposure; disabled native terminal, search and unsupported SDKs.
-- Native supervisor management, loopback/tunnel transport isolation, browser
-  authorization, private readiness and credential-safe subprocess environment.
-- Managed tunnel health/publication diagnostics, not a second tunnel runtime.
-- Desktop model visibility/preferences and config-change notifications.
-- PiAdapterV2: six telemetry-only patches and two raster-image output projection
-  patches; the optional `piMetrics` contract field has one patch. No Pi lifecycle,
-  retry, steering, compaction or transport controls are replaced.
-- PiProvider: two discovery-only patches capture raw context-window metadata for
-  desktop model settings before the official wire projection drops it. Unknown
-  defaults stay unknown; overridden effective windows are not labeled defaults.
-- Review roots bounded to official active projects/worktrees because the host's
-  configured cwd is its private state directory.
-- First mobile message title compatibility for desktop drafts without titleSeed;
-  actual title generation remains the official orchestrator's effect.
-- Pi history and quota sources for stock mobile Usage/Limits, which upstream
-  does not yet read from Pi sessions.
+- Native supervision, readiness, loopback/LAN/tunnel transport integration,
+  credential-safe subprocess environment and private desktop administration.
+- Managed tunnel health/publication diagnostics; lifecycle and recovery remain
+  upstream-owned, including the upstream readiness supervisor.
+- Desktop model visibility preferences and metadata discovery for model context
+  settings; visibility is not a runtime authorization rule.
+- Pi-only discovery defaults through official disabled instance/project settings,
+  with a backed-up one-time migration and disabled-row presentation filtering.
+  Native installers initialize on demand; background installation subscriptions
+  and usage discovery follow official enablement. Managed Codex pending snapshots
+  also copy the instance's enabled flag (not the raw config default), so disabled
+  managed installs do not reappear as enabled status rows. All drivers, runtime APIs
+  and scopes remain intact; later official settings can enable any provider.
+- Pi response telemetry, account-selection status and Fast option integration.
+  Pi transport, cancellation, retry and compaction remain official.
+- Optional `piMetrics` wire projection and scalar latest-message timestamps for
+  desktop presentation; no message bodies are added to the shell projection.
+- Atomic parent/descendant settlement and bounded subtree identity lookup,
+  retaining validation, cycle handling and archived/deleted-node exclusion.
+- Mobile first-message title compatibility for native drafts without titleSeed.
+- Review of active externally bound worktrees, supplementing official root
+  validation because the host cwd is its private state directory.
+- Pi quota sources for stock mobile Limits; usage history and image output now
+  use upstream implementations rather than duplicated local patches.
 
-These are not permission to extend official provider behavior. On subsequent
-upgrades, remove a compatibility patch once the corresponding upstream behavior
-covers PiMac's requirement; do not transplant the old enhancement onto the new
-implementation.
+Remove compatibility patches as upstream covers their behavior. Do not turn an
+upgrade into an alternative Provider engine or a new PiMac permission system.
+Archive an old upstream cache before restoring a new pin; never bypass hash
+validation, overwrite local changes, or restart an active production Server.
 
 ## Validation
-
-For the build-109 upgrade: reproducible bundle check and all 88 Server tests
-pass, including lazy tool retrieval and thread isolation. All 294 Swift tests
-pass. The desktop fixture now asserts its reported Pi telemetry cost (`0.012`)
-instead of the obsolete `cost == nil` expectation; missing-cost coverage remains
-in the presentation tests. No running application or production state was
-restarted/migrated during this upgrade.
-Physical iPhone build-109 connection, sending, tool-detail expansion and
-reconnection remain acceptance tasks.
 
 ```sh
 ./scripts/prepare-t3-server.sh
@@ -87,10 +80,21 @@ npm --prefix sidecars/t3-server test
 swift test
 ```
 
-`upstream-maintenance.test.mjs` checks all manifest hashes and all patch anchors,
-including modules not reached by the current bundle, and explicitly validates
-the bounded telemetry/image/discovery exceptions while keeping Pi transport,
-driver and lifecycle changes forbidden. Protocol fixtures exercise
-native runs, persistence/restart, scheduler, attachments, model selection, Git,
-DPoP, official scope denial and read-only scopes. They do not establish real-model,
-public tunnel or App Store acceptance.
+Upgrade validation passed: reproducible bundle/native-runtime check, all **123**
+Server tests, all **431** Swift tests, and all **32** development-watcher tests.
+An isolated standalone runtime smoke also exercised SDK imports, real PTY output,
+indexed workspace search and native content grep. Protocol fixtures explicitly
+isolate account/data roots and background text generation; an independent
+upstream `codex --version` probe is caught by a rejecting fixture executable,
+never the developer's installed CLI.
+
+`upstream-maintenance.test.mjs` verifies pristine hashes and sequential patch
+anchors, including modules not currently reached by the bundle. Protocol tests
+exercise persistence/restart, scheduling, model selection/delegation, native
+Git, DPoP, official scope denial, attachments, images and mobile transport.
+Native runtime dependencies must also travel with the standalone app; see the
+sidecar README for staging and build-host architecture requirements.
+
+Test fixtures do not establish real-model, public tunnel, physical-device or
+App Store acceptance. No live production state is migrated or application
+restarted by this upgrade task.

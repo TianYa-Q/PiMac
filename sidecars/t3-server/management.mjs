@@ -4,13 +4,12 @@ import * as Option from 'effect/Option';
 import * as DateTime from 'effect/DateTime';
 import * as Fiber from 'effect/Fiber';
 import { HttpRouter, HttpServerRequest, HttpServerResponse, HttpServer } from 'effect/http';
-import { AuthStandardClientScopes, AuthAdministrativeScopes } from '@t3tools/contracts';
+import { AuthAdministrativeScopes, ProviderInstanceId } from '@t3tools/contracts';
 import { EnvironmentAuth } from './upstream/apps/server/src/auth/EnvironmentAuth.ts';
 import { ServerSecretStore } from './upstream/apps/server/src/auth/ServerSecretStore.ts';
 import { CloudCliTokenManager } from './upstream/apps/server/src/cloud/CliTokenManager.ts';
 import { CloudManagedEndpointRuntime } from './upstream/apps/server/src/cloud/ManagedEndpointRuntime.ts';
 import { AgentAwarenessRelay } from './upstream/apps/server/src/relay/AgentAwarenessRelay.ts';
-import { ServerConfig } from './upstream/apps/server/src/config.ts';
 import { CloudLink } from './upstream/apps/server/src/cloud/CloudLink.ts';
 import { setCliDesiredCloudLink } from './upstream/apps/server/src/cloud/CliState.ts';
 import * as CloudConfig from './upstream/apps/server/src/cloud/config.ts';
@@ -20,11 +19,14 @@ export { oauthAwareCommandReadiness } from './oauth-readiness.mjs';
 
 import { originAllowed } from './origin-policy.mjs';
 import { connectionRoute } from './connection-diagnostics.mjs';
-import { setModelPreferences } from './model-preferences.mjs';
+import { setModelPreferences, visibleProviders } from './model-preferences.mjs';
+import { createTextGenerationSettings, configureTitleGenerationSettings } from './text-generation-settings.mjs';
 import { createModelContextSettings } from './model-context.mjs';
 import { ServerSettingsService } from './upstream/apps/server/src/serverSettings.ts';
 
 import { ProviderRegistry } from './upstream/apps/server/src/provider/ProviderRegistry.ts';
+
+const PI_INSTANCE_ID = ProviderInstanceId.make('pi');
 
 export const NativeHttpPolicy = HttpRouter.middleware(effect => Effect.flatMap(HttpServerRequest.HttpServerRequest, request => {
   const broker = getNative();
@@ -50,6 +52,8 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
   const server = yield* HttpServer.HttpServer;
   const relayClient = yield* RelayClient;
   const settings = yield* ServerSettingsService;
+  // 使用官方运行时注入的同一份 registry；不能另建 layer，否则模型发现、
+  // 设置更新与会话路由会落到不同的实例缓存。实例 ID 也不等同于 driver kind。
   const providers = yield* ProviderRegistry;
   const controlContext = yield* Effect.context();
   const modelContext = createModelContextSettings();
@@ -159,10 +163,26 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
     });
     return Promise.race([browser, completed]);
   };
+  const textGeneration = createTextGenerationSettings({
+    readSettings: () => run(settings.getSettings),
+    updateSettings: patch => run(settings.updateSettings(patch)),
+    readProviders: () => run(providers.refreshInstance(PI_INSTANCE_ID)),
+    visibleProviders,
+  });
+  configureTitleGenerationSettings(textGeneration);
+  // 标题服务在桌面连入前也可能被手机触发，启动时就解析一次 Pi 默认值。
+  yield* Effect.promise(() => textGeneration.read().catch(() => {
+    // Registry 启动探测可能尚未发布目录；失败不能阻止整个 Server/认证服务启动。
+    // 设置端点会报告真实错误，标题调用也会重新读取并拒绝未确认的 Provider。
+    broker.message = '标题模型尚未就绪；请在模型设置中刷新。';
+  }));
   broker.management = {
     localURL, status,
+    async textGenerationModel(value) {
+      return value === undefined ? textGeneration.read() : textGeneration.set(value);
+    },
     async modelCatalog() {
-      const snapshots = await run(providers.refreshInstance('pi'));
+      const snapshots = await run(providers.refreshInstance(PI_INSTANCE_ID));
       return { catalogs: JSON.stringify(Object.fromEntries(snapshots.map(p => [p.instanceId, p.models]))) };
     },
     async modelContext(value) {
@@ -171,15 +191,18 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
     async modelPreferences(value) {
       setModelPreferences(value);
       const model = value.defaultModel && !value.hiddenModels.includes(value.defaultModel) ? value.defaultModel : null;
-      await run(settings.updateSettings({ defaultModelSelection: model ? { instanceId: 'pi', model } : null }));
-      await run(providers.refreshInstance('pi'));
+      await run(settings.updateSettings({ defaultModelSelection: model ? { instanceId: PI_INSTANCE_ID, model } : null }));
+      await run(providers.refreshInstance(PI_INSTANCE_ID));
+      await textGeneration.read();
       return { ok: true };
     },
     async desktopSession() {
-      const session = await run(auth.issueSession({ subject: 'pimac-desktop', scopes: AuthStandardClientScopes }));
+      // 单用户桌面使用官方完整管理授权；仍由上游签发、验证和撤销凭据。
+      const session = await run(auth.issueSession({ subject: 'pimac-desktop', scopes: AuthAdministrativeScopes }));
       return { token: session.token };
     },
-    async pairing(input) { const result = await run(auth.issuePairingCredential({ label: input.label, scopes: AuthStandardClientScopes }));
+    // 仅影响用户主动创建的新配对，不静默扩权已有设备；手机需重新配对。
+    async pairing(input) { const result = await run(auth.issuePairingCredential({ label: input.label, scopes: AuthAdministrativeScopes }));
       return { id: result.id, credential: result.credential, expiresAt: DateTime.formatIso(result.expiresAt) }; },
     async clients() { const sessions = await run(auth.listSessions()); return sessions.filter(s => !['pimac-internal-administration', 'pimac-desktop'].includes(s.subject)).map(s => ({
       ...s, issuedAt: DateTime.formatIso(s.issuedAt), expiresAt: DateTime.formatIso(s.expiresAt),

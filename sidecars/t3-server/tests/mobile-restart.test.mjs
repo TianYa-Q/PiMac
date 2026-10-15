@@ -8,7 +8,7 @@ import net from 'node:net';
 import { randomUUID, createHash } from 'node:crypto';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import * as DateTime from 'effect/DateTime';
-import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
+import { createServerGateway } from './fixtures/protocol-server.mjs';
 import { call } from '../generated/client.mjs';
 
 // Emulate TLS termination without contacting the relay or real phone accounts.

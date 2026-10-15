@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-// Shared chooser visibility only. Never filter Pi discovery or runtime routing.
+// Shared chooser/status visibility only. Never filter the runtime registry or routing.
 let file;
 let hiddenModels = new Set();
 const listeners = new Set();
@@ -35,7 +35,8 @@ export function subscribeModelPreferences(listener) {
   return () => listeners.delete(listener);
 }
 export function visibleProviders(providers) {
-  return providers.map(provider => provider.driver === 'pi'
+  // 隐藏已关闭实例的状态行；启用任意官方驱动后自动出现，不按 driver 白名单过滤。
+  return providers.filter(provider => provider.enabled !== false).map(provider => provider.driver === 'pi'
     ? { ...provider, models: provider.models.filter(model => !hiddenModels.has(model.slug)) }
     : provider);
 }

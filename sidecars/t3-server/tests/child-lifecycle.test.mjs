@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { prepareProtocolServer } from './fixtures/protocol-server.mjs';
 import { acquireChildLease } from '../../../Sources/PiMacApp/Resources/t3-bridge/child-lease.mjs';
 
 const leaseURL = new URL('../../../Sources/PiMacApp/Resources/t3-bridge/child-lease.mjs', import.meta.url).href;
@@ -87,7 +88,7 @@ test('legacy live PID and symlink locks remain denied', t => {
 function launch(dir) {
   const binary = path.join(dir, 'fixture-pi');
   fs.writeFileSync(binary, `#!/bin/sh\nexec "${process.execPath}" "${fixture}" "$@"\n`, { mode: 0o700 });
-  const child = spawn(process.execPath, [gateway], { env: { ...process.env,
+  const child = spawn(process.execPath, [gateway], { env: { ...prepareProtocolServer(dir, { binaryPath: binary }),
     PIMAC_T3_BRIDGE_TOKEN: 'ab'.repeat(32), PIMAC_T3_AUTH_FILE: path.join(dir, 'auth.json'), PIMAC_PI_BINARY: binary },
   stdio: ['pipe', 'pipe', 'ignore'] });
   let output = '';
@@ -118,7 +119,7 @@ test('Server exits when its Mac-like parent crashes, even with an inherited stdi
   const dir = directory(t);
   const binary = path.join(dir, 'fixture-pi');
   fs.writeFileSync(binary, `#!/bin/sh\nexec "${process.execPath}" "${fixture}" "$@"\n`, { mode: 0o700 });
-  const env = { ...process.env, PIMAC_T3_BRIDGE_TOKEN: 'ab'.repeat(32),
+  const env = { ...prepareProtocolServer(dir, { binaryPath: binary }), PIMAC_T3_BRIDGE_TOKEN: 'ab'.repeat(32),
     PIMAC_T3_AUTH_FILE: path.join(dir, 'auth.json'), PIMAC_PI_BINARY: binary };
   // stdin is inherited from the test's still-open pipe, so EOF cannot help.
   const launcher = spawn(process.execPath, ['--input-type=module', '-e',

@@ -8,7 +8,7 @@ import { plugin } from '../build.mjs';
 
 const patches = JSON.parse(await readFile(new URL('../patches.json', import.meta.url), 'utf8'));
 const bundled = await build({ entryPoints: [fileURLToPath(new URL(
-  '../upstream/apps/server/src/provider/piThinkingCapabilities.ts', import.meta.url))],
+  '../upstream/packages/provider-pi/src/server/thinkingCapabilities.ts', import.meta.url))],
   bundle: true, write: false, platform: 'node', format: 'esm', plugins: [plugin] });
 const { thinkingCapabilitiesForPiModel } = await import('data:text/javascript;base64,' +
   Buffer.from(bundled.outputFiles[0].contents).toString('base64'));
@@ -31,7 +31,7 @@ test('Fast capabilities follow native provider/API, independently of reasoning o
 
 test('injected runtime extension applies priority only when enabled and rejects invalid or busy changes', async () => {
   // 直接执行构建注入的扩展函数；不能只测已不由新 Server 加载的旧资源文件。
-  const patch = patches['apps/server/src/orchestration-v2/Adapters/piT3McpExtensionSource.ts'][0];
+  const patch = patches['packages/provider-pi/src/server/mcpExtensionSource.ts'][0];
   const compiled = await transform(patch.newText + '\n}', { loader: 'ts', format: 'esm' });
   const { default: factory } = await import('data:text/javascript;base64,' + Buffer.from(compiled.code).toString('base64'));
   const previous = process.env.PIMAC_FAST_MODE;
@@ -64,7 +64,7 @@ test('injected runtime extension applies priority only when enabled and rejects 
 });
 
 test('adapter fails closed before prompting when Fast is unsupported, missing or unconfirmed', () => {
-  const patch = patches['apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts']
+  const patch = patches['packages/provider-pi/src/server/adapter.ts']
     .find(patch => patch.newText.includes('const fast ='));
   const body = patch.newText.slice(0, patch.newText.lastIndexOf('        if ('));
   function run({ commands, model, confirmed, fast = 'on', initialStatus }) {

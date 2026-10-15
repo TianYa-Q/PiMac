@@ -125,12 +125,21 @@ threads use the Server-owned database and private per-instance Pi sessions.
 The stock phone's Usage / Limits screen uses official `server.refreshProviders`,
 `server.getUsageSummary` and `server.refreshUsageRates` without a host allowlist.
 Limits refresh uses the official provider/source service, with upstream
-`orchestration:operate` authorization; summary and pricing use
-`orchestration:read`. All other official endpoints also retain their official
+`orchestration:read` authorization, as do summary and pricing. All other official endpoints also retain their official
 scopes; PiMac no longer rejects authorized requests using a second allowlist.
 
-Usage now scans only the configured Pi agent's `sessions` tree, rather than
-unrelated native CLI history. Final assistant usage maps input/output/cache
+Provider discovery defaults to Pi only using official disabled instance settings,
+not a permissions whitelist. Disabled status rows are hidden from stock phone
+config snapshots/subscriptions; independent installation/version checks are lazy
+and background subscriptions/usage scans follow instance/project enablement.
+The one-time settings migration keeps an exact `.before-pi-discovery-v1` backup
+and separate `.pi-discovery-v1` completion marker. Future official settings edits
+can re-enable any packaged provider without being reset on restart. All native
+drivers, dependencies, explicit installation APIs and administrative auth remain.
+
+By default Usage scans only the configured Pi agent's `sessions` tree, rather than
+unrelated native CLI history. Enabling other instances through official settings
+restores their official usage readers; parsing/aggregation remain upstream-owned. Final assistant usage maps input/output/cache
 counts and reported costs into official aggregation, retaining day/hour/time-zone
 filtering. Shared Pi entry IDs deduplicate forked transcript copies. Provider
 categories describe the underlying model service; currently unsupported service
@@ -148,7 +157,7 @@ Absent OAuth and query failures remain visible as notices. Queries share the
 existing one-minute cache, and closed hosts abort outstanding queries.
 
 Tests cover parsing, fork dedupe keys, quota conversion/redaction, and Tunnel
-DPoP/ticket summary aggregation/source subscription and read-only refresh denial.
+DPoP/ticket summary aggregation/source subscription and official read-scoped Provider refresh.
 Physical-phone display still requires device acceptance.
 
 ## Git / VCS

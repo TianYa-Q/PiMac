@@ -19,6 +19,10 @@ test('shared model preferences are private and do not override Pi compaction con
     { driver: 'codex', models: [{ slug: 'test/hidden' }] }];
   assert.deepEqual(visibleProviders(providers).map(p => p.models.length), [1, 0, 1]);
   assert.equal(providers[0].models.length, 2); // Runtime catalog stays intact.
+  const disabled = { driver: 'claudeAgent', enabled: false, models: [] };
+  const enabled = { driver: 'claudeAgent', enabled: true, models: [] };
+  assert.deepEqual(visibleProviders([...providers, disabled, enabled]).map(p => p.driver), ['pi', 'pi', 'codex', 'claudeAgent']);
+  assert.equal(disabled.enabled, false); // Presentation never mutates settings/runtime.
   configureModelPreferences(directory); // Persisted visibility survives restart.
   assert.equal(visibleProviders(providers)[0].models.length, 1);
   let updates = 0;

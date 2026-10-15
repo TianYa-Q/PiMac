@@ -485,8 +485,14 @@ def bundle_development_app(binary_dir, destination=None):
             "NSAppleEventsUsageDescription": "Request system administrator authorization for temporary network and power settings.",
             "NSAppTransportSecurity": {"NSAllowsLocalNetworking": True},
         }, plist)
+    # 原生 SDK helper/插件不一定被 --deep 识别，必须先签名资源中的 Mach-O。
+    # 仅处理新打包目录；此源码变更不要求、也不能在工作中重启当前 watcher。
+    identity = os.environ.get("CODE_SIGN_IDENTITY", "-")
+    if run_build_command(["zsh", str(root / "scripts/sign-native-runtime.sh"),
+                          str(resources), identity])[0] != 0:
+        return None
     if run_build_command(["codesign", "--force", "--deep", "--sign",
-                          os.environ.get("CODE_SIGN_IDENTITY", "-"), str(app)])[0] != 0:
+                          identity, str(app)])[0] != 0:
         return None
     register = Path("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister")
     if destination is None and run_build_command([str(register), "-f", str(app)])[0] != 0:

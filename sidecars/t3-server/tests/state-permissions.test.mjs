@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, chmod, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
+import { createServerGateway } from './fixtures/protocol-server.mjs';
 
 const token = 'ab'.repeat(32);
 test('downloaded executable tools do not prevent subsequent server startup', async t => {

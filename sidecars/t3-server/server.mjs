@@ -10,7 +10,8 @@ import { ServerConfig, deriveServerPaths, ensureServerDirectories } from './upst
 import { DEFAULT_SIGNAL_EXPORT } from '@t3tools/shared/observability';
 import * as OtelEnvironment from '@t3tools/shared/otelEnvironment';
 import { configureNative } from './native.mjs';
-import { migratePiSettings } from './settings-migration.mjs';
+import { migratePiSettings, migrateProviderDiscoverySettings } from './settings-migration.mjs';
+import { BUILT_IN_DRIVERS } from './upstream/apps/server/src/provider/builtInDrivers.ts';
 import { configureModelPreferences } from './model-preferences.mjs';
 import { prepareServerPort } from './server-port.mjs';
 export { originAllowed } from './origin-policy.mjs';
@@ -52,18 +53,30 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
     if (!fs.existsSync(derived.environmentIdPath)) fs.writeFileSync(derived.environmentIdPath, environmentId, { mode: 0o600, flag: 'wx' });
     if (fs.readFileSync(derived.environmentIdPath, 'utf8').trim() !== environmentId) throw new Error('Foreign T3 environment identity');
     migratePiSettings(derived.settingsPath, piConfig);
+    const providerDefaults = Object.fromEntries(BUILT_IN_DRIVERS
+      .filter(driver => driver.metadata.hasDefaultInstance !== false)
+      .map(driver => [driver.driverKind, { driver: driver.driverKind, enabled: driver.driverKind === 'pi',
+        ...(driver.driverKind === 'pi' ? { config: piConfig } : {}) }]));
     if (!fs.existsSync(derived.settingsPath)) fs.writeFileSync(derived.settingsPath, JSON.stringify({
-      providerInstances: { pi: { driver: 'pi', config: piConfig, enabled: true } }, enableProviderUpdateChecks: false,
+      providerInstances: providerDefaults,
+      // 能力开关沿用官方默认值及用户设置；实例发现默认仅 Pi，可在官方设置重新启用。
       defaultThreadEnvMode: 'local', defaultRuntimeMode: 'full-access', defaultAutoPull: false,
-      enableAgentBrowserAccess: false, enableAgentDeviceAccess: false,
     }), { mode: 0o600, flag: 'wx' });
-    return { ...derived, mode: 'web', port: binding.port, host: '127.0.0.1', cwd: directory, baseDir: directory,
+    migrateProviderDiscoverySettings(derived.settingsPath, providerDefaults);
+    // 不继承官方桌面启动器的凭据、FD 或开发认证；PiMac 仍以仅回环的 web
+    // 服务运行。显式列出可选集成入口，避免上游新增桌面能力时误接宿主资源。
+    return ServerConfig.of({ ...derived, mode: 'web', port: binding.port, host: '127.0.0.1', cwd: directory, baseDir: directory,
       logLevel: 'None', traceMinLevel: 'None', traceTimingEnabled: false, traceBatchWindowMs: 200,
       traceMaxBytes: 1024 * 1024, traceMaxFiles: 2,
+      otlpTracesUrl: undefined, otlpMetricsUrl: undefined, otlpLogsUrl: undefined,
       otlpTracesExport: DEFAULT_SIGNAL_EXPORT, otlpMetricsExport: DEFAULT_SIGNAL_EXPORT, otlpLogsExport: DEFAULT_SIGNAL_EXPORT, otelEnvironment: OtelEnvironment.none,
-      staticDir: undefined, devUrl: undefined, devAllowedOrigins: [], noBrowser: true, startupPresentation: 'headless',
+      desktopBootstrapToken: undefined, desktopBootstrapSecret: undefined,
+      desktopTelemetryFd: undefined, desktopTelemetryControlFd: undefined,
+      desktopBrowserFd: undefined, desktopBrowserControlFd: undefined, resourceMonitorPath: undefined,
+      shellEnvironmentPrepared: false,
+      staticDir: undefined, devUrl: undefined, devAuthToken: undefined, devAllowedOrigins: [], noBrowser: true, startupPresentation: 'headless',
       autoBootstrapProjectFromCwd: false, logWebSocketEvents: false, tailscaleServeEnabled: false, tailscaleServePort: 443,
-    };
+    });
   })).pipe(Layer.provide(NodeServices.layer));
   const quietConsole = new Proxy({}, { get: () => () => {} });
   const controller = new AbortController();
@@ -81,7 +94,9 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
       resolveManagement(management);
     } catch (error) { rejectManagement(error); }
   };
-  const program = runServer.pipe(Effect.provide(configLayer), Effect.provide(Logger.layer([])),
+  // 新版 ProcessRunner 在构造外层服务时就获取 ChildProcessSpawner；仅在
+  // configLayer 或上游内部提供平台层太晚，必须同时覆盖 runServer 的启动边界。
+  const program = runServer.pipe(Effect.provide(configLayer), Effect.provide(NodeServices.layer), Effect.provide(Logger.layer([])),
     Effect.provideService(Console.Console, quietConsole));
   const completion = Effect.runPromise(program, { signal: controller.signal }).catch(error => {
     if (!controller.signal.aborted) {

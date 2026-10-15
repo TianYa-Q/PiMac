@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, mkdir, writeFile, chmod, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import * as DateTime from 'effect/DateTime';
-import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
+import { createServerGateway, fixtureEnvironment } from './fixtures/protocol-server.mjs';
 import WebSocket from 'ws';
 import http from 'node:http';
 import { originAllowed } from '../origin-policy.mjs';
@@ -29,22 +29,21 @@ test('Tunnel HTTPS Origin uses the forwarded scheme without relaxing cross-origi
 
 test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-tunnel-'));
-  const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = join(directory, 'pi-agent');
-  t.after(() => {
-    if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
-  });
-  await mkdir(join(process.env.PI_CODING_AGENT_DIR, 'sessions'), { recursive: true });
+  // Usage 只发现已启用的实例；共享 fixture 继续隔离凭据、数据根及后台文本生成。
+  const environment = fixtureEnvironment(directory, process.env);
+  await mkdir(join(environment.PI_CODING_AGENT_DIR, 'sessions'), { recursive: true });
   const usageEntry = { type: 'message', id: 'phone-usage', timestamp: '2026-01-01T01:00:00Z',
     message: { role: 'assistant', provider: 'openai-codex', model: 'fixture-model',
       usage: { input: 100, output: 20, cacheRead: 30, cacheWrite: 0, cost: { total: 0.25 } } } };
-  await writeFile(join(process.env.PI_CODING_AGENT_DIR, 'sessions', 'fixture.jsonl'),
+  await writeFile(join(environment.PI_CODING_AGENT_DIR, 'sessions', 'fixture.jsonl'),
     JSON.stringify({ type: 'session', id: 'phone-session' }) + '\n' + JSON.stringify(usageEntry));
-  await writeFile(join(process.env.PI_CODING_AGENT_DIR, 'sessions', 'fork.jsonl'),
+  await writeFile(join(environment.PI_CODING_AGENT_DIR, 'sessions', 'fork.jsonl'),
     JSON.stringify({ type: 'session', id: 'fork-session' }) + '\n' + JSON.stringify(usageEntry));
+  const binaryPath = join(directory, 'fixture-pi');
+  await writeFile(binaryPath, `#!/bin/sh\nexec '${process.execPath}' '${new URL('./fixtures/pi.mjs', import.meta.url).pathname}' "$@"\n`);
+  await chmod(binaryPath, 0o700);
   const gateway = await createServerGateway({ token: 'ab'.repeat(32), directory,
-    piConfig: { enabled: false } });
+    piConfig: { binaryPath } });
   t.after(async () => { await gateway.close(); await rm(directory, { recursive: true, force: true }); });
   const publicBase = 'https://tunnel.example.test';
   const forwarded = { host: 'tunnel.example.test', 'x-forwarded-proto': 'https' };
@@ -79,8 +78,23 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
   const credential = await exchange.json();
   assert.equal(exchange.status, 200, JSON.stringify(credential));
   assert.equal(credential.token_type, 'DPoP');
-  assert(credential.scope.split(' ').includes('orchestration:read'));
-  assert(credential.scope.split(' ').includes('orchestration:operate'));
+  const administrativePermissions = ['orchestration:read', 'orchestration:operate',
+    'settings:write', 'providers:manage', 'environment:maintain', 'preview:operate',
+    'diagnostics:read', 'terminal:read', 'terminal:operate', 'source-control:write',
+    'filesystem:read', 'filesystem:write', 'access:read', 'access:write', 'relay:read', 'relay:write'];
+  for (const permission of administrativePermissions) {
+    assert(credential.scope.split(' ').includes(permission), `New pairing lacks ${permission}`);
+  }
+  // 桌面和新配对手机都由官方签发完整管理权限；不靠绕过 scope middleware。
+  const desktop = await gateway.official.management.desktopSession();
+  const desktopSessionResponse = await fetch(gateway.serverURL + '/api/auth/session', {
+    headers: { authorization: 'Bearer ' + desktop.token },
+  });
+  assert.equal(desktopSessionResponse.status, 200);
+  const desktopSession = await desktopSessionResponse.json();
+  for (const permission of administrativePermissions) {
+    assert(desktopSession.permissions.includes(permission), `Desktop lacks ${permission}`);
+  }
   const mintTicket = async (url = publicBase + '/api/auth/websocket-ticket') => request('/api/auth/websocket-ticket', {
     method: 'POST', headers: { authorization: 'DPoP ' + credential.access_token,
       dpop: await proof(url, credential.access_token), 'content-type': 'application/json' }, body: '{}' });
@@ -132,18 +146,21 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
   // Limits refresh must reach the official provider/source service over the tunnel.
   const refreshed = await rpc('server.refreshProviders', {});
   assert(Array.isArray(refreshed.providers));
-  assert(refreshed.providers.every(provider => provider.driver === 'pi'));
+  assert.deepEqual(refreshed.providers.map(provider => provider.driver), ['pi']);
   const summary = await rpc('server.getUsageSummary', {
     sinceDay: '2026-01-01', untilDay: '2026-01-01', timeZone: 'UTC',
   });
   assert.equal(summary.buckets.length, 1);
-  assert.equal(summary.buckets[0].model, 'fixture-model');
+  assert.equal(summary.buckets[0].model, 'openai-codex/fixture-model');
   assert.equal(summary.buckets[0].totals.uncachedInputTokens, 100);
   assert.equal(summary.buckets[0].totals.cachedInputTokens, 30);
   assert.equal(summary.buckets[0].costUsd, 0.25);
   assert.equal(summary.buckets[0].records, 1); // Forked history must not double-count.
-  assert(summary.sources.every(source => source.fingerprint.resolvedHomePath ===
-    join(process.env.PI_CODING_AGENT_DIR, 'sessions')));
+  assert(summary.sources.every(source => source.fingerprint.provider === 'pi'), 'disabled native usage readers must not scan');
+  const piSources = summary.sources.filter(source => source.fingerprint.provider === 'pi');
+  assert(piSources.length > 0);
+  const sessionsPath = await realpath(join(environment.PI_CODING_AGENT_DIR, 'sessions'));
+  assert(piSources.every(source => source.fingerprint.resolvedHomePath === sessionsPath), JSON.stringify(piSources));
   const configTicket = await mintTicket();
   const { ticket: configSecret } = await configTicket.json();
   const configEvents = await readStream(gateway.serverURL.replace('http:', 'ws:') +
@@ -196,7 +213,7 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
   }, body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
     subject_token_type: 'urn:t3:params:oauth:token-type:environment-bootstrap',
     requested_token_type: 'urn:ietf:params:oauth:token-type:access_token',
-    subject_token: readPairing.credential, scope: 'orchestration:read' }) });
+    subject_token: readPairing.credential, scope: 'orchestration:read filesystem:read diagnostics:read' }) });
   assert.equal(readExchange.status, 200);
   const readCredential = await readExchange.json();
   const readRpc = async (method, input, stream = false) => {
@@ -212,8 +229,8 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
   };
   await assert.rejects(readRpc('orchestration.launchThread', { ...launchInput, commandId: randomUUID() }),
     error => error._tag === 'EnvironmentAuthorizationError' && error.requiredScope === 'orchestration:operate');
-  await assert.rejects(readRpc('server.refreshProviders', {}),
-    error => error._tag === 'EnvironmentAuthorizationError' && error.requiredScope === 'orchestration:operate');
+  // 新上游把目录刷新归入 read scope；不再按旧断言额外限制它。
+  assert(Array.isArray((await readRpc('server.refreshProviders', {})).providers));
   await assert.rejects(readRpc('server.getUsageSummary', invalidUsageWindow),
     error => error._tag === 'UsageReadError' && error.reason === 'invalidWindow');
   assert.equal((await readRpc('scheduledTasks.list', {})).tasks[0].id, task.id);
@@ -262,14 +279,15 @@ test('mobile HTTPS DPoP and WebSocket work with Cloudflare-style TLS termination
     ['vcs.switchRef', { cwd: directory, refName: 'denied' }],
     ['vcs.createWorktree', { cwd: directory, refName: 'main', path: null }],
     ['vcs.removeWorktree', { cwd: directory, path: join(directory, 'denied') }],
-    ['git.resolvePullRequest', { cwd: directory, reference: '1' }],
     ['git.preparePullRequestThread', { cwd: directory, reference: '1', mode: 'worktree' }],
   ]) {
     await assert.rejects(readRpc(method, payload),
       error => error._tag === 'EnvironmentAuthorizationError' && error.requiredScope === 'orchestration:operate');
   }
-  await assert.rejects(readRpc('review.getDiffPreview', { cwd: directory }),
-    error => error._tag === 'EnvironmentAuthorizationError' && error.requiredScope === 'review:write');
+  // 官方现已把 PR 解析和 diff 预览归入只读操作，保留实际业务结果而非旧权限门槛。
+  await assert.rejects(readRpc('git.resolvePullRequest', { cwd: directory, reference: '1' }),
+    error => error._tag === 'GitManagerError' && /resolvePullRequest/.test(error.message));
+  assert.deepEqual((await readRpc('review.getDiffPreview', { cwd: directory })).sources, []);
   await rpc('scheduledTasks.delete', { id: task.id });
   assert.deepEqual(await rpc('scheduledTasks.list', {}), { tasks: [] });
 

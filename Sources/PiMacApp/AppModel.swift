@@ -58,6 +58,7 @@ final class AppModel: ObservableObject {
   weak var extensionUI: ExtensionUIModel?
   var onTelegramLifecycleEvent: ((String) -> Void)?
   private weak var server: T3DesktopClient?
+  private var serverConnectionObservation: AnyCancellable?
   private let observerID = UUID()
   private var connectTask: Task<Void, Never>?
   private var generation = UUID()
@@ -112,6 +113,15 @@ final class AppModel: ObservableObject {
   var canRestartSafely: Bool { !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty }
   var canReloadModelList: Bool { server?.isConnected == true && !isBusy }
   var modelContextWindows: [String: Int] { server?.modelContextWindows ?? [:] }
+  private let disconnectedTextGenerationModels = TextGenerationModelStore()
+  var textGenerationModels: TextGenerationModelStore {
+    server?.textGenerationModels ?? disconnectedTextGenerationModels
+  }
+  var canConfigureTextGenerationModel: Bool { server?.isConnected == true }
+  func updateTextGenerationModel(_ modelID: String?) async {
+    guard let server else { return }
+    await server.updateTextGenerationModel(modelID)
+  }
   var canSubmitPrompt: Bool {
     server?.isConnected == true && connectionState == .connected && !isLoadingConfiguration
       && !isCompacting && !codexRotationInFlight && !submitting && !awaitingAgentStart
@@ -168,6 +178,10 @@ final class AppModel: ObservableObject {
 
   func attach(to server: T3DesktopClient) {
     self.server = server
+    // 设置页也可在断线/重连时保持打开；不能依赖会话消息变化才刷新可编辑状态。
+    serverConnectionObservation = server.$isConnected.removeDuplicates().sink { [weak self] _ in
+      self?.objectWillChange.send()
+    }
     if let projectURL { open(project: projectURL, path: pendingThreadPath) }
   }
   func connect(to projectURL: URL, continueLastSession: Bool = true) {
@@ -691,6 +705,7 @@ final class AppModel: ObservableObject {
     if visible { hidden.remove(modelID) } else { hidden.insert(modelID) }
     UserDefaults.standard.set(Array(hidden), forKey: "t3HiddenModels")
     refreshModels()
+    Task { await updateTextGenerationModel(nil) }
   }
   func setDefaultModel(_ modelID: String?) {
     defaultModelID = modelID

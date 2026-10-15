@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
@@ -8,7 +8,7 @@ import http from 'node:http';
 import { randomUUID, createHash } from 'node:crypto';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 import WebSocket from 'ws';
-import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
+import { createServerGateway } from './fixtures/protocol-server.mjs';
 import { call } from '../generated/client.mjs';
 
 async function unusedPort() {
@@ -32,7 +32,12 @@ function request(base, route, { method = 'GET', headers = {}, body } = {}) {
 
 test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing stay denied', { timeout: 30000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-lan-'));
-  let gateway = await createServerGateway({ token: 'ab'.repeat(32), directory, piConfig: { enabled: false } });
+  // 新上游会在 launch 时校验项目 Provider；使用真实 fixture，而不是禁用后绕过校验。
+  const binaryPath = join(directory, 'fixture-pi');
+  await writeFile(binaryPath, `#!/bin/sh\nexec '${process.execPath}' '${new URL('./fixtures/pi.mjs', import.meta.url).pathname}' "$@"\n`);
+  await chmod(binaryPath, 0o700);
+  const piConfig = { binaryPath };
+  let gateway = await createServerGateway({ token: 'ab'.repeat(32), directory, piConfig });
   const originalServerURL = gateway.serverURL;
   t.after(async () => { await gateway.close(); await rm(directory, { recursive: true, force: true }); });
   assert.deepEqual(gateway.lan.status(), { endpoint: null });
@@ -86,7 +91,13 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
     subject_token_type: 'urn:t3:params:oauth:token-type:environment-bootstrap',
     requested_token_type: 'urn:ietf:params:oauth:token-type:access_token', subject_token: pairing.credential }).toString() });
   assert.equal(exchanged.status, 200, exchanged.body);
-  const token = JSON.parse(exchanged.body).access_token;
+  const exchangedCredential = JSON.parse(exchanged.body);
+  for (const permission of ['settings:write', 'providers:manage', 'environment:maintain',
+    'preview:operate', 'diagnostics:read', 'terminal:read', 'filesystem:read',
+    'filesystem:write', 'source-control:write', 'access:read', 'access:write', 'relay:write']) {
+    assert(exchangedCredential.scope.split(' ').includes(permission), `LAN pairing lacks ${permission}`);
+  }
+  const token = exchangedCredential.access_token;
   const mint = async (scheme = 'http') => request(base, '/api/auth/websocket-ticket', { method: 'POST', headers: {
     authorization: 'DPoP ' + token, dpop: await proof('/api/auth/websocket-ticket', token, scheme),
     'content-type': 'application/json', 'x-forwarded-proto': 'https',
@@ -154,7 +165,7 @@ test('opt-in LAN shares upstream DPoP/WS auth; controls and forwarding spoofing 
   await gateway.close();
   await assert.rejects(gateway.lan.configure(endpoint), /closed/);
   gateway = await createServerGateway({ token: 'ab'.repeat(32), directory,
-    publicEndpoint: endpoint, piConfig: { enabled: false } });
+    publicEndpoint: endpoint, piConfig });
   assert.equal(gateway.serverURL, originalServerURL, 'LAN never changes the saved Tunnel origin');
   await call(wsURL(await ticket()), 'server.probe', {}); // upstream grant survives an actual restart
 });

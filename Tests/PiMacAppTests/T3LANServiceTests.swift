@@ -43,7 +43,8 @@ struct T3LANServiceTests {
     #expect(located == 0)
     let endpoint = try T3NetworkEndpoint(
       host: "0.0.0.0", port: Int(UInt16(bigEndian: address.sin_port)))
-    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret())
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model")
     for _ in 0..<200 where service.serverURL == nil {
       try await Task.sleep(for: .milliseconds(50))
     }

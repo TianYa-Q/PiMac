@@ -6,6 +6,7 @@ import * as Queue from 'effect/Queue';
 import * as Stream from 'effect/Stream';
 import * as Sink from 'effect/Sink';
 import * as Logger from 'effect/Logger';
+import { HttpClient } from 'effect/http';
 import * as RelayClient from '@t3tools/shared/relayClient';
 import * as ChildProcessSpawner from 'effect/process/ChildProcessSpawner';
 import { make } from '../../upstream/apps/server/src/cloud/ManagedEndpointRuntime.ts';
@@ -86,7 +87,13 @@ export async function exerciseTunnelRuntime() {
     await Effect.runPromise(program.pipe(
       Effect.scoped,
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, ChildProcessSpawner.make(spawn)),
-      Effect.provideService(RelayClient.RelayClient, { resolve: Effect.succeed({ status: 'available', executablePath: '/unused' }) }),
+      // 固定为上游管理的当前版本，避免测试意外进入安装/下载分支。
+      Effect.provideService(RelayClient.RelayClient, {
+        resolve: Effect.succeed({ status: 'available', executablePath: '/unused', source: 'managed', version: RelayClient.CLOUDFLARED_VERSION }),
+        pruneManagedVersions: Effect.void,
+      }),
+      // 本用例不报告 metrics 地址，不应触发探测；任何意外网络请求都明确失败。
+      Effect.provideService(HttpClient.HttpClient, HttpClient.make(() => Effect.die('Unexpected connector HTTP request'))),
       Effect.provide(Logger.layer([])),
     ));
   } finally { broker.close(); }

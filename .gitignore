@@ -13,3 +13,5 @@ sidecars/*/node_modules/
 
 # Built before packaging; do not commit the bundled upstream server.
 /Sources/PiMacApp/Resources/t3-bridge/vendor/t3-server.mjs
+/Sources/PiMacApp/Resources/t3-bridge/vendor/node_modules/
+/Sources/PiMacApp/Resources/t3-bridge/vendor/native-runtime.json

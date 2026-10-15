@@ -2,16 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile, chmod, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
+import { createServerGateway } from './fixtures/protocol-server.mjs';
 
 // 用隔离的 Pi agent 目录验证真正的桌面管理端点，绝不写入用户 models.json。
 test('desktop context settings are persisted through authenticated local administration only', async t => {
   const root = new URL('../../../tmp/', import.meta.url).pathname;
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, 'model-context-management-'));
-  const agentDirectory = join(directory, 'agent');
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = agentDirectory;
+  const agentDirectory = join(directory, 'fixture-home', 'pi', 'agent');
   const token = 'cd'.repeat(32);
   const binary = join(directory, 'fixture-pi');
   await writeFile(binary, `#!/bin/sh\nexec '${process.execPath}' '${new URL('./fixtures/pi.mjs', import.meta.url).pathname}' "$@"\n`);
@@ -19,8 +17,6 @@ test('desktop context settings are persisted through authenticated local adminis
   let gateway;
   t.after(async () => {
     await gateway?.close();
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previous;
   });
   gateway = await createServerGateway({ token, directory, piConfig: { binaryPath: binary } });
   await new Promise(resolve => gateway.server.listen(0, '127.0.0.1', resolve));

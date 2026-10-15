@@ -32,9 +32,10 @@ struct HTMLRenderDeliveryTests {
       service.stop()
       workspace.disconnectAll()
     }
-    try service.start(
-      workspace: workspace, token: T3NetworkEndpoint.secret(),
-      stateDirectory: root.appendingPathComponent("state"))
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace,
+      stateDirectory: root.appendingPathComponent("state"), binary: binary,
+      model: "test/model")
     client.start(service: service)
     try await client.waitUntilReady()
     let projectID = try await client.ensureProject(root)

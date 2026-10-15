@@ -1,4 +1,4 @@
-// Pi Mac host policy only. T3 owns the engine, receipts, projections and reactors.
+// Pi Mac host integration only. T3 owns the engine, permissions and runtime capabilities.
 import { createConnectionDiagnostics } from './connection-diagnostics.mjs';
 import { createPiMobileUsage } from './pi-mobile-usage.mjs';
 import { createTunnelHealth } from './tunnel-health.mjs';
@@ -15,9 +15,13 @@ export function configureNative({ environmentId, directory }) {
 }
 export function getNative() { if (!host) throw new Error('Server host unavailable'); return host; }
 export function browserAuthorization(url) {
-  const target = new URL(url);
-  if (target.origin !== 'https://app.t3.codes' || target.pathname !== '/connect') throw new Error('Unexpected browser authorization');
-  const broker = getNative(); broker.browserURL = url; broker.onBrowser?.(url);
+  const target = URL.parse(url);
+  // 仅接管桌面发起的 T3 登录；其他 Provider 授权和普通链接继续走官方启动器。
+  if (target?.origin !== 'https://app.t3.codes' || target.pathname !== '/connect') return false;
+  const broker = getNative();
+  if (!broker.onBrowser) return false;
+  broker.browserURL = url; broker.onBrowser(url);
+  return true;
 }
 export function recordPublish(response) {
   const broker = getNative(); broker.diagnostics.requests++; if (response.ok) broker.diagnostics.accepted++;

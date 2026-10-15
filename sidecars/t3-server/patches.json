@@ -1,20 +1,20 @@
 {
-  "apps/server/src/provider/piThinkingCapabilities.ts": [
-  {
-    "oldText": "  if (levels.length === 0) return EMPTY_PI_MODEL_CAPABILITIES;",
-    "newText": "  // 非推理模型仍可能支持 Fast；两种能力相互独立。"
-  },
-  {
-    "oldText": "      {\n        id: \"thinking\",\n        label: \"Thinking\",\n        type: \"select\",\n        options: levels.map((level): ProviderOptionChoice => ({\n          id: level,\n          label: PI_THINKING_LEVEL_LABELS[level],\n          ...(level === defaultLevel ? { isDefault: true } : {}),\n        })),\n      },",
-    "newText": "      ...(levels.length === 0 ? [] : [{\n        id: \"thinking\" as const, label: \"Thinking\", type: \"select\" as const,\n        options: levels.map((level): ProviderOptionChoice => ({\n          id: level, label: PI_THINKING_LEVEL_LABELS[level],\n          ...(level === defaultLevel ? { isDefault: true } : {}),\n        })),\n      }]),\n      // 按真实 provider/API 判断，不依赖会变化的模型名，也不让虚拟路由误报。\n      ...([\"openai\", \"openai-codex\"].includes(String(recordField(model, \"provider\"))) &&\n        [\"openai-responses\", \"openai-codex-responses\"].includes(String(recordField(model, \"api\")))\n        ? [{ id: \"fastMode\", label: \"Fast\", type: \"select\" as const,\n            options: [{ id: \"off\", label: \"Off\", isDefault: true }, { id: \"on\", label: \"On\" }] }]\n        : []),"
-  }
-],
-  "apps/server/src/orchestration-v2/Adapters/piT3McpExtensionSource.ts": [
-  {
-    "oldText": "export default async function t3McpExtension(pi: ExtensionAPI) {",
-    "newText": "export default async function t3McpExtension(pi: ExtensionAPI) {\n  let enabled = process.env.PIMAC_FAST_MODE === \"1\";\n  const publish = (ctx: { ui: { setStatus(key: string, value: string): void } }) =>\n    ctx.ui.setStatus(\"pimac-fast\", enabled ? \"on\" : \"off\");\n\n  pi.on(\"session_start\", (_event, ctx) => publish(ctx));\n  pi.registerCommand(\"pimac-fast\", {\n    description: \"Set Pi Mac OpenAI/Codex Fast mode (on/off)\",\n    handler: async (args, ctx) => {\n      if (!ctx.isIdle()) throw new Error(\"Wait until the current task finishes.\");\n      if (args.trim() !== \"on\" && args.trim() !== \"off\")\n        throw new Error(\"Expected on or off.\");\n      enabled = args.trim() === \"on\";\n      publish(ctx);\n    },\n  });\n  pi.on(\"before_provider_request\", (event, ctx) => {\n    // Only native Responses models support this wire contract. ctx.model is the\n    // selected model, not a virtual router's dispatched model: never alter a\n    // request based on a virtual selection's provider alone.\n    const model = ctx.model;\n    if (!enabled || !model) return;\n    if (model.provider !== \"openai\" && model.provider !== \"openai-codex\") return;\n    if (model.api !== \"openai-responses\" && model.api !== \"openai-codex-responses\") return;\n    if (event.payload && typeof event.payload === \"object\" && !Array.isArray(event.payload))\n      return { ...event.payload, service_tier: \"priority\" };\n  });\n"
-  }
-],
+  "packages/provider-pi/src/server/thinkingCapabilities.ts": [
+    {
+      "oldText": "  if (levels.length === 0) return EMPTY_PI_MODEL_CAPABILITIES;",
+      "newText": "  // 非推理模型仍可能支持 Fast；两种能力相互独立。"
+    },
+    {
+      "oldText": "      {\n        id: \"thinking\",\n        label: \"Thinking\",\n        type: \"select\",\n        options: levels.map((level): ProviderOptionChoice => ({\n          id: level,\n          label: PI_THINKING_LEVEL_LABELS[level],\n          ...(level === defaultLevel ? { isDefault: true } : {}),\n        })),\n      },",
+      "newText": "      ...(levels.length === 0 ? [] : [{\n        id: \"thinking\" as const, label: \"Thinking\", type: \"select\" as const,\n        options: levels.map((level): ProviderOptionChoice => ({\n          id: level, label: PI_THINKING_LEVEL_LABELS[level],\n          ...(level === defaultLevel ? { isDefault: true } : {}),\n        })),\n      }]),\n      // 按真实 provider/API 判断，不依赖会变化的模型名，也不让虚拟路由误报。\n      ...([\"openai\", \"openai-codex\"].includes(String(recordField(model, \"provider\"))) &&\n        [\"openai-responses\", \"openai-codex-responses\"].includes(String(recordField(model, \"api\")))\n        ? [{ id: \"fastMode\", label: \"Fast\", type: \"select\" as const,\n            options: [{ id: \"off\", label: \"Off\", isDefault: true }, { id: \"on\", label: \"On\" }] }]\n        : []),"
+    }
+  ],
+  "packages/provider-pi/src/server/mcpExtensionSource.ts": [
+    {
+      "oldText": "export default async function t3McpExtension(pi: ExtensionAPI) {",
+      "newText": "export default async function t3McpExtension(pi: ExtensionAPI) {\n  let enabled = process.env.PIMAC_FAST_MODE === \"1\";\n  const publish = (ctx: { ui: { setStatus(key: string, value: string): void } }) =>\n    ctx.ui.setStatus(\"pimac-fast\", enabled ? \"on\" : \"off\");\n\n  pi.on(\"session_start\", (_event, ctx) => publish(ctx));\n  pi.registerCommand(\"pimac-fast\", {\n    description: \"Set Pi Mac OpenAI/Codex Fast mode (on/off)\",\n    handler: async (args, ctx) => {\n      if (!ctx.isIdle()) throw new Error(\"Wait until the current task finishes.\");\n      if (args.trim() !== \"on\" && args.trim() !== \"off\")\n        throw new Error(\"Expected on or off.\");\n      enabled = args.trim() === \"on\";\n      publish(ctx);\n    },\n  });\n  pi.on(\"before_provider_request\", (event, ctx) => {\n    // Only native Responses models support this wire contract. ctx.model is the\n    // selected model, not a virtual router's dispatched model: never alter a\n    // request based on a virtual selection's provider alone.\n    const model = ctx.model;\n    if (!enabled || !model) return;\n    if (model.provider !== \"openai\" && model.provider !== \"openai-codex\") return;\n    if (model.api !== \"openai-responses\" && model.api !== \"openai-codex-responses\") return;\n    if (event.payload && typeof event.payload === \"object\" && !Array.isArray(event.payload))\n      return { ...event.payload, service_tier: \"priority\" };\n  });\n"
+    }
+  ],
   "apps/server/src/orchestration-v2/ProjectionStore.ts": [
 {
   "oldText": "  readonly getThreadsWithPullRequests: (",
@@ -57,62 +57,54 @@
     "newText": "          latestMessageAt:\n            row.latest_message_at === null ? null : DateTime.makeUnsafe(row.latest_message_at),\n          latestUserMessageAt:\n            row.latest_user_message_at === null"
   }
 ],
-  "apps/server/src/provider/PiProvider.ts": [
+  "packages/provider-pi/src/server/status.ts": [
     {
       "oldText": "import { causeErrorTag } from \"@t3tools/shared/observability\";",
       "newText": "import { createModelContextSettings } from \"pimac:model-context.mjs\";\nimport { causeErrorTag } from \"@t3tools/shared/observability\";"
     },
     {
-      "oldText": "    const discoveredModels = parseDiscoveredModels(\n      modelsData,",
-      "newText": "    // Capture the authoritative Pi context metadata before the wire model projection drops it.\n    createModelContextSettings().recordModels(modelsData);\n    const discoveredModels = parseDiscoveredModels(\n      modelsData,"
+      "oldText": "    const discoveredModels = parseDiscoveredModels(modelsData, stateData);",
+      "newText": "    // 在官方模型投影丢弃元数据前保存权威上下文窗口，供桌面设置展示。\n    createModelContextSettings().recordModels(modelsData);\n    const discoveredModels = parseDiscoveredModels(modelsData, stateData);"
     }
   ],
-  "apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts": [
-  {
-    "oldText": "import { mcpToolPresentation } from \"../../provider/McpToolPresentation.ts\";",
-    "newText": "import { toolOutputImages } from \"@t3tools/shared/toolOutput\";\nimport { mcpToolPresentation } from \"../../provider/McpToolPresentation.ts\";"
-  },
-  {
-    "oldText": "            input: args ?? {},\n            ...(outputText.length > 0 ? { output: outputText } : {}),",
-    "newText": "            input: args ?? {},\n            // Preserve raster image blocks for official lazy detail/signed asset reads.\n            ...(toolOutputImages(resultRecord).length > 0\n              ? { output: resultRecord }\n              : outputText.length > 0 ? { output: outputText } : {}),"
-  },
-  {
-    "oldText": "import { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";",
-    "newText": "import { getNative } from \"pimac:native.mjs\";\nimport { startPiMessage, recordPiDelta, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport { HostProcessEnvironment } from \"@t3tools/shared/hostProcess\";"
-  },
-  {
-    "oldText": "          case \"extension_ui_request\":\n            yield* handleExtensionUiRequest(event);",
-    "newText": "          case \"extension_ui_request\":\n            getNative().accountSelections.record(turn?.turnInput.threadId ?? state?.providerThread.appThreadId ?? input.threadId, event);\n            yield* handleExtensionUiRequest(event);"
-  },
-  {
-    "oldText": "            const delta = event[\"assistantMessageEvent\"];",
-    "newText": "            const delta = event[\"assistantMessageEvent\"];\n            recordPiDelta(turn, delta);"
-},
-  {
-    "oldText": "              turn.messageOrdinal += 1;",
-    "newText": "              turn.messageOrdinal += 1;\n              startPiMessage(turn);"
-  },
-  {
-    "oldText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            yield* completeOpenStreamItems(turn);",
-    "newText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            endPiMessage(turn, message);\n            const metrics = piTurnMetrics(turn);\n            if (metrics.turnTokenUsage) {\n              // Retain completed-response metrics across subsequent streaming\n              // updates while tools or another model response are running.\n              Object.assign(turn.providerTurn, {\n                turnTokenUsage: metrics.turnTokenUsage,\n                piMetrics: metrics.telemetry,\n              });\n              yield* emit({\n                type: \"provider_turn.updated\",\n                driver: PI_PROVIDER,\n                threadId: turn.turnInput.threadId,\n                providerTurn: { ...turn.providerTurn },\n              });\n            }\n            yield* completeOpenStreamItems(turn);"
-  },
-  {
-    "oldText": "        const failure = turn.interrupted ? null : turn.failure;",
-    "newText": "        const metrics = piTurnMetrics(turn);\n        const failure = turn.interrupted ? null : turn.failure;"
-  },
-  {
-    "oldText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),",
-    "newText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),\n            ...(metrics.turnTokenUsage ? { turnTokenUsage: metrics.turnTokenUsage, piMetrics: metrics.telemetry } : {}),"
-  },
-{
-  "oldText": "      const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {",
-  "newText": "      let fastStatus: string | undefined;\n      const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {\n        if (recordString(event, \"method\") === \"setStatus\" &&\n            recordString(event, \"statusKey\") === \"pimac-fast\") {\n          fastStatus = recordString(event, \"statusText\");\n          return;\n        }"
-},
-{
-  "oldText": "        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&",
-  "newText": "        // 每次选项应用都明确同步开/关，防止切模型或恢复会话沿用旧进程状态。\n        const fast = getModelSelectionStringOptionValue(modelSelection, \"fastMode\") ?? \"off\";\n        if (fast !== \"on\" && fast !== \"off\") return yield* protocolError(\"Invalid Fast mode\");\n        if (fast === \"on\" || fastStatus === \"on\") {\n          const commands = recordField(yield* request({ type: \"get_commands\" }), \"commands\");\n          if (!Array.isArray(commands) || !commands.some(command =>\n            recordString(command, \"name\") === \"pimac-fast\" &&\n            recordString(command, \"source\") === \"extension\")) {\n            return yield* protocolError(\"Fast extension unavailable; no prompt was sent\");\n          }\n          if (fast === \"on\") {\n            const current = recordField(yield* request({ type: \"get_state\" }), \"model\");\n            if (![\"openai\", \"openai-codex\"].includes(recordString(current, \"provider\") ?? \"\") ||\n                ![\"openai-responses\", \"openai-codex-responses\"].includes(recordString(current, \"api\") ?? \"\")) {\n              return yield* protocolError(\"Model does not support Fast mode\");\n            }\n          }\n          fastStatus = undefined;\n          const result = yield* request({ type: \"prompt\", message: \"/pimac-fast \" + fast });\n          // UI 事件由另一条 fiber 消费；只接受有明确状态确认的命令，不把 handled 当作成功。\n          for (let attempt = 0; attempt < 50 && fastStatus !== fast; attempt++) {\n            yield* Effect.sleep(\"20 millis\");\n          }\n          if (recordString(result, \"disposition\") !== \"handled\" || fastStatus !== fast) {\n            return yield* protocolError(\"Fast mode not confirmed; extension unavailable or command failed\");\n          }\n        }\n        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&"
-}
-],
+  "packages/provider-pi/src/server/adapter.ts": [
+    {
+      "oldText": "import * as HostProcess from \"@t3tools/shared/HostProcess\";",
+      "newText": "import { getNative } from \"pimac:native.mjs\";\nimport { startPiMessage, recordPiDelta, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport * as HostProcess from \"@t3tools/shared/HostProcess\";"
+    },
+    {
+      "oldText": "          case \"extension_ui_request\":\n            yield* handleExtensionUiRequest(event);",
+      "newText": "          case \"extension_ui_request\":\n            getNative().accountSelections.record(turn?.turnInput.threadId ?? state?.providerThread.appThreadId ?? input.threadId, event);\n            yield* handleExtensionUiRequest(event);"
+    },
+    {
+      "oldText": "            const delta = event[\"assistantMessageEvent\"];",
+      "newText": "            const delta = event[\"assistantMessageEvent\"];\n            recordPiDelta(turn, delta);"
+    },
+    {
+      "oldText": "              turn.messageOrdinal += 1;",
+      "newText": "              turn.messageOrdinal += 1;\n              startPiMessage(turn);"
+    },
+    {
+      "oldText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            yield* completeOpenStreamItems(turn);",
+      "newText": "            if (recordString(message, \"role\") !== \"assistant\") return;\n            endPiMessage(turn, message);\n            const metrics = piTurnMetrics(turn);\n            if (metrics.turnTokenUsage) {\n              // Retain completed-response metrics across subsequent streaming\n              // updates while tools or another model response are running.\n              Object.assign(turn.providerTurn, {\n                turnTokenUsage: metrics.turnTokenUsage,\n                piMetrics: metrics.telemetry,\n              });\n              yield* emit({\n                type: \"provider_turn.updated\",\n                driver: PI_PROVIDER,\n                threadId: turn.turnInput.threadId,\n                providerTurn: { ...turn.providerTurn },\n              });\n            }\n            yield* completeOpenStreamItems(turn);"
+    },
+    {
+      "oldText": "        const failure = interrupted ? null : (turn.rejectedPromptFailure ?? turn.failure);",
+      "newText": "        const metrics = piTurnMetrics(turn);\n        const failure = interrupted ? null : (turn.rejectedPromptFailure ?? turn.failure);"
+    },
+    {
+      "oldText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),",
+      "newText": "            ...(tokenUsage === undefined ? {} : { tokenUsage }),\n            ...(metrics.turnTokenUsage ? { turnTokenUsage: metrics.turnTokenUsage, piMetrics: metrics.telemetry } : {}),"
+    },
+    {
+      "oldText": "      const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {",
+      "newText": "      let fastStatus: string | undefined;\n      const handleExtensionUiRequest = Effect.fnUntraced(function* (event: PiRpcRecord) {\n        if (recordString(event, \"method\") === \"setStatus\" &&\n            recordString(event, \"statusKey\") === \"pimac-fast\") {\n          fastStatus = recordString(event, \"statusText\");\n          return;\n        }"
+    },
+    {
+      "oldText": "        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&",
+      "newText": "        // 每次选项应用都明确同步开/关，防止切模型或恢复会话沿用旧进程状态。\n        const fast = getModelSelectionStringOptionValue(modelSelection, \"fastMode\") ?? \"off\";\n        if (fast !== \"on\" && fast !== \"off\") return yield* protocolError(\"Invalid Fast mode\");\n        if (fast === \"on\" || fastStatus === \"on\") {\n          const commands = recordField(yield* request({ type: \"get_commands\" }), \"commands\");\n          if (!Array.isArray(commands) || !commands.some(command =>\n            recordString(command, \"name\") === \"pimac-fast\" &&\n            recordString(command, \"source\") === \"extension\")) {\n            return yield* protocolError(\"Fast extension unavailable; no prompt was sent\");\n          }\n          if (fast === \"on\") {\n            const current = recordField(yield* request({ type: \"get_state\" }), \"model\");\n            if (![\"openai\", \"openai-codex\"].includes(recordString(current, \"provider\") ?? \"\") ||\n                ![\"openai-responses\", \"openai-codex-responses\"].includes(recordString(current, \"api\") ?? \"\")) {\n              return yield* protocolError(\"Model does not support Fast mode\");\n            }\n          }\n          fastStatus = undefined;\n          const result = yield* request({ type: \"prompt\", message: \"/pimac-fast \" + fast });\n          // UI 事件由另一条 fiber 消费；只接受有明确状态确认的命令，不把 handled 当作成功。\n          for (let attempt = 0; attempt < 50 && fastStatus !== fast; attempt++) {\n            yield* Effect.sleep(\"20 millis\");\n          }\n          if (recordString(result, \"disposition\") !== \"handled\" || fastStatus !== fast) {\n            return yield* protocolError(\"Fast mode not confirmed; extension unavailable or command failed\");\n          }\n        }\n        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&"
+    }
+  ],
   "packages/contracts/src/orchestrationV2.ts": [
 {
   "oldText": "  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),",
@@ -170,33 +162,16 @@
   ],
   "apps/server/src/review/ReviewService.ts": [
     {
-      "oldText": "import * as ServerConfig from \"../config.ts\";",
-      "newText": "import * as ServerConfig from \"../config.ts\";\nimport * as ProjectStore from \"../orchestration-v2/ProjectStore.ts\";\nimport * as ProjectionStore from \"../orchestration-v2/ProjectionStore.ts\";"
+      "oldText": "import * as ProjectStore from \"../orchestration-v2/ProjectStore.ts\";",
+      "newText": "import * as ProjectStore from \"../orchestration-v2/ProjectStore.ts\";\nimport * as ProjectionStore from \"../orchestration-v2/ProjectionStore.ts\";"
     },
     {
-      "oldText": "  const config = yield* ServerConfig.ServerConfig;",
-      "newText": "  const config = yield* ServerConfig.ServerConfig;\n  const projects = yield* ProjectStore.ProjectStoreV2;\n  const projections = yield* ProjectionStore.ProjectionStoreV2;"
+      "oldText": "  const projectStore = yield* ProjectStore.ProjectStoreV2;",
+      "newText": "  const projectStore = yield* ProjectStore.ProjectStoreV2;\n  const projections = yield* ProjectionStore.ProjectionStoreV2;"
     },
     {
       "oldText": "    return yield* new VcsRepositoryDetectionError({\n      operation,\n      cwd,",
-      "newText": "    // Pi Mac is a multi-project host: its config.cwd is the private state directory.\n    // Extend the original canonical-path bound only to official active project/thread roots.\n    const registered = yield* Effect.all([projects.list(), projections.getShellSnapshot({ location: \"active\" })]).pipe(\n      Effect.mapError((cause) => new VcsRepositoryDetectionError({ operation, cwd, detail: \"Failed to validate registered review roots.\", cause })),\n    );\n    const roots = [...registered[0].map((project) => project.workspaceRoot),\n      ...registered[1].threads.flatMap((thread) => thread.worktreePath ? [thread.worktreePath] : [])];\n    for (const root of roots) {\n      if (isWithinRoot(candidate, yield* canonicalizePath(root))) return;\n    }\n\n    return yield* new VcsRepositoryDetectionError({\n      operation,\n      cwd,"
-    }
-  ],
-  "apps/server/src/usage/UsageService.ts": [
-    {
-      "oldText": "import * as Schema from \"effect/Schema\";",
-      "newText": "import { collectPiUsage } from \"pimac:pi-mobile-usage.mjs\";\nimport * as Schema from \"effect/Schema\";",
-      "count": 1
-    },
-    {
-      "oldText": "    // The home resolvers ask for `Path` themselves; satisfy them from the",
-      "newText": "    // Pi Mac reports Pi history only, never unrelated native CLI transcripts.\n    return yield* Effect.promise(() => collectPiUsage());\n    // The home resolvers ask for `Path` themselves; satisfy them from the",
-      "count": 1
-    },
-    {
-      "oldText": "if (record.provider === \"codex\" && sharedSessions.has(record.sessionId)) {",
-      "newText": "if (record.provider === \"codex\" && sharedSessions.has(record.sessionId) && !record.dedupeKey?.startsWith(\"pi:\")) {",
-      "count": 1
+      "newText": "    // 官方已校验项目和受管 worktree 根；只补充活跃线程绑定的外部 worktree。\n    // 主机 cwd 是私有状态目录，不能把未注册的任意路径放行；读取失败也不能当作空状态。\n    const active = yield* projections.getShellSnapshot({ location: \"active\" }).pipe(\n      Effect.mapError((cause) => new VcsRepositoryDetectionError({ operation, cwd, detail: \"Failed to validate active review worktrees.\", cause })),\n    );\n    for (const thread of active.threads) {\n      if (thread.worktreePath === null) continue;\n      if (isWithinRoot(candidate, yield* canonicalizePath(thread.worktreePath))) return;\n    }\n\n    return yield* new VcsRepositoryDetectionError({\n      operation,\n      cwd,"
     }
   ],
   "apps/server/src/usage/UsageLimitSources.ts": [
@@ -208,20 +183,6 @@
     {
       "oldText": "    yield* publish(snapshots);",
       "newText": "    const piSources = yield* Effect.promise(() => getNative().mobileUsage.readLimits());\n    yield* publish([...snapshots, ...piSources]);",
-      "count": 1
-    }
-  ],
-  "apps/server/src/workspace/WorkspaceSearchIndex.ts": [
-    {
-      "oldText": "const { FileFinder } = requireForFff(\"@ff-labs/fff-node\") as typeof import(\"@ff-labs/fff-node\");",
-      "newText": "const FileFinder = class { constructor() { throw new Error('Workspace search is disabled in the Pi Mac host'); } };",
-      "count": 1
-    }
-  ],
-  "apps/server/src/terminal/NodePtyAdapter.ts": [
-    {
-      "oldText": "Promise.resolve().then(() => requireForNodePty(\"node-pty\") as typeof import(\"node-pty\"));",
-      "newText": "Promise.resolve({ spawn: () => { throw new Error('Terminal spawning is disabled in the Pi Mac host'); } } as typeof import('node-pty'));",
       "count": 1
     }
   ],
@@ -251,7 +212,71 @@
       "count": 1
     }
   ],
+  "apps/server/src/provider/Drivers/CodexManagedProvider.ts": [
+    {
+      "oldText": "makePendingCodexProvider({ ...config, customModels: [] })",
+      "newText": "makePendingCodexProvider({ ...config, enabled, customModels: [] })"
+    }
+  ],
+  "apps/server/src/provider/CodexInstallation.ts": [
+  {
+    "oldText": "  yield* Effect.gen(function* () {\n    // Clear staging directories left behind",
+    "newText": "  // 延迟到启用实例的订阅或显式安装操作；仅构造官方服务不应探测其他 Provider。\n  const initialize = yield* Effect.cached(Effect.gen(function* () {\n    // Clear staging directories left behind"
+  },
+  {
+    "oldText": "  );\n\n  return CodexInstallation.of({",
+    "newText": "  ));\n\n  return CodexInstallation.of({"
+  },
+  {
+    "oldText": "    resolve,\n    acquire,\n    start,\n    cancel,\n    state: SubscriptionRef.get(state),\n    changes: SubscriptionRef.changes(state),\n    remove,",
+    "newText": "    resolve: () => initialize.pipe(Effect.andThen(resolve())),\n    acquire: () => initialize.pipe(Effect.andThen(acquire())),\n    start: initialize.pipe(Effect.andThen(start)),\n    cancel: (operationId) => initialize.pipe(Effect.andThen(cancel(operationId))),\n    state: initialize.pipe(Effect.andThen(SubscriptionRef.get(state))),\n    changes: Stream.unwrap(initialize.pipe(Effect.as(SubscriptionRef.changes(state)))),\n    remove: (paths) => initialize.pipe(Effect.andThen(remove(paths))),"
+  }
+],
+  "apps/server/src/provider/AntigravityInstallation.ts": [
+  {
+    "oldText": "  yield* Effect.gen(function* () {\n    const canRemove = yield* fs.exists(managedDirectory);",
+    "newText": "  // 延迟到启用实例的订阅或显式安装操作；仅构造官方服务不应探测其他 Provider。\n  const initialize = yield* Effect.cached(Effect.gen(function* () {\n    const canRemove = yield* fs.exists(managedDirectory);"
+  },
+  {
+    "oldText": "  );\n\n  return AntigravityInstallation.of({",
+    "newText": "  ));\n\n  return AntigravityInstallation.of({"
+  },
+  {
+    "oldText": "    resolve,\n    acquire,\n    start,\n    cancel,\n    state: SubscriptionRef.get(state),\n    changes: SubscriptionRef.changes(state),\n    remove,",
+    "newText": "    resolve: () => initialize.pipe(Effect.andThen(resolve())),\n    acquire: () => initialize.pipe(Effect.andThen(acquire())),\n    start: initialize.pipe(Effect.andThen(start)),\n    cancel: (operationId) => initialize.pipe(Effect.andThen(cancel(operationId))),\n    state: initialize.pipe(Effect.andThen(SubscriptionRef.get(state))),\n    changes: Stream.unwrap(initialize.pipe(Effect.as(SubscriptionRef.changes(state)))),\n    remove: (paths) => initialize.pipe(Effect.andThen(remove(paths))),"
+  }
+],
+  "apps/server/src/usage/UsageService.ts": [
+  {
+    "oldText": "  ProviderInstanceId,\n  USAGE_CONTRACT_VERSION,",
+    "newText": "  ProviderInstanceId,\n  resolveProviderInstanceEnabled,\n  USAGE_CONTRACT_VERSION,"
+  },
+  {
+    "oldText": "import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from \"../provider/builtInDrivers.ts\";",
+    "newText": "import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from \"../provider/builtInDrivers.ts\";\nimport { deriveProviderInstanceConfigMap } from \"../provider/ProviderInstanceRegistryHydration.ts\";"
+  },
+  {
+    "oldText": "   * not decode. Disabled accounts still have history. An unconfigured default\n   * slot runs with default config, just as it does in the provider registry.",
+    "newText": "   * not decode. Discovery follows official instance/project enablement, so\n   * disabled providers do not trigger transcript or remote account scans."
+  },
+  {
+    "oldText": "    > = Object.entries(settings.providerInstances)\n      .filter(([, instance]) => instance.driver === driver.driverKind)\n      .map(([id, instance]) => [ProviderInstanceId.make(id), instance, true] as const);\n    if (!Object.hasOwn(settings.providerInstances, driver.driverKind)) {\n      entries.push([ProviderInstanceId.make(driver.driverKind), {}, false]);\n    }",
+    "newText": "    > = Object.entries(deriveProviderInstanceConfigMap(settings))\n      .filter(([, instance]) => instance.driver === driver.driverKind && resolveProviderInstanceEnabled(instance))\n      .map(([id, instance]) => [ProviderInstanceId.make(id), instance, Object.hasOwn(settings.providerInstances, id)] as const);"
+  },
+  {
+    "oldText": "              reader.scan({ instances, settings, windowStartMs, retentionCutoffMs, awaitRefresh }),",
+    "newText": "              instances.length === 0 ? Effect.succeed([]) :\n                reader.scan({ instances, settings, windowStartMs, retentionCutoffMs, awaitRefresh }),"
+  }
+],
   "apps/server/src/server.ts": [
+{
+  "oldText": "    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(",
+  "newText": "    // 先订阅再读快照，避免启用实例的变更丢失。只订阅已启用驱动的安装状态；\n    // 安装服务本身惰性初始化，显式安装/管理 API 仍保留完整官方行为。\n    const subscription = yield* instances.subscribeChanges;\n    yield* Stream.concat(Stream.make(undefined), Stream.fromSubscription(subscription)).pipe(\n      Stream.mapEffect(() => instances.listInstances),\n      Stream.map((entries) => ({\n        antigravity: entries.some((entry) => entry.enabled && entry.driverKind === \"antigravity\"),\n        codex: entries.some((entry) => entry.enabled && entry.driverKind === \"codex\"),\n      })),\n      Stream.changesWith((a, b) => a.antigravity === b.antigravity && a.codex === b.codex),\n      Stream.switchMap((enabled) => Stream.merge(\n        enabled.antigravity ? antigravity.changes.pipe(\n          Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n          Stream.drop(1),\n        ) : Stream.empty,\n        enabled.codex ? codex.changes.pipe(\n          Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n          Stream.drop(1),\n        ) : Stream.empty,\n      )),"
+},
+    {
+      "oldText": "const layerReview = ReviewService.layer.pipe(\n  Layer.provide(ProjectStore.layer),",
+      "newText": "const layerReview = ReviewService.layer.pipe(\n  Layer.provide(Layer.merge(ProjectStore.layer, ProjectionStoreV2.layer)),"
+    },
     {
       "oldText": "              cloudLink.registerManagedTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }),",
       "newText": "              cloudLink.registerManagedTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }).pipe(Effect.tapError(() => Effect.sync(() => PiNative.getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: \"registration-failed\" })))),"
@@ -265,17 +290,8 @@
       "newText": "            PiNative.getNative().connectionDiagnostics.record(\"tunnel-recovery\", { reason: registration.status });\n            const startupAction = managedTunnelStartupAction({ wantsCliLink, registration });"
     },
     {
-      "oldText": "const layerReview = ReviewService.layer.pipe(\n  Layer.provideMerge(GitVcsDriver.layer),",
-      "newText": "const layerReview = ReviewService.layer.pipe(\n  Layer.provide(Layer.merge(ProjectStore.layer, ProjectionStoreV2.layer)),\n  Layer.provideMerge(GitVcsDriver.layer),"
-    },
-    {
       "oldText": "import * as NodeHttp from \"node:http\";",
       "newText": "import * as NodeHttp from \"node:http\";\nimport * as PiNative from \"pimac:native.mjs\";\nimport { NativeManagementLayer, NativeHttpPolicy, oauthAwareCommandReadiness } from \"pimac:management.mjs\";",
-      "count": 1
-    },
-    {
-      "oldText": "const layerProviderInstallationRefresh = Layer.effectDiscard(\n  Effect.gen(function* () {\n    const antigravity = yield* AntigravityInstallation.AntigravityInstallation;\n    const codex = yield* CodexInstallation.CodexInstallation;\n    const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;\n    const providers = yield* ProviderRegistry.ProviderRegistry;\n    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(\n      Stream.runForEach((state) =>\n        instances.listInstances.pipe(\n          Effect.flatMap((entries) =>\n            Effect.forEach(\n              entries.filter((instance) => instance.driverKind === state.driver),\n              (instance) => providers.refreshInstance(instance.instanceId),\n              { discard: true },\n            ),\n          ),\n        ),\n      ),\n      Effect.forkScoped,\n    );\n  }),\n);\n",
-      "newText": "const layerProviderInstallationRefresh = Layer.empty;\n",
       "count": 1
     },
     {
@@ -294,13 +310,6 @@
       "count": 1
     }
   ],
-  "apps/server/src/provider/builtInDrivers.ts": [
-    {
-      "oldText": "/**\n * BUILT_IN_DRIVERS — the static set of `ProviderDriver`s this build ships\n * with.\n *\n * Every driver that the server knows how to instantiate from settings is\n * listed here. The `ProviderInstanceRegistry` iterates this array when\n * resolving `providerInstances` entries; anything not in the array surfaces\n * as an `\"unavailable\"` shadow snapshot at runtime (see\n * `buildUnavailableProviderSnapshot`).\n *\n * Adding a new first-party driver means:\n *   1. implement `ProviderDriver` in a sibling `Drivers/<Name>Driver.ts`,\n *   2. add it to this array,\n *   3. ensure the runtime layer satisfies its declared `R`.\n *\n * The aggregated `BuiltInDriversEnv` type is the union of every driver's\n * env requirement — the registry layer's `R` is this type, and the runtime\n * layer (ChildProcessSpawner, FileSystem, Path, ServerConfig,\n * OpenCodeRuntime, …) must satisfy it.\n *\n * @module provider/builtInDrivers\n */\nimport { AcpRegistryDriver, type AcpRegistryDriverEnv } from \"./Drivers/AcpRegistryDriver.ts\";\nimport { AntigravityDriver, type AntigravityDriverEnv } from \"./Drivers/AntigravityDriver.ts\";\nimport { ClaudeDriver, type ClaudeDriverEnv } from \"./Drivers/ClaudeDriver.ts\";\nimport { CodexDriver, type CodexDriverEnv } from \"./Drivers/CodexDriver.ts\";\nimport { CursorDriver, type CursorDriverEnv } from \"./Drivers/CursorDriver.ts\";\nimport { GrokDriver, type GrokDriverEnv } from \"./Drivers/GrokDriver.ts\";\nimport { OpenCodeDriver, type OpenCodeDriverEnv } from \"./Drivers/OpenCodeDriver.ts\";\nimport { PiDriver, type PiDriverEnv } from \"./Drivers/PiDriver.ts\";\nimport type { AnyProviderDriver } from \"./ProviderDriver.ts\";\n\n/**\n * Union of infrastructure services required to construct any built-in\n * driver. The registry layer declares `R = BuiltInDriversEnv`; the runtime\n * layer must provide every service in this union.\n */\nexport type BuiltInDriversEnv =\n  | AcpRegistryDriverEnv\n  | AntigravityDriverEnv\n  | ClaudeDriverEnv\n  | CodexDriverEnv\n  | CursorDriverEnv\n  | GrokDriverEnv\n  | OpenCodeDriverEnv\n  | PiDriverEnv;\n\n/**\n * Ordered list of built-in drivers. Order matters only for tie-breaking in\n * UI presentation — the registry itself is keyed by `driverKind`, so\n * iteration order has no functional effect on instance lookup.\n */\nexport const BUILT_IN_DRIVERS: ReadonlyArray<AnyProviderDriver<BuiltInDriversEnv>> = [\n  CodexDriver,\n  ClaudeDriver,\n  CursorDriver,\n  GrokDriver,\n  OpenCodeDriver,\n  AntigravityDriver,\n  PiDriver,\n  AcpRegistryDriver,\n];\n",
-      "newText": "import { PiDriver, type PiDriverEnv } from \"./Drivers/PiDriver.ts\";\nexport type BuiltInDriversEnv = PiDriverEnv;\nexport const BUILT_IN_DRIVERS = [PiDriver];\n",
-      "count": 1
-    }
-  ],
   "apps/server/src/ws.ts": [
     {
       "oldText": "import * as Queue from \"effect/Queue\";",
@@ -313,8 +322,8 @@
       "count": 1
     },
     {
-      "oldText": "              return { providers };",
-      "newText": "              return { providers: visibleProviders(providers) };",
+      "oldText": "            return { providers };",
+      "newText": "            return { providers: visibleProviders(providers) };",
       "count": 1
     },
     {
@@ -343,7 +352,7 @@
     },
     {
       "oldText": "      launchBrowser(target).pipe(",
-      "newText": "      Effect.sync(() => PiNative.browserAuthorization(target)).pipe(",
+      "newText": "      Effect.suspend(() => PiNative.browserAuthorization(target) ? Effect.void : launchBrowser(target)).pipe(",
       "count": 1
     }
   ],
@@ -366,42 +375,14 @@
       "count": 1
     }
   ],
-  "apps/server/src/provider/cursorSdk.ts": [
+  "apps/server/src/textGeneration/TextGeneration.ts": [
     {
-      "oldText": "installCursorShellSpawnGuard();",
-      "newText": "// Cursor is not shipped in the Pi Mac host.",
-      "count": 1
+      "oldText": "import * as Context from \"effect/Context\";",
+      "newText": "import { resolveTitleGenerationSelection } from \"pimac:text-generation-settings.mjs\";\nimport * as Context from \"effect/Context\";"
     },
     {
-      "oldText": "requireCursorSdk(\"@cursor/sdk\") as typeof import(\"@cursor/sdk\")",
-      "newText": "new Proxy({}, { get: () => class { constructor() { throw new Error(\"Cursor is disabled in the Pi Mac host\"); } } }) as typeof import(\"@cursor/sdk\")",
-      "count": 1
-    }
-  ],
-  "apps/server/src/mcp/OrchestratorMcpService.ts": [
-    {
-      "oldText": "        const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();\n        return {\n          parentThreadId: parent?.thread.id ?? null,",
-      "newText": "        const orchestrationCapableInstanceIds = yield* loadOrchestrationCapableInstanceIds();\n        // 活跃轮次可能与下一轮的线程设置不同；子代理锁定实际运行的父模型。\n        const selection = parent?.runs\n          .filter(ThreadManagementService.isActiveRun)\n          .toSorted((left, right) => right.ordinal - left.ordinal)[0]?.modelSelection\n          ?? parent?.thread.modelSelection;\n        return {\n          parentThreadId: parent?.thread.id ?? null,"
-    },
-    {
-      "oldText": "          inheritedProviderInstanceId: parent?.thread.modelSelection.instanceId ?? null,\n          inheritedModel: parent?.thread.modelSelection.model ?? null,",
-      "newText": "          inheritedProviderInstanceId: selection?.instanceId ?? null,\n          inheritedModel: selection?.model ?? null,"
-    },
-    {
-      "oldText": "          providers: providers.map((provider) => {",
-      "newText": "          providers: providers.filter((provider) => provider.instanceId === selection?.instanceId).map((provider) => {"
-    },
-    {
-      "oldText": "                provider?.models.map((model) => ({",
-      "newText": "                provider?.models.filter((model) => model.slug === selection?.model).map((model) => ({"
-    },
-    {
-      "oldText": "              canRunCrossProviderChildTask: constraints.length === 0,",
-      "newText": "              canRunCrossProviderChildTask: false,"
-    },
-    {
-      "oldText": "        const providers = yield* loadProviders;\n        const target = yield* resolveTargetRechecking({\n          parent,\n          target: input.target,\n          providers,\n        });\n        const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);",
-      "newText": "        const providers = yield* loadProviders;\n        const selection = parentRun.modelSelection;\n        // 列表过滤不是授权边界：显式模型/实例覆盖也必须拒绝，失败后不能降级重试。\n        const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);\n        if (\n          (input.target?.model !== undefined && input.target.model !== selection.model) ||\n          (input.target?.providerInstanceId !== undefined &&\n            input.target.providerInstanceId !== selection.instanceId) ||\n          (input.target?.driverKind !== undefined && input.target.driverKind !== provider?.driver)\n        ) {\n          return yield* failure(\n            \"invalid_request\",\n            \"Child tasks must use the parent's running provider and model; model fallback is not allowed.\",\n          );\n        }\n        const target = yield* resolveTargetRechecking({\n          parent: { ...parent, thread: { ...parent.thread, modelSelection: selection } },\n          target: { ...input.target, providerInstanceId: selection.instanceId, model: selection.model },\n          providers,\n        });\n        const runtimeMode = yield* resolveRuntimeMode(parent.thread.runtimeMode, input.runtimeMode);"
+      "oldText": "    generateThreadTitle: (input) =>\n      resolveInstance(registry, \"generateThreadTitle\", input.modelSelection.instanceId).pipe(",
+      "newText": "    generateThreadTitle: (input) =>\n      Effect.tryPromise({\n        try: () => resolveTitleGenerationSelection(),\n        catch: (cause) => new TextGenerationError({ operation: \"generateThreadTitle\", detail: String(cause) }),\n      }).pipe(\n        Effect.flatMap((modelSelection) => {\n          // 目录刷新可能刚切换了失效的默认模型，本次也使用已确认的官方 Pi 选择。\n          input = { ...input, modelSelection };\n          return resolveInstance(registry, \"generateThreadTitle\", modelSelection.instanceId);\n        }),"
     }
   ],
   "apps/server/src/auth/RpcAuthorization.ts": [
@@ -410,8 +391,8 @@
       "newText": "import * as Effect from \"effect/Effect\";\nimport { observeNativeRpc } from \"pimac:rpc-diagnostics.mjs\";"
     },
     {
-      "oldText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc }) => {\n    const requiredScope = requiredScopeForRpcMethod(rpc._tag);\n    return scopes.includes(requiredScope)\n      ? effect\n      : Effect.fail(rpcAuthorizationError(requiredScope));\n  });",
-      "newText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    const requiredScope = requiredScopeForRpcMethod(rpc._tag);\n    const authorized = scopes.includes(requiredScope);\n    const command = rpc._tag === \"orchestration.dispatchCommand\" ? (payload as any) : undefined;\n    return observeNativeRpc(rpc._tag,\n      authorized ? effect : Effect.fail(rpcAuthorizationError(requiredScope)),\n      {\n        \"orchestration_v2.command_id\": command?.commandId,\n        \"orchestration_v2.command_type\": command?.type,\n        \"orchestration_v2.thread_id\": command?.threadId,\n        \"pimac.dispatch_mode\": command?.type === \"message.dispatch\" ? command.dispatchMode?.type : undefined,\n        \"pimac.delivery_intent\": command?.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n      }, { authorized });\n  });"
+      "oldText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);\n    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));\n    return requiredScope === undefined ? effect : Effect.fail(rpcAuthorizationError(requiredScope));\n  });",
+      "newText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    // 诊断只观察结果；保留官方按 payload 计算的多 scope 授权。\n    const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);\n    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));\n    const authorized = requiredScope === undefined;\n    const command = rpc._tag === \"orchestration.dispatchCommand\" ? (payload as any) : undefined;\n    return observeNativeRpc(rpc._tag,\n      authorized ? effect : Effect.fail(rpcAuthorizationError(requiredScope)),\n      {\n        \"orchestration_v2.command_id\": command?.commandId,\n        \"orchestration_v2.command_type\": command?.type,\n        \"orchestration_v2.thread_id\": command?.threadId,\n        \"pimac.dispatch_mode\": command?.type === \"message.dispatch\" ? command.dispatchMode?.type : undefined,\n        \"pimac.delivery_intent\": command?.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n      }, { authorized });\n  });"
     }
   ]
 }

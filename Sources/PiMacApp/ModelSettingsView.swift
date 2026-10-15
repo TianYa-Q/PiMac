@@ -90,6 +90,12 @@ struct ModelSettingsView: View {
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary, lineWidth: 1))
           }
 
+          TextGenerationModelPicker(
+            store: app.textGenerationModels, visibleModelIDs: Set(app.models.map(\.id)),
+            connected: app.canConfigureTextGenerationModel,
+            update: { await app.updateTextGenerationModel($0) }
+          )
+
           HStack(alignment: .top, spacing: 10) {
             Image(systemName: "arrow.down.right.and.arrow.up.left")
               .foregroundStyle(Color.accentColor)

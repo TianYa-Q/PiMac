@@ -18,6 +18,12 @@ fi
 "$ROOT_DIR/scripts/prepare-t3-server.sh"
 (cd "$ROOT_DIR" && swift build -c release)
 BINARY_DIR="$(cd "$ROOT_DIR" && swift build -c release --show-bin-path)"
+# npm 的 optional 原生依赖按构建 Node 的架构选择；不能把 arm64 sidecar 放进 x64 应用。
+NATIVE_ARCH="$(node -p 'process.arch === "x64" ? "x86_64" : process.arch')"
+if [[ "$(lipo -archs "$BINARY_DIR/PiMac")" != "$NATIVE_ARCH" ]]; then
+  echo "应用与 T3 原生依赖架构必须一致，且目前不支持 universal/cross-architecture 打包：$NATIVE_ARCH" >&2
+  exit 1
+fi
 
 if [[ -e "$APP_DIR" ]]; then
   command -v trash >/dev/null || { echo "需要安装 trash，拒绝直接删除旧应用" >&2; exit 1; }
@@ -52,5 +58,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 PLIST
 
 SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
+# 只签名新构建的 dist 应用，先签名原生库和 helper，再签外层 bundle。
+zsh "$ROOT_DIR/scripts/sign-native-runtime.sh" "$APP_DIR/Contents/Resources" "$SIGN_IDENTITY"
 codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"
 echo "已生成：$APP_DIR"

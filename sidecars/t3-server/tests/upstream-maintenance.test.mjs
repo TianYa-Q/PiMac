@@ -7,6 +7,20 @@ const root = new URL('../', import.meta.url);
 const pin = JSON.parse(await readFile(new URL('upstream-pin.json', root), 'utf8'));
 const patches = JSON.parse(await readFile(new URL('patches.json', root), 'utf8'));
 
+test('MCP catalog and delegation keep official provider and target semantics without host patches', () => {
+  assert(!Object.hasOwn(patches, 'apps/server/src/mcp/OrchestratorMcpService.ts'),
+    'Do not filter the official MCP catalog or restrict explicit provider/model targets');
+});
+
+test('native provider SDKs, terminal and workspace search have no host disabling patches', () => {
+  for (const file of [
+    'apps/server/src/provider/builtInDrivers.ts',
+    'packages/provider-cursor/src/server/sdk.ts',
+    'apps/server/src/terminal/NodePtyAdapter.ts',
+    'apps/server/src/workspace/WorkspaceSearchIndex.ts',
+  ]) assert(!Object.hasOwn(patches, file), file);
+});
+
 test('every pinned upstream file is pristine and every host patch still matches', async () => {
   for (const [file, expected] of Object.entries(pin.files)) {
     const content = await readFile(new URL('upstream/' + file, root));
@@ -23,24 +37,46 @@ test('every pinned upstream file is pristine and every host patch still matches'
   }
 });
 
-test('Pi lifecycle stays upstream-owned with bounded telemetry, account selection and image projection exceptions', () => {
-  const adapter = 'apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts';
+test('upstream owns Pi structured image output, history parsing and project review roots', async () => {
+  const usageDiscovery = patches['apps/server/src/usage/UsageService.ts'];
+  assert.equal(usageDiscovery.length, 5);
+  assert(usageDiscovery.some(entry => entry.newText.includes('resolveProviderInstanceEnabled(instance)')));
+  assert(usageDiscovery.some(entry => entry.newText.includes('instances.length === 0 ? Effect.succeed([])')));
+  assert(usageDiscovery.every(entry => !/parse|dedupe|readTranscriptRecords|fingerprint|provider ===/.test(entry.newText)),
+    'Only gate usage discovery by official settings; keep parsing/aggregation driver-neutral and upstream-owned');
+  assert(!Object.hasOwn(patches, 'packages/provider-pi/src/server/usage.ts'));
+  const [adapter, usage, review] = await Promise.all([
+    'packages/provider-pi/src/server/adapter.ts',
+    'packages/provider-pi/src/server/usage.ts',
+    'apps/server/src/review/ReviewService.ts',
+  ].map(file => readFile(new URL('upstream/' + file, root), 'utf8')));
+  assert(adapter.includes('const output = piToolOutput(resultRecord, toolName);'));
+  assert(adapter.includes('return {\n    content,\n    ...(structured === undefined ? {} : { structuredContent: structured }),\n  };'));
+  assert(usage.includes('provider: "pi"'));
+  assert(usage.includes('dedupeKey: JSON.stringify(["pi", entry.id, entry.timestamp, model])'));
+  assert(!Object.hasOwn(patches, 'apps/server/src/provider/builtInDrivers.ts'),
+    'Keep the official complete provider and usage driver registries untouched');
+  assert(review.includes('projectStore.listShells()'));
+  assert(review.includes('managedWorktreesDirectories('));
+  // 剩余 review 补丁只扩展外部活跃 worktree，不重复上游项目根查询。
+  assert(patches['apps/server/src/review/ReviewService.ts'].every(entry =>
+    !entry.newText.includes('projects.list()')));
+});
+
+test('Pi lifecycle and image projection stay upstream-owned with bounded telemetry, account selection and Fast exceptions', () => {
+  const adapter = 'packages/provider-pi/src/server/adapter.ts';
   const contract = 'packages/contracts/src/orchestrationV2.ts';
   for (const file of Object.keys(patches)) {
     assert(!file.startsWith('packages/contracts/') || file === contract, file);
-    assert(!/\/Pi(?:AdapterV2|Rpc|Driver)\.ts$/.test(file) || file === adapter, file);
+    assert(!/\/Pi(?:AdapterV2|Rpc|Driver)\.ts$/.test(file), file);
+    assert(!/^packages\/provider-pi\/src\/server\/(?:adapter|rpc|driver)\.ts$/.test(file) || file === adapter, file);
   }
-  const imagePatches = patches[adapter].filter(entry => entry.newText.includes('toolOutputImages'));
-  assert.equal(imagePatches.length, 2);
-  assert(imagePatches.some(entry => entry.newText.includes('import { toolOutputImages } from "@t3tools/shared/toolOutput";')));
-  const imageProjection = imagePatches.find(entry => entry.newText.includes('toolOutputImages(resultRecord).length > 0'));
-  assert(imageProjection, 'Image blocks must survive the native tool output projection');
-  assert(imageProjection.newText.includes('? { output: resultRecord }'));
-  assert(imageProjection.newText.includes(': outputText.length > 0 ? { output: outputText } : {}'));
+  assert(!patches[adapter].some(entry => entry.newText.includes('toolOutputImages')),
+    'Structured tool output and image preservation are now official upstream behavior');
   const fastPatches = patches[adapter].filter(entry => entry.newText.includes("fastStatus"));
   assert.equal(fastPatches.length, 2);
   assert(fastPatches.some(entry => entry.newText.includes('Fast mode not confirmed')));
-  assert.equal(patches[adapter].length - imagePatches.length - fastPatches.length, 7);
+  assert.equal(patches[adapter].length - fastPatches.length, 7);
   const selection = patches[adapter].filter(entry => entry.newText.includes('accountSelections.record'));
   assert.equal(selection.length, 1);
   assert(selection[0].newText.includes('state?.providerThread.appThreadId ?? input.threadId'));
@@ -48,16 +84,18 @@ test('Pi lifecycle stays upstream-owned with bounded telemetry, account selectio
   assert.equal(patches[contract].filter(entry => entry.newText.includes("latestMessageAt: Schema.optional")).length, 2);
   assert(patches[contract].some(entry => entry.newText.includes('piMetrics: Schema.optional')));
   for (const entry of patches[adapter].filter(entry => !fastPatches.includes(entry))) {
-    assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage|toolOutputImages|accountSelections\.record/.test(entry.newText));
+    assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage|accountSelections\.record/.test(entry.newText));
     assert(!/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText));
   }
-  const discovery = patches['apps/server/src/provider/PiProvider.ts'];
+  const discovery = patches['packages/provider-pi/src/server/status.ts'];
   assert.equal(discovery.length, 2);
   assert(discovery.every(entry => entry.newText.includes('createModelContextSettings')));
   assert(discovery.some(entry => entry.newText.includes('.recordModels(modelsData)')));
   assert(discovery.every(entry => !/\.set\(|connection\.|type: "prompt"/.test(entry.newText)));
   // RPC 补丁只添加诊断，不改变官方 scope 判定或恢复旧版逐 handler 授权。
-  assert(Object.hasOwn(patches, 'apps/server/src/auth/RpcAuthorization.ts'));
+  const authorization = patches['apps/server/src/auth/RpcAuthorization.ts'];
+  assert(authorization.some(entry => entry.newText.includes('requiredScopesForRpcCall(rpc._tag, payload)')));
+  assert(authorization.some(entry => entry.newText.includes('requiredScopes.find((scope) => !scopes.includes(scope))')));
   for (const entry of patches['apps/server/src/ws.ts']) {
     assert(!entry.newText.includes('authorizeEffect(requiredScopeForRpcMethod'));
     assert(!entry.newText.includes('authorizeStream(requiredScopeForRpcMethod'));

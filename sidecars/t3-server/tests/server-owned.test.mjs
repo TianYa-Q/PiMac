@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createServerGateway } from '../../../Sources/PiMacApp/Resources/t3-bridge/server-gateway.mjs';
+import { createServerGateway, fixtureEnvironment, nativeDrivers, prepareProtocolServer } from './fixtures/protocol-server.mjs';
 import { call, readStream } from '../generated/client.mjs';
 const token = 'ab'.repeat(32);
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -199,53 +199,146 @@ test('Pi session discovers T3 MCP scheduling tools while invalid credentials rem
   assert(task.nextRunAt);
 });
 
-test('MCP capabilities and delegation are locked to the running parent model', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'pimac-model-lock-'));
-  await writeFile(join(directory, 'fixture-extra-model'), 'advertise a forbidden model');
+test('MCP official catalog includes alternate models and delegation honors explicit targets', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-mcp-targets-'));
+  await writeFile(join(directory, 'fixture-extra-model'), 'advertise an alternate model');
   const f = await open(directory);
   t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
   const threadId = await f.create();
   await f.gateway.official.management.modelCatalog();
   const { providers } = await f.rpc('server.getConfig');
-  assert(providers.find(provider => provider.instanceId === 'pi').models.some(model => model.slug === 'test/fallback'));
-  await f.dispatch(f.message(threadId, 'mcp-model-lock'));
+  assert(providers.find(provider => provider.instanceId === 'pi').models.some(model => model.slug === 'test/alternate'));
+  await f.dispatch(f.message(threadId, 'mcp-model-targets'));
   const projection = await eventually(async () => {
     const p = await f.snapshot(threadId);
     const items = p.visibleTurnItems.map(row => row.item);
-    if (items.some(item => item.text?.includes('"modelLock":true'))) return p;
+    if (items.some(item => item.text?.includes('"modelTargets":true'))) return p;
     if (p.runs.some(run => ['completed', 'failed'].includes(run.status))) {
       assert.fail(JSON.stringify({ runs: p.runs, items }));
     }
     return null;
   });
   const report = JSON.parse(projection.visibleTurnItems.map(row => row.item)
-    .find(item => item.text?.includes('"modelLock":true')).text);
+    .find(item => item.text?.includes('"modelTargets":true')).text);
   const decode = result => JSON.parse(result.content.find(block => block.type === 'text').text);
   assert(!report.capabilities.isError);
   const caps = decode(report.capabilities);
   assert.equal(caps.inheritedModel, 'test/model');
-  assert.equal(caps.providers.length, 1);
-  assert.equal(caps.providers[0].providerInstanceId, 'pi');
-  assert.deepEqual(caps.providers[0].models.map(model => model.id), ['test/model']);
-  assert.equal(caps.providers[0].canRunCrossProviderChildTask, false);
-  for (const result of report.rejected) {
-    assert.equal(result.isError, true);
-    assert.match(JSON.stringify(result.content), /model fallback is not allowed/);
-  }
-  for (const result of report.accepted) {
+  assert.equal(caps.inheritedProviderInstanceId, 'pi');
+  // 状态列表隐藏禁用项，MCP 仍暴露完整官方目录，不添加宿主权限/委派白名单。
+  assert.deepEqual(providers.map(provider => provider.driver), ['pi']);
+  assert.deepEqual(caps.providers.map(provider => provider.providerInstanceId).sort(),
+    [...nativeDrivers, 'pi'].sort());
+  const pi = caps.providers.find(provider => provider.providerInstanceId === 'pi');
+  assert.deepEqual(pi.models.map(model => model.id).sort(),
+    providers.find(provider => provider.instanceId === 'pi').models.map(model => model.slug).sort());
+  assert(pi.models.some(model => model.id === 'test/model'));
+  assert(pi.models.some(model => model.id === 'test/alternate'));
+  assert.equal(pi.canRunChildTask, true);
+  assert.equal(pi.canRunCrossProviderChildTask, true);
+  const expectedModels = ['test/model', 'test/alternate', 'test/alternate'];
+  assert.equal(report.accepted.length, expectedModels.length);
+  const tasks = report.accepted.map((result, index) => {
     assert(!result.isError, JSON.stringify(result));
-    assert.equal(decode(result).model, 'test/model');
-    assert.equal(decode(result).providerInstanceId, 'pi');
-  }
-  assert.equal(projection.subagents.length, 2, 'Rejected overrides must not create child tasks');
+    const task = decode(result);
+    assert.equal(task.model, expectedModels[index]);
+    assert.equal(task.providerInstanceId, 'pi');
+    return task;
+  });
+  // 不仅检查工具回执，还验证子线程实际使用显式模型并完成执行，避免静默回退到父模型。
   const children = await eventually(async () => {
     const p = await f.snapshot(threadId);
-    return p.subagents.length === 2 && p.subagents.every(child => child.childThreadId !== null)
+    return p.subagents.length === tasks.length && p.subagents.every(child => child.childThreadId !== null)
       ? p.subagents : null;
   });
-  for (const child of children) {
-    assert.equal((await f.snapshot(encodeURIComponent(child.childThreadId))).thread.modelSelection.model, 'test/model');
+  for (const [index, task] of tasks.entries()) {
+    const child = children.find(child => child.id === task.taskId);
+    assert(child, JSON.stringify({ task, children }));
+    const projection = await eventually(async () => {
+      const p = await f.snapshot(encodeURIComponent(child.childThreadId));
+      return p.runs.some(run => ['completed', 'failed'].includes(run.status)) ? p : null;
+    });
+    assert.equal(projection.thread.modelSelection.model, expectedModels[index]);
+    assert.equal(projection.thread.modelSelection.instanceId, 'pi');
+    assert(projection.runs.some(run => run.status === 'completed'), JSON.stringify(projection.runs));
   }
+});
+
+test('protocol fixtures ignore developer credentials and never launch native providers for first-message titles', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-provider-isolation-'));
+  const previous = { ...process.env };
+  let f;
+  t.after(async () => {
+    try { await f?.close(); } finally {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, previous);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+  const traps = join(directory, 'native-traps'), marker = join(directory, 'unexpected-provider');
+  await mkdir(traps, { mode: 0o700 });
+  // 若启动探测、默认模型或后台标题生成误走本机 Provider，留下可断言的证据。
+  for (const name of ['codex', 'claude', 'cursor', 'cursor-agent', 'agent', 'grok', 'opencode', 'antigravity', 'muse', 'pi']) {
+    const binary = join(traps, name);
+    await writeFile(binary, `#!/bin/sh\nprintf '%s\\n' '${name}'\" $*\" >> '${marker}'\nexit 97\n`, { mode: 0o700 });
+  }
+  process.env.PATH = traps + ':' + previous.PATH;
+  for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR',
+    'XDG_DATA_HOME', 'GROK_HOME', 'PI_CODING_AGENT_DIR', 'PI_CODING_AGENT_PACKAGE_DIR', 'NODE_OPTIONS']) {
+    process.env[key] = 'developer-environment-must-not-be-used';
+  }
+  // 模拟旧版只写 Pi 的真实设置：官方缺省槽会隐式启用 Codex/Claude，迁移必须补全关闭项。
+  prepareProtocolServer(directory, { binaryPath: join(directory, 'fixture-pi') });
+  const settingsFile = join(directory, 'server-owned', 'userdata', 'settings.json');
+  const legacySettings = JSON.parse(await readFile(settingsFile, 'utf8'));
+  for (const driver of nativeDrivers) delete legacySettings.providerInstances[driver];
+  await writeFile(settingsFile, JSON.stringify(legacySettings));
+  f = await open(directory);
+  assert.equal(process.env.OPENAI_API_KEY, undefined);
+  assert.equal(process.env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(process.env.NODE_OPTIONS, undefined);
+  assert.equal(process.env.HOME, fixtureEnvironment(directory, {}).HOME);
+  const { settings, providers } = await f.rpc('server.getConfig');
+  assert.equal(settings.textGenerationModelSelection.instanceId, 'pi');
+  assert.equal(settings.textGenerationModelSelection.model, 'test/model');
+  assert.equal(settings.defaultModelSelection.instanceId, 'pi');
+  for (const driver of nativeDrivers) assert.equal(settings.providerInstances[driver]?.enabled ?? false, false, driver);
+  assert.deepEqual(providers.map(provider => provider.driver), ['pi']);
+  assert(providers[0].models.some(model => model.slug === 'test/model'));
+  const refreshed = await f.rpc('server.refreshProviders', {});
+  assert.deepEqual(refreshed.providers.map(provider => provider.driver), ['pi']);
+  // 保留官方原生浏览器等能力默认值；隔离的只是测试 Provider，非生产能力开关。
+  assert.equal(settings.enableAgentBrowserAccess, true);
+  const threadId = await f.create('New thread');
+  await f.dispatch(f.message(threadId, 'fixture-only title generation'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(run => run.status === 'completed'));
+  await eventually(async () => (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).includes('get_last_assistant_text'));
+  await f.close();
+  const launches = await readFile(marker, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
+  assert.equal(launches, '', 'nonfixture Provider executable launched');
+  const probes = await readFile(join(directory, 'fixture-native-probes.log'), 'utf8')
+    .catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
+  assert.equal(probes, '', 'disabled providers must not run even installation/version probes');
+});
+
+test('official settings can enable native discovery later and restart does not reset that preference', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-provider-opt-in-'));
+  let f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  assert.deepEqual((await f.rpc('server.getConfig')).providers.map(p => p.driver), ['pi']);
+  await f.rpc('server.updateSettings', { patch: {}, providerInstanceMutation: {
+    operation: 'upsert', instanceId: 'codex', instance: { driver: 'codex', enabled: true, config: { setupMode: 'managed' } },
+  } });
+  await eventually(async () => (await f.rpc('server.getConfig')).providers.some(p => p.instanceId === 'codex' && p.enabled));
+  await eventually(async () => (await readFile(join(directory, 'fixture-native-probes.log'), 'utf8').catch(() => '')).includes('codex --version'));
+  await f.close();
+  f = await open(directory);
+  assert.equal((await f.rpc('server.getSettings')).providerInstances.codex.enabled, true);
+  await eventually(async () => (await f.rpc('server.getConfig')).providers.some(p => p.driver === 'codex'));
+  await f.rpc('server.updateSettings', { patch: {}, providerInstanceMutation: {
+    operation: 'upsert', instanceId: 'codex', instance: { driver: 'codex', enabled: false, config: { setupMode: 'managed' } },
+  } });
+  await eventually(async () => (await f.rpc('server.getConfig')).providers.every(p => p.driver === 'pi'));
 });
 
 test('server names a desktop draft on its first mobile message without overwriting custom titles', async t => {
@@ -273,34 +366,36 @@ test('official Pi discovery, model preferences, and protocol authorization', asy
   t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
   await f.gateway.official.management.modelCatalog();
   const config = await f.rpc('server.getConfig');
-  assert.equal(config.providers[0].driver, 'pi');
-  assert(config.providers[0].models.some(m => m.slug === 'test/model'));
+  assert.deepEqual(config.providers.map(provider => provider.driver), ['pi']);
+  assert(config.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
   assert.equal((await fetch(f.gateway.serverURL + '/api/orchestration/shell', { headers: { 'x-t3-orchestration-protocol': '2' } })).status, 401);
   await assert.rejects(call(await f.ws('1'), 'server.getConfig'));
   await f.gateway.official.management.modelPreferences({ hiddenModels: ['test/model'], defaultModel: 'test/model' });
   const updated = await f.rpc('server.getConfig');
   assert.equal(updated.settings.defaultModelSelection, null);
-  assert(!updated.providers[0].models.some(m => m.slug === 'test/model'));
-  assert(!(await f.rpc('server.refreshProviders', {})).providers[0].models.some(m => m.slug === 'test/model'));
+  assert(!updated.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
+  assert(!(await f.rpc('server.refreshProviders', {})).providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
   const events = await readStream(await f.ws(), 'subscribeServerConfig', {}, { count: 2,
     filter: event => event.type === 'snapshot' || event.type === 'providerStatuses',
     onItem: async event => {
       if (event.type === 'snapshot') {
-        assert(!event.config.providers[0].models.some(m => m.slug === 'test/model'));
+        assert(!event.config.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
         await f.gateway.official.management.modelPreferences({ hiddenModels: [], defaultModel: null });
       }
     } });
   const visible = events.find(event => event.type === 'providerStatuses');
-  assert(visible.payload.providers[0].models.some(m => m.slug === 'test/model'));
+  assert(events.filter(event => event.type === 'snapshot').every(event => event.config.providers.every(p => p.driver === 'pi')));
+  assert.deepEqual(visible.payload.providers.map(provider => provider.driver), ['pi']);
+  assert(visible.payload.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
   const hiddenEvents = await readStream(await f.ws(), 'subscribeServerConfig', {}, { count: 2,
     filter: event => event.type === 'snapshot' || event.type === 'providerStatuses',
     onItem: async event => {
       if (event.type === 'snapshot') {
-        assert(event.config.providers[0].models.some(m => m.slug === 'test/model'));
+        assert(event.config.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
         await f.gateway.official.management.modelPreferences({ hiddenModels: ['test/model'], defaultModel: null });
       }
     } });
-  assert(!hiddenEvents.find(event => event.type === 'providerStatuses').payload.providers[0].models.some(m => m.slug === 'test/model'));
+  assert(!hiddenEvents.find(event => event.type === 'providerStatuses').payload.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
   // Hiding is presentation only: a thread can still run the hidden model.
   const threadId = await f.create();
   await f.dispatch(f.message(threadId, 'hidden model'));

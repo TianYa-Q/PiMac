@@ -28,4 +28,6 @@ These control commands do not launch, stop or restart the app. Ending a batch pe
 
 An already running Python process still uses its loaded old code. Updating `scripts/dev.py` alone deliberately does not trigger an app rebuild. After all work is idle, stop the old watcher and start the new watcher once. Ctrl-C stops its app/services, so do not do this during active tasks.
 
+The T3 native-runtime upgrade adds `scripts/sign-native-runtime.sh` to both release and development packaging. It signs nested native addons and executable helpers (including mode `0700`) before the outer bundle. An older watcher does not acquire this new staging step until that one safe restart; do not restart it automatically as part of an active coding task.
+
 Tests: `python3 -m unittest discover -s Tests/DevWatcher -v`, plus Swift `DevelopmentReloadStateTests`.

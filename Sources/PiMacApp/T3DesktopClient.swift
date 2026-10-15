@@ -11,6 +11,7 @@ final class T3DesktopClient: ObservableObject {
   private(set) var shell: JSON = [:]
   private(set) var providers: [JSON] = []
   private(set) var modelContextSettings = ModelContextSettings.empty
+  let textGenerationModels = TextGenerationModelStore()
   var modelContextWindows: [String: Int] { modelContextSettings.overrides }
   var onShell: ((JSON) -> Void)?
   var onTaskStatus: ((TaskStatusTracker.Event) -> Void)?
@@ -111,6 +112,7 @@ final class T3DesktopClient: ObservableObject {
             self.syncedModelPreferences = nil
             self.providers = []
             self.modelContextSettings = .empty
+            self.textGenerationModels.reset()
             self.invalidateThreadSnapshots()
             self.searchIndex.reset()
             self.isConnected = false
@@ -157,6 +159,7 @@ final class T3DesktopClient: ObservableObject {
     connectedServerURL = nil
     providers = []
     modelContextSettings = .empty
+    textGenerationModels.reset()
     syncedModelPreferences = nil
     isConnected = false
     watches.removeAll()
@@ -523,10 +526,22 @@ final class T3DesktopClient: ObservableObject {
     syncedModelPreferences = data
   }
 
+  func updateTextGenerationModel(_ modelID: String?) async {
+    await textGenerationModels.update {
+      guard let service else { throw ClientError.unavailable }
+      // 保存之前先同步本机隐藏列表，避免刚隐藏的模型仍被列为候选。
+      try await syncModelPreferences()
+      return try await service.textGenerationModelSettings(modelID: modelID)
+    }
+  }
+
   func loadConfig() async throws {
     let result = try await rpc("server.getConfig")
     let catalogs = try await service?.modelCatalog() ?? [:]
     modelContextSettings = try await service?.modelContextSettings() ?? .empty
+    if let service {
+      await textGenerationModels.update { try await service.textGenerationModelSettings(modelID: nil) }
+    }
     providers = (result["providers"] as? [JSON] ?? []).map { provider in
       var nativeProvider = provider
       if let id = provider["instanceId"] as? String, let models = catalogs[id] {

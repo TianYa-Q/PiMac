@@ -132,8 +132,9 @@ struct T3DesktopTests {
       workspace.disconnectAll()
     }
     let state = root.appendingPathComponent("state")
-    try service.start(
-      workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace, stateDirectory: state, binary: binary,
+      model: "test/model")
     var requestedFollowUp = false
     var liveDeliveries = 0
     client.onShell = { [weak client] snapshot in
@@ -218,8 +219,9 @@ struct T3DesktopTests {
     #expect(FileManager.default.fileExists(atPath: marker.path))
     // Malformed legacy ownership still needs explicit operator recovery.
     try FileManager.default.removeItem(at: marker)
-    try service.start(
-      workspace: workspace, token: T3NetworkEndpoint.secret(), stateDirectory: state)
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace, stateDirectory: state, binary: binary,
+      model: "test/model")
     try await client.waitUntilReady()
     #expect(!client.providers.isEmpty)
     #expect(client.status == "T3 Server 已连接")
@@ -346,11 +348,16 @@ struct T3DesktopTests {
       service.stop()
       workspace.disconnectAll()
     }
-    try service.start(
-      workspace: workspace, token: T3NetworkEndpoint.secret(),
-      stateDirectory: root.appendingPathComponent("state"))
+    let originalEnvironment = ProcessInfo.processInfo.environment
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace,
+      stateDirectory: root.appendingPathComponent("state"), binary: binary, model: "test/model")
+    #expect(ProcessInfo.processInfo.environment == originalEnvironment)
     client.start(service: service)
     try await client.waitUntilReady()
+    // 所有非 Pi 实例都已禁用；连 pending Codex 快照也不能触发原生探测。
+    #expect(!FileManager.default.fileExists(
+      atPath: root.appendingPathComponent("state/fixture-native-probes.log").path))
     let model = AppModel(startupProjectURL: root, continueLastSession: false)
     defer { model.disconnect() }
     model.attach(to: client)

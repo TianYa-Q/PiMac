@@ -26,7 +26,8 @@ struct T3LifecycleTests {
       let record = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
       return Int32(try #require(record["pid"] as? Int))
     }
-    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret())
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model")
     for _ in 0..<200 where service.serverURL == nil {
       try await Task.sleep(for: .milliseconds(50))
     }
@@ -39,7 +40,8 @@ struct T3LifecycleTests {
     }
     #expect(await service.stopAndWait())
     #expect(FileManager.default.fileExists(atPath: marker.path))
-    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret())
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model")
     for _ in 0..<200 where service.serverURL == nil {
       try await Task.sleep(for: .milliseconds(50))
     }
@@ -71,7 +73,8 @@ struct T3LifecycleTests {
       service.stop()
       workspace.disconnectAll()
     }
-    try service.start(workspace: workspace, token: T3NetworkEndpoint.secret())
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model")
     for _ in 0..<100 where !service.status.contains("启动超时") {
       try await Task.sleep(for: .milliseconds(20))
     }
@@ -82,7 +85,8 @@ struct T3LifecycleTests {
     #expect(T3BridgeStateLease.isAvailable(root.appendingPathComponent("child-owner.lock")))
     let retry = T3BridgeService(defaults: defaults, stateDirectory: root)
     defer { retry.stop() }
-    try retry.start(workspace: workspace, token: T3NetworkEndpoint.secret())
+    try startT3ProtocolFixture(
+      service: retry, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model")
     for _ in 0..<200 where retry.serverURL == nil {
       try await Task.sleep(for: .milliseconds(50))
     }
