@@ -29,6 +29,12 @@ export function setModelPreferences(value) {
   hiddenModels = new Set(next.hiddenModels);
   for (const listener of listeners) listener();
 }
+export async function syncModelPreferences(value, updateSettings) {
+  setModelPreferences(value);
+  const model = value.defaultModel && !value.hiddenModels.includes(value.defaultModel) ? value.defaultModel : null;
+  await updateSettings({ defaultModelSelection: model ? { instanceId: 'pi', model } : null });
+  return { ok: true };
+}
 export function subscribeModelPreferences(listener) {
   listeners.add(listener);
   listener(); // Replay to close the snapshot/subscription race.

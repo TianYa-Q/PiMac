@@ -60,6 +60,28 @@ test('one-time preference disables explicit nonPi and project overrides, preserv
   assert.equal(fs.readFileSync(file, 'utf8'), edited);
 });
 
+test('legacy provider blobs populate disabled defaults without losing config or overriding explicit instances', t => {
+  const providers = {
+    pi: { enabled: false, binaryPath: '/custom/pi', launchArgs: '--offline' },
+    codex: { enabled: true, binaryPath: '/custom/codex', binaryArgs: ['--profile', 'work'],
+      modelOptions: [{ id: 'reasoning', value: 'high' }], nested: { futureOption: [false, 0, ''] } },
+    claudeAgent: { enabled: true, binaryPath: '/custom/claude', environment: { HOME: '/private/claude' },
+      options: { permissions: 'keep-exactly' } },
+  };
+  const file = fixture(t, JSON.stringify({ providers }));
+  migrateProviderDiscoverySettings(file, defaults);
+  const settings = JSON.parse(fs.readFileSync(file));
+  for (const [driver, legacy] of Object.entries(providers)) {
+    const { enabled, ...config } = legacy;
+    assert.deepEqual(settings.providerInstances[driver], { driver, enabled: false, config });
+  }
+  assert.deepEqual(settings.providers, providers); // 上游仍负责清理旧 map。
+  const explicit = { driver: 'codex', enabled: true, config: { binaryPath: '/new/codex', options: ['new'] } };
+  const second = fixture(t, JSON.stringify({ providers, providerInstances: { codex: explicit } }));
+  migrateProviderDiscoverySettings(second, defaults);
+  assert.deepEqual(JSON.parse(fs.readFileSync(second)).providerInstances.codex, { ...explicit, enabled: false });
+});
+
 test('fresh Pi-only defaults are marked once and an interrupted backup is retried, not treated as completion', t => {
   const file = fixture(t, JSON.stringify({ providerInstances: defaults }));
   fs.writeFileSync(file + '.before-pi-discovery-v1', 'original pre-crash backup', { mode: 0o600 });

@@ -2,7 +2,10 @@ import Combine
 import Foundation
 
 struct TextGenerationModelSettings: Decodable, Equatable {
-  enum Status: String, Decodable { case selected, noVisibleModels = "no-visible-models" }
+  enum Status: String, Decodable {
+    case selected
+    case noVisibleModels = "no-visible-models"
+  }
   struct Selection: Decodable, Equatable {
     let instanceId: String
     let model: String
@@ -31,7 +34,8 @@ struct TextGenerationModelSettings: Decodable, Equatable {
       (status == .selected && selection?.instanceId == "pi" && ids.contains(selection?.model ?? ""))
         || (status == .noVisibleModels && selection == nil && candidates.isEmpty)
     else {
-      throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid title model settings"))
+      throw DecodingError.dataCorrupted(
+        .init(codingPath: decoder.codingPath, debugDescription: "Invalid title model settings"))
     }
   }
   private enum CodingKeys: String, CodingKey { case status, selection, candidates }
@@ -44,20 +48,42 @@ final class TextGenerationModelStore: ObservableObject {
   @Published private(set) var busy = false
   @Published private(set) var error = ""
   private var generation = UUID()
+  private var pendingRefresh: (() async throws -> TextGenerationModelSettings)?
 
-  func update(_ operation: () async throws -> TextGenerationModelSettings) async {
-    guard !busy else { return }
+  func update(refresh: Bool, _ operation: @escaping () async throws -> TextGenerationModelSettings)
+    async
+  {
+    if busy {
+      // 可见性变更可能发生在读取或保存期间；合并为最新的一次重读，而不是丢弃。
+      if refresh { pendingRefresh = operation }
+      return
+    }
     let current = generation
     busy = true
-    error = ""
     defer { if generation == current { busy = false } }
-    do {
-      let result = try await operation()
-      if generation == current { snapshot = result }
-    } catch {
-      if generation == current { self.error = "标题模型设置未确认：\(error.localizedDescription)" }
+    var next = operation
+    while generation == current {
+      error = ""
+      do {
+        let result = try await next()
+        guard generation == current else { return }
+        // 已请求重读说明当前响应可能过时，不能再发布旧选择。
+        if pendingRefresh == nil { snapshot = result }
+      } catch {
+        guard generation == current else { return }
+        if pendingRefresh == nil { self.error = "标题模型设置未确认：\(error.localizedDescription)" }
+      }
+      guard let pending = pendingRefresh else { return }
+      pendingRefresh = nil
+      next = pending
     }
   }
 
-  func reset() { generation = UUID(); snapshot = nil; error = ""; busy = false }
+  func reset() {
+    generation = UUID()
+    pendingRefresh = nil
+    snapshot = nil
+    error = ""
+    busy = false
+  }
 }

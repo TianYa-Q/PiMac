@@ -13,10 +13,21 @@ export function migrateProviderDiscoverySettings(file, defaults) {
   const text = fs.readFileSync(file, 'utf8');
   const settings = JSON.parse(text);
   if (!isRecord(settings) || (settings.providerInstances !== undefined && !isRecord(settings.providerInstances)) ||
-      (settings.projectSettingsOverrides !== undefined && !isRecord(settings.projectSettingsOverrides))) {
+      (settings.projectSettingsOverrides !== undefined && !isRecord(settings.projectSettingsOverrides)) ||
+      (settings.providers !== undefined && !isRecord(settings.providers))) {
     throw new Error('Invalid provider discovery settings');
   }
   const instances = { ...defaults, ...settings.providerInstances };
+  // 上游稍后会删除旧 providers map，且跳过已存在的新实例。插入默认槽位前先迁入
+  // 完整旧 config（仅 enabled 属于实例层）；显式新实例始终优先，不与旧配置混合。
+  for (const [id, instance] of Object.entries(defaults)) {
+    if (Object.hasOwn(settings.providerInstances ?? {}, id)) continue;
+    const legacy = settings.providers?.[instance.driver];
+    if (legacy === undefined) continue;
+    if (!isRecord(legacy)) throw new Error('Invalid legacy provider settings: ' + instance.driver);
+    const { enabled, ...config } = legacy;
+    instances[id] = { ...instance, ...(typeof enabled === 'boolean' ? { enabled } : {}), config };
+  }
   for (const [id, instance] of Object.entries(instances)) {
     if (!isRecord(instance) || typeof instance.driver !== 'string') throw new Error('Invalid provider instance: ' + id);
     // 这是一次性的单用户发现偏好，不删除驱动、配置或运行入口；之后完全服从官方设置。

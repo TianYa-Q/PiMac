@@ -527,7 +527,7 @@ final class T3DesktopClient: ObservableObject {
   }
 
   func updateTextGenerationModel(_ modelID: String?) async {
-    await textGenerationModels.update {
+    await textGenerationModels.update(refresh: modelID == nil) { [self] in
       guard let service else { throw ClientError.unavailable }
       // 保存之前先同步本机隐藏列表，避免刚隐藏的模型仍被列为候选。
       try await syncModelPreferences()
@@ -540,7 +540,9 @@ final class T3DesktopClient: ObservableObject {
     let catalogs = try await service?.modelCatalog() ?? [:]
     modelContextSettings = try await service?.modelContextSettings() ?? .empty
     if let service {
-      await textGenerationModels.update { try await service.textGenerationModelSettings(modelID: nil) }
+      await textGenerationModels.update(refresh: true) {
+        try await service.textGenerationModelSettings(modelID: nil)
+      }
     }
     providers = (result["providers"] as? [JSON] ?? []).map { provider in
       var nativeProvider = provider

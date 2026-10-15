@@ -1,9 +1,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { configureModelPreferences, setModelPreferences, visibleProviders, subscribeModelPreferences } from '../model-preferences.mjs';
+import { execFileSync } from 'node:child_process';
+import { createTextGenerationSettings } from '../text-generation-settings.mjs';
+import { configureModelPreferences, setModelPreferences, syncModelPreferences, visibleProviders, subscribeModelPreferences } from '../model-preferences.mjs';
+
+test('visibility sync is independent of title discovery, but preference write failures still reject', async t => {
+  const root = new URL('../../../tmp/', import.meta.url).pathname;
+  mkdirSync(root, { recursive: true });
+  const directory = mkdtempSync(join(root, 'preferences-failure-'));
+  t.after(() => execFileSync('trash', [directory]));
+  configureModelPreferences(directory);
+  const title = createTextGenerationSettings({
+    readSettings: async () => { throw new Error('title settings unavailable'); },
+    updateSettings: async () => { throw new Error('title update unavailable'); },
+    readProviders: async () => { throw new Error('transient Pi catalog error'); }, visibleProviders,
+  });
+  const value = { hiddenModels: ['test/hidden'], defaultModel: 'test/visible' };
+  let written;
+  assert.deepEqual(await syncModelPreferences(value, async patch => { written = patch; }), { ok: true });
+  assert.deepEqual(written, { defaultModelSelection: { instanceId: 'pi', model: 'test/visible' } });
+  assert.deepEqual(JSON.parse(readFileSync(join(directory, 'model-preferences.json'), 'utf8')), value);
+  await assert.rejects(title.read(), /transient Pi catalog error/);
+  await assert.rejects(title.set({ model: 'test/visible' }), /transient Pi catalog error/);
+  await assert.rejects(syncModelPreferences(value, async () => { throw new Error('official write failed'); }), /official write failed/);
+  mkdirSync(join(directory, 'model-preferences.json.tmp'));
+  let called = false;
+  await assert.rejects(syncModelPreferences(value, async () => { called = true; }), /EISDIR/);
+  assert.equal(called, false);
+});
 
 test('shared model preferences are private and do not override Pi compaction configuration', t => {
   const directory = mkdtempSync(join(tmpdir(), 'pimac-model-preferences-'));
