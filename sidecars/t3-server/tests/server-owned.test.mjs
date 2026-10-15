@@ -122,6 +122,32 @@ test('parent settlement covers descendants atomically and leaves unrelated threa
   assert.equal((await f.snapshot(child)).thread.settledOverride, 'settled');
 });
 
+test('settlement latency with unrelated threads and repeated lifecycle changes', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-settlement-latency-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
+  const target = await f.create();
+  const unrelated = [];
+  for (let i = 0; i < 32; i++) unrelated.push(await f.create());
+  const started = performance.now();
+  for (let i = 0; i < 5; i++) {
+    await f.dispatch({ type: 'thread.settle', threadId: target });
+    await f.dispatch({ type: 'thread.unsettle', threadId: target, reason: 'user' });
+  }
+  t.diagnostic('five settle/unsettle pairs: ' + Math.round(performance.now() - started) + 'ms');
+  const bulkStarted = performance.now();
+  for (let offset = 0; offset < unrelated.length; offset += 4) {
+    await Promise.all(unrelated.slice(offset, offset + 4).map(threadId =>
+      f.dispatch({ type: 'thread.settle', threadId })));
+  }
+  t.diagnostic('32 settlements, four in flight: ' + Math.round(performance.now() - bulkStarted) + 'ms');
+  const shell = await f.get('/api/orchestration/shell');
+  assert.equal(shell.threads.find(row => row.id === target).settledOverride, 'active');
+  for (const id of unrelated) {
+    assert.equal(shell.threads.find(row => row.id === id).settledOverride, 'settled');
+  }
+});
+
 test('account rotation status survives native adapter and private gateway without quota queries', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-account-selection-'));
   const f = await open(directory);

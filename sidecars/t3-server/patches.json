@@ -1,5 +1,21 @@
 {
   "apps/server/src/orchestration-v2/ProjectionStore.ts": [
+{
+  "oldText": "  readonly getThreadsWithPullRequests: (",
+  "newText": "  readonly getSettlementThreadIds: (\n    threadId: ThreadId,\n  ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;\n  readonly getThreadsWithPullRequests: ("
+},
+{
+  "oldText": "    const getThreadsWithPullRequests: ProjectionStoreV2Shape[\"getThreadsWithPullRequests\"] = (",
+  "newText": "    // Settle 只需要子树 ID；不能为一次写入构建所有会话的 shell（运行、消息和工具投影）。\n    // UNION 按 ID 去重，损坏的 lineage 环也会终止；归档/删除节点不参与遍历。\n    const getSettlementThreadIds: ProjectionStoreV2Shape[\"getSettlementThreadIds\"] = (threadId) =>\n      Effect.gen(function* () {\n        const rows = yield* sql<{ readonly thread_id: string }>`\n          WITH RECURSIVE settlement_tree(thread_id) AS (\n            SELECT ${threadId}\n            UNION\n            SELECT child.thread_id\n            FROM orchestration_v2_projection_threads child\n            JOIN settlement_tree parent\n              ON json_extract(child.payload_json, '$.lineage.parentThreadId') = parent.thread_id\n            WHERE child.deleted_at IS NULL\n              AND json_extract(child.payload_json, '$.archivedAt') IS NULL\n          )\n          SELECT thread_id FROM settlement_tree\n        `;\n        return rows.map((row) => ThreadId.make(row.thread_id));\n      }).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));\n\n    const getThreadsWithPullRequests: ProjectionStoreV2Shape[\"getThreadsWithPullRequests\"] = ("
+},
+{
+  "oldText": "      getThreadsWithPullRequests,",
+  "newText": "      getSettlementThreadIds,\n      getThreadsWithPullRequests,"
+},
+{
+  "oldText": "      getThreadsWithPullRequests: (threadId) =>",
+  "newText": "      getSettlementThreadIds: (threadId) =>\n        Ref.get(replayState).pipe(Effect.map((state) => {\n          const children = new Map<ThreadId, ThreadId[]>();\n          for (const { thread } of state.projections.values()) {\n            const parent = thread.lineage.parentThreadId;\n            if (parent === null || thread.deletedAt !== null || thread.archivedAt !== null) continue;\n            const siblings = children.get(parent) ?? [];\n            siblings.push(thread.id);\n            children.set(parent, siblings);\n          }\n          const ids = [threadId];\n          const visited = new Set(ids);\n          for (let index = 0; index < ids.length; index++) {\n            for (const child of children.get(ids[index]!) ?? []) {\n              if (visited.has(child)) continue;\n              visited.add(child);\n              ids.push(child);\n            }\n          }\n          return ids;\n        })),\n      getThreadsWithPullRequests: (threadId) =>"
+},
   {
     "oldText": "  readonly latest_user_message_at: string | null;",
     "newText": "  readonly latest_message_at: string | null;\n  readonly latest_user_message_at: string | null;"
@@ -103,7 +119,7 @@
     },
     {
       "oldText": "  const dispatchProviderSessionDetach = Effect.fn(\"orchestrationV2.dispatch.providerSessionDetach\")(",
-      "newText": "  // 父会话收起时，在同一决策事务中处理完整子树；任一子会话校验失败，\n  // 整组事件和副作用都不会提交，不能让父会话已完成而子会话仍在活跃列表。\n  // 使用 visited 防止损坏的 lineage 循环；归档会话不参与活跃列表生命周期。\n  const dispatchThreadMutation = (\n    ...args: Parameters<typeof dispatchSingleThreadMutation>\n  ) => Effect.gen(function* () {\n    const [command, events, effects] = args;\n    if (command.type !== \"thread.settle\") {\n      return yield* dispatchSingleThreadMutation(command, events, effects);\n    }\n    const shell = yield* projectionStore.getShellSnapshot({ location: \"active\" })\n      .pipe(mapDispatchError(command));\n    const ids = [command.threadId];\n    const visited = new Set(ids);\n    for (let index = 0; index < ids.length; index++) {\n      for (const child of shell.threads) {\n        if (child.lineage.parentThreadId !== ids[index] || visited.has(child.id)) continue;\n        visited.add(child.id);\n        ids.push(child.id);\n      }\n    }\n    for (const threadId of ids) {\n      yield* dispatchSingleThreadMutation({ ...command, threadId }, events, effects);\n    }\n  });\n\n  const dispatchProviderSessionDetach = Effect.fn(\"orchestrationV2.dispatch.providerSessionDetach\")("
+      "newText": "  // 父会话收起时，在同一决策事务中处理完整子树；任一子会话校验失败，\n  // 整组事件和副作用都不会提交，不能让父会话已完成而子会话仍在活跃列表。\n  // 使用 visited 防止损坏的 lineage 循环；归档会话不参与活跃列表生命周期。\n  const dispatchThreadMutation = (\n    ...args: Parameters<typeof dispatchSingleThreadMutation>\n  ) => Effect.gen(function* () {\n    const [command, events, effects] = args;\n    if (command.type !== \"thread.settle\") {\n      return yield* dispatchSingleThreadMutation(command, events, effects);\n    }\n    const ids = yield* projectionStore.getSettlementThreadIds(command.threadId)\n      .pipe(mapDispatchError(command));\n    for (const threadId of ids) {\n      yield* dispatchSingleThreadMutation({ ...command, threadId }, events, effects);\n    }\n  });\n\n  const dispatchProviderSessionDetach = Effect.fn(\"orchestrationV2.dispatch.providerSessionDetach\")("
     }
   ],
   "apps/server/src/cloud/ManagedEndpointRuntime.ts": [

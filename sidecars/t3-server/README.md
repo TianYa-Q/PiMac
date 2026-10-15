@@ -14,7 +14,10 @@ so hidden reasoning tokens are subtracted (not double-counted), and the final
 other APIs. Only valid samples contribute to the task's time-weighted average;
 short/buffered streams, missing reasoning counts on Responses, and unstreamed
 tool-call payloads do not manufacture a speed. Billing/context remain separate.
-Lifecycle remains upstream-owned.
+Lifecycle remains upstream-owned. Parent settlement discovers descendants through a
+thread-ID-only recursive query, not a full shell projection per command. Cycle
+protection and archived/deleted-node exclusion are preserved; the original
+per-thread checks and atomic subtree event commit still own correctness.
 The former custom Pi
 adapter, transport, runtime controls, and their tests have been removed.
 
