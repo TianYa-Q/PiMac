@@ -819,6 +819,10 @@ struct ContentView: View {
     let running =
       AppModel.threadID(from: session.path).map { runningThreadIDs.contains($0) }
       ?? (workspace.model(forSessionPath: session.path)?.isBusy == true)
+    let regeneratingTitle =
+      AppModel.threadID(from: session.path).map {
+        workspace.isRegeneratingSessionTitle(threadID: $0)
+      } ?? false
     let settled = thread.map { WorkspaceModel.isSettled($0) } ?? false
     let autoSettleEnabled = !(thread?["autoSettleDisabledAt"] is String)
     let parentID = thread.flatMap { T3V2Presentation.subagentParentID($0) }
@@ -858,6 +862,11 @@ struct ContentView: View {
             }
             .padding(.trailing, 22)
             .help(session.title)
+            if regeneratingTitle {
+              Label("正在重新生成标题…", systemImage: "arrow.trianglehead.2.clockwise")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
             if parentID != nil {
               Text("隶属：\(parentThread?["title"] as? String ?? "父会话不在当前列表")")
                 .font(.caption2)
@@ -945,6 +954,15 @@ struct ContentView: View {
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
             pasteboard.setString(threadID, forType: .string)
+          }
+          if workspace.server.supportsTitleRegeneration {
+            Button(
+              regeneratingTitle ? "正在重新生成标题…" : "重新生成标题",
+              systemImage: "arrow.trianglehead.2.clockwise"
+            ) {
+              Task { await workspace.regenerateSessionTitle(path: session.path) }
+            }
+            .disabled(!workspace.server.isConnected || regeneratingTitle)
           }
           Divider()
         }

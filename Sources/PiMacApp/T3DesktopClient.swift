@@ -8,6 +8,7 @@ final class T3DesktopClient: ObservableObject {
   typealias JSON = [String: Any]
   @Published private(set) var isConnected = false
   @Published private(set) var status = "正在启动本机 T3 Server…"
+  @Published private(set) var supportsTitleRegeneration = false
   private(set) var shell: JSON = [:]
   private(set) var providers: [JSON] = []
   private(set) var modelContextSettings = ModelContextSettings.empty
@@ -158,6 +159,7 @@ final class T3DesktopClient: ObservableObject {
     token = ""
     connectedServerURL = nil
     providers = []
+    supportsTitleRegeneration = false
     modelContextSettings = .empty
     textGenerationModels.reset()
     syncedModelPreferences = nil
@@ -538,6 +540,9 @@ final class T3DesktopClient: ObservableObject {
 
   func loadConfig() async throws {
     let result = try await rpc("server.getConfig")
+    let environment = result["environment"] as? JSON
+    let capabilities = environment?["capabilities"] as? JSON
+    supportsTitleRegeneration = capabilities?["threadTitleRegeneration"] as? Bool == true
     let catalogs = try await service?.modelCatalog() ?? [:]
     modelContextSettings = try await service?.modelContextSettings() ?? .empty
     if let service {

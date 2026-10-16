@@ -30,8 +30,11 @@ struct LidSleepControllerTests {
     #expect(script.contains("[ \"$original\" != 0 ]"))
     #expect(script.contains("Now drawing from 'AC Power'"))
     #expect(script.contains("desired=0"))
-    #expect(script.contains("-le 10"))
-    #expect(script.contains("trap '/usr/bin/pmset -a disablesleep 0;"))
+    #expect(!script.contains("heartbeat"))
+    #expect(script.contains("trap finish EXIT"))
+    #expect(script.contains("reason=lease_removed"))
+    #expect(script.contains("reason=app_exited"))
+    #expect(script.contains("restore-error"))
     #expect(!script.contains("> \"$dir/state\""))
     #expect(script.contains("/bin/mkdir -m 755 \"$stateDir\" || exit 1"))
   }
@@ -110,13 +113,30 @@ struct LidSleepControllerTests {
     let controller = LidSleepController(defaults: defaults)
     #expect(controller.requested)
     #expect(!controller.enabled)
-    controller.stop() // Failure/quit cleanup must not revoke user permission.
+    controller.stop()  // Failure/quit cleanup must not revoke user permission.
     #expect(controller.requested)
     let reopened = LidSleepController(defaults: defaults)
     #expect(reopened.requested)
     reopened.setEnabled(false)
     #expect(!reopened.requested)
     #expect(!LidSleepController(defaults: defaults).requested)
+  }
+
+  @Test @MainActor func disablingCancelsActivationBeforePermissionCheckCanLaunchHelper()
+    async throws
+  {
+    let suite = "LidSleepControllerTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = LidSleepController(defaults: defaults)
+    controller.setEnabled(true)
+    #expect(controller.busy)
+    controller.setEnabled(false)
+    await Task.yield()
+    #expect(!controller.requested)
+    #expect(!controller.busy)
+    #expect(!controller.enabled)
+    #expect(!controller.enableOnLaunch)
   }
 
   @Test @MainActor func existingLaunchPreferenceMigratesToUserPermission() throws {
@@ -133,49 +153,43 @@ struct LidSleepControllerTests {
     #expect(!LidSleepController(defaults: defaults).requested)
   }
 
-  @Test func resumeGraceIsBoundedAndOnlyStartsAfterSchedulingGap() {
+  @Test func automaticRecoveryHasBudgetAndRequiresSustainedHealthToReset() {
     let start = Date(timeIntervalSince1970: 100)
-    var window = LidSleepResumeWindow(now: start)
-    let normal = window.tick(now: start.addingTimeInterval(1))
-    #expect(!normal)
-    let resumed = window.tick(now: start.addingTimeInterval(600))
-    #expect(resumed)
-    for second in 601...609 {
-      let grace = window.tick(now: start.addingTimeInterval(Double(second)))
-      #expect(grace)
-    }
-    let expired = window.tick(now: start.addingTimeInterval(610))
-    #expect(!expired)
-    let stillExpired = window.tick(now: start.addingTimeInterval(611))
-    #expect(!stillExpired)
+    var policy = LidSleepRecoveryPolicy()
+    #expect(policy.nextDelay() == 2)
+    policy.healthy(now: start)
+    policy.healthy(now: start.addingTimeInterval(59))
+    #expect(policy.nextDelay() == 5)
+    #expect(policy.nextDelay() == 15)
+    #expect(policy.nextDelay() == nil)
+    policy.healthy(now: start.addingTimeInterval(100))
+    policy.healthy(now: start.addingTimeInterval(160))
+    #expect(policy.nextDelay() == 2)
   }
 
   @Test(arguments: [
-    ("100 102 104 106 108 110 112", "100", 0, "100:0\n102:0\n104:0\n106:0\n108:0\n110:0\n"),
-    ("1000 1002 1004 1006 1008 1010", "100", 0,
-      "1000:unknown\n1002:unknown\n1004:unknown\n1006:unknown\n1008:unknown\n"),
-    ("1000 1002 1004 1006 1008 1010", "$fakeNow", 0,
-      "1000:unknown\n1002:unknown\n1004:unknown\n1006:unknown\n1008:unknown\n1010:unknown\n"),
-    ("1000 1002", "100", 1, ""),
+    (true, "same", "same", "running"),
+    (false, "same", "same", "lease_removed"),
+    (true, "old", "new", "app_exited"),
+    (true, "", "", "app_exited"),
   ])
-  func watchdogLeaseSurvivesResumeButNotDeadOrRemovedLease(
-    testCase: (String, String, Int, String)
+  func leaseDependsOnIntentAndProcessIdentityNotHeartbeat(
+    testCase: (Bool, String, String, String)
   ) throws {
-    let (times, stamp, result, expected) = testCase
+    let (lease, original, current, expected) = testCase
     let fragment = LidSleepController.watchdogLeaseScript
-      .replacingOccurrences(of: "/usr/bin/stat", with: "mock_stat")
-      .replacingOccurrences(of: "/bin/date", with: "mock_date")
+      .replacingOccurrences(of: "[ -f \"$dir/lease\" ]", with: lease ? "true" : "false")
+      .replacingOccurrences(of: "/bin/ps", with: "mock_ps")
     let script = """
-      mock_stat() { echo "\(stamp)"; return \(result); }
-      mock_date() { echo "$fakeNow"; }
+      mock_ps() { printf '%s' '\(current)'; }
+      appStart='\(original)'
+      appPID=123
       dir=/unused
-      lastTick=100
-      resumeUntil=0
-      current=0
-      for fakeNow in \(times); do
+      reason=running
+      for iteration in 1; do
         \(fragment)
-        printf '%s:%s\\n' "$fakeNow" "$current"
       done
+      printf '%s' "$reason"
       """
     let process = Process()
     let output = Pipe()

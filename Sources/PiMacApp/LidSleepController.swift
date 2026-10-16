@@ -1,31 +1,18 @@
 import Foundation
 import SwiftUI
 
-/// Wall-clock gaps include system sleep. Allow both peers to resume in either order,
-/// but never indefinitely forgive a watchdog that really stopped publishing.
-struct LidSleepResumeWindow {
-  private var lastTick: Date
-  private var deadline: Date?
-
-  init(now: Date = .now) { lastTick = now }
-
-  mutating func tick(now: Date) -> Bool {
-    if now.timeIntervalSince(lastTick) > 6 {
-      deadline = now.addingTimeInterval(10)
-    }
-    lastTick = now
-    return deadline.map { now < $0 } ?? false
-  }
-}
-
 /// A session-only watchdog, optionally using two narrowly scoped sudo permissions.
 @MainActor
 final class LidSleepController: ObservableObject {
   static let shared = LidSleepController()
   /// User permission is independent of the watchdog's current health.
   @Published private(set) var requested: Bool
-  @Published private(set) var enabled = false
-  @Published private(set) var busy = false
+  private enum Phase {
+    case inactive, configuring, starting, active, recovering
+  }
+  @Published private var phase = Phase.inactive
+  var enabled: Bool { phase == .active }
+  var busy: Bool { phase == .configuring || phase == .starting || phase == .recovering }
   @Published private(set) var status = "未启用" {
     didSet { if status != oldValue { LidSleepDiagnostics.record(status) } }
   }
@@ -35,7 +22,9 @@ final class LidSleepController: ObservableObject {
   private var sessionGeneration = UUID()
   private var directory: URL?
   private var timer: Timer?
-  private var resumeWindow = LidSleepResumeWindow()
+  private var activationTask: Task<Void, Never>?
+  private var recoveryTask: Task<Void, Never>?
+  private var recoveryPolicy = LidSleepRecoveryPolicy()
   private let defaults: UserDefaults
   private var launchRestoreTask: Task<Void, Never>?
   private var didRestoreAtLaunch = false
@@ -46,7 +35,8 @@ final class LidSleepController: ObservableObject {
 
   init(defaults: UserDefaults = .standard) {
     self.defaults = defaults
-    requested = defaults.object(forKey: Self.requestedPreferenceKey) as? Bool
+    requested =
+      defaults.object(forKey: Self.requestedPreferenceKey) as? Bool
       ?? defaults.bool(forKey: Self.launchPreferenceKey)
     refreshPasswordlessAccess()
     Task { [weak self] in
@@ -77,14 +67,20 @@ final class LidSleepController: ObservableObject {
       status = "当前账户名称不适用于免密码规则，未修改系统。"
       return
     }
-    busy = true
+    phase = .configuring
+    let generation = UUID()
+    sessionGeneration = generation
     status = install ? "等待一次性管理员授权…" : "正在移除免密码权限…"
     let source = "do shell script \(Self.appleScriptQuote(script)) with administrator privileges"
-    Task {
-      if !install { try? await Task.sleep(for: .seconds(3)) }
+    activationTask = Task {
+      if !install {
+        do { try await Task.sleep(for: .seconds(3)) } catch { return }
+      }
+      guard sessionGeneration == generation, !Task.isCancelled else { return }
       let error = await Task.detached { Self.authorize(source) }.value
+      guard sessionGeneration == generation, !Task.isCancelled else { return }
       refreshPasswordlessAccess()
-      busy = false
+      phase = .inactive
       if let error {
         status = "权限配置失败：\(error)"
       } else if install {
@@ -108,7 +104,8 @@ final class LidSleepController: ObservableObject {
   }
 
   func setEnabled(_ value: Bool) {
-    guard !busy else { return }
+    // 关闭可以撤销尚未完成的开启/重试；旧异步结果由 generation 拦截。
+    guard !busy || !value else { return }
     requested = value
     defaults.set(value, forKey: Self.requestedPreferenceKey)
     if !value {
@@ -117,25 +114,32 @@ final class LidSleepController: ObservableObject {
       return
     }
     guard !enabled else { return }
-    busy = true
+    recoveryPolicy = LidSleepRecoveryPolicy()
+    activate()
+  }
+
+  private func activate() {
+    guard directory == nil else {
+      status = "旧守护会话尚未释放，请先关闭合盖运行后再重试。"
+      return
+    }
+    phase = .starting
     status = "正在检查免密码权限…"
     let generation = UUID()
     sessionGeneration = generation
-    Task {
+    activationTask = Task {
+      guard sessionGeneration == generation, !Task.isCancelled else { return }
       let available = await Task.detached {
         LidSleepPasswordlessAccess.existingPermissionAvailable()
       }.value
-      guard sessionGeneration == generation else {
-        busy = false
-        return
-      }
+      guard sessionGeneration == generation, !Task.isCancelled else { return }
       passwordlessAvailable = available
       refreshPasswordlessAccess()
-      startSession(passwordless: available || passwordlessConfigured)
+      await startSession(passwordless: available || passwordlessConfigured, generation: generation)
     }
   }
 
-  private func startSession(passwordless: Bool) {
+  private func startSession(passwordless: Bool, generation: UUID) async {
     sessionPasswordless = passwordless
     status = passwordless ? "正在免密码开启…" : "等待管理员授权…"
     LidSleepDiagnostics.record(passwordless ? "使用免密码命令权限" : "使用临时管理员授权")
@@ -145,144 +149,202 @@ final class LidSleepController: ObservableObject {
       try FileManager.default.createDirectory(
         at: folder, withIntermediateDirectories: false,
         attributes: [.posixPermissions: 0o700])
-      try Data().write(to: folder.appendingPathComponent("heartbeat"))
+      directory = folder
+      try Data().write(to: folder.appendingPathComponent("lease"))
     } catch {
-      busy = false
+      stop()
       status = "无法创建守护会话：\(error.localizedDescription)"
       return
     }
-    directory = folder
-    startHeartbeat()
+    startMonitoring()
     let script = Self.watchdogScript(
       directory: folder.path,
       pid: ProcessInfo.processInfo.processIdentifier, passwordless: passwordless)
     let command = "/bin/sh -c \(Self.shellQuote(script)) </dev/null >/dev/null 2>&1 & echo $!"
     let appleScript =
       "do shell script \(Self.appleScriptQuote(command)) with administrator privileges"
-    Task {
-      let result = await Task.detached { () -> String? in
-        if passwordless {
-          // Check permission without changing power settings or prompting. A broken
-          // installation must fail visibly, never silently fall back to a prompt.
-          for value in ["0", "1"] {
-            if let error = Self.run(
-              executable: "/usr/bin/sudo",
-              arguments: [
-                "-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", value,
-              ])
-            {
-              return error
-            }
+    let result = await Task.detached { () -> String? in
+      if passwordless {
+        // Check permission without changing power settings or prompting. A broken
+        // installation must fail visibly, never silently fall back to a prompt.
+        for value in ["0", "1"] {
+          if let error = Self.run(
+            executable: "/usr/bin/sudo",
+            arguments: [
+              "-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", value,
+            ])
+          {
+            return error
           }
-          return Self.run(executable: "/bin/sh", arguments: ["-c", command])
         }
-        return Self.authorize(appleScript)
-      }.value
-      if let error = result {
-        stop()
-        status = "未启用：\(error)"
-      } else {
-        // Wait for the watchdog's initial ownership check, not just the launch command.
-        for _ in 0..<30 {
-          if let state = readState() {
-            if state == "conflict" || state == "error" {
-              stop()
-              status =
-                state == "conflict"
-                ? "系统已由其他工具禁用休眠，请先恢复后再启用。"
-                : "系统拒绝修改休眠设置，未启用。"
-            } else {
-              enabled = true
-              // Only remember a successful activation; cancellation/failure must
-              // not opt a first-time user into future authorization prompts.
-              defaults.set(true, forKey: Self.launchPreferenceKey)
-              updateStatus(state)
-            }
-            break
-          }
-          try? await Task.sleep(for: .milliseconds(100))
-        }
-        if !enabled && directory != nil {
-          stop()
-          status = "守护进程未就绪，已取消。"
-        }
+        return Self.run(executable: "/bin/sh", arguments: ["-c", command])
       }
-      busy = false
+      return Self.authorize(appleScript)
+    }.value
+    guard sessionGeneration == generation, !Task.isCancelled else { return }
+    if let error = result {
+      stop()
+      status = "未启用：\(error)"
+    } else {
+      // 只有完整、可信的就绪状态才能记住自动启动偏好；启动中/损坏/失败不能混为一谈。
+      for _ in 0..<100 {
+        guard sessionGeneration == generation, !Task.isCancelled, let stateDirectory else {
+          return
+        }
+        switch LidSleepSessionObservation.read(directory: stateDirectory, now: .now) {
+        case .running(let power):
+          phase = .active
+          defaults.set(true, forKey: Self.launchPreferenceKey)
+          updateStatus(power)
+        case .ended(let reason, _):
+          stop()
+          status =
+            reason == .conflict
+            ? "系统已由其他工具禁用休眠，请先恢复后再启用。"
+            : "守护进程启动失败，请查看诊断日志。"
+        case .invalid(let error):
+          LidSleepDiagnostics.record(error)
+          stop()
+          status = "守护状态损坏，已停止会话。"
+        case .delayed, .lost:
+          try? await Task.sleep(for: .milliseconds(100))
+          continue
+        }
+        break
+      }
+      guard sessionGeneration == generation, !Task.isCancelled else { return }
+      if !enabled {
+        stop()
+        status = "守护进程未就绪，已取消。"
+      }
     }
   }
 
   func stop() {
     // Session cleanup (including quit/error) must preserve the launch preference.
+    if let stateDirectory {
+      for name in ["exit", "command-error", "restore-error"] {
+        if let text = try? String(
+          contentsOf: stateDirectory.appendingPathComponent(name), encoding: .utf8), !text.isEmpty
+        {
+          LidSleepDiagnostics.record("\(name)：\(text.prefix(2048))")
+        }
+      }
+    }
     sessionGeneration = UUID()
+    activationTask?.cancel()
+    activationTask = nil
+    recoveryTask?.cancel()
+    recoveryTask = nil
+    phase = .inactive
     launchRestoreTask?.cancel()
     launchRestoreTask = nil
     timer?.invalidate()
     timer = nil
     if let directory {
-      // Removing the lease makes the watchdog restore sleep without another prompt.
-      try? FileManager.default.removeItem(at: directory)
-    }
-    directory = nil
-    enabled = false
-    status = "已关闭，守护进程将在数秒内恢复休眠"
-  }
-
-  private func startHeartbeat() {
-    resumeWindow = LidSleepResumeWindow()
-    timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-      Task { @MainActor in
-        guard let self, let directory = self.directory else { return }
-        let resuming = self.resumeWindow.tick(now: .now)
-        do {
-          try Data().write(to: directory.appendingPathComponent("heartbeat"), options: .atomic)
-        } catch {
-          self.stop()
-          self.status = "守护会话失效，正在恢复休眠"
+      // 删除失败时保留会话引用，禁止新会话覆盖旧 helper；再次关闭仍可重试清理。
+      do {
+        try FileManager.default.removeItem(at: directory)
+      } catch {
+        if FileManager.default.fileExists(atPath: directory.path) {
+          status = "无法释放守护会话：\(error.localizedDescription)；请退出应用以恢复休眠。"
           return
-        }
-        if self.enabled {
-          guard let state = self.readState() else {
-            if resuming {
-              self.status = "正在恢复守护连接，保留合盖运行开关…"
-              return
-            }
-            self.stop()
-            self.status = "守护进程失联，已停止会话；若系统仍无法休眠，请运行 sudo pmset -a disablesleep 0"
-            return
-          }
-          if state == "error" {
-            self.stop()
-            self.status = "修改系统设置失败，正在恢复休眠"
-          } else {
-            self.updateStatus(state)
-          }
         }
       }
     }
+    directory = nil
+    status = "已关闭，守护进程将在数秒内恢复休眠"
   }
 
-  private func readState() -> String? {
+  private var stateDirectory: URL? {
     guard let directory else { return nil }
-    let stateDirectory =
-      sessionPasswordless
+    return sessionPasswordless
       ? directory
       : URL(fileURLWithPath: "/private/var/run")
         .appendingPathComponent(directory.lastPathComponent)
-    let stateURL = stateDirectory.appendingPathComponent("state")
-    guard let attributes = try? FileManager.default.attributesOfItem(atPath: stateURL.path),
-      let modified = attributes[.modificationDate] as? Date,
-      Date.now.timeIntervalSince(modified) < 6
-    else { return nil }
-    return try? String(contentsOf: stateURL, encoding: .utf8)
-      .trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
-  private func updateStatus(_ state: String) {
+  private func startMonitoring() {
+    // 定时器只观察状态，不续租。主线程阻塞、App Nap、系统睡眠均不再撤销用户授权。
+    let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+      Task { @MainActor in
+        guard let self, self.enabled, !self.busy, let stateDirectory = self.stateDirectory else {
+          return
+        }
+        let observation = LidSleepSessionObservation.read(directory: stateDirectory, now: .now)
+        switch observation {
+        case .running(let power):
+          self.recoveryPolicy.healthy(now: .now)
+          self.updateStatus(power)
+        case .delayed:
+          self.status = "正在恢复守护连接，保留合盖运行开关…"
+        case .ended, .lost:
+          self.recover(observation)
+        case .invalid(let error):
+          LidSleepDiagnostics.record(error)
+          self.stop()
+          self.status = "守护状态损坏，已停止会话。"
+        }
+      }
+    }
+    RunLoop.main.add(timer, forMode: .common)
+    self.timer = timer
+  }
+
+  private func recover(_ observation: LidSleepSessionObservation) {
+    guard let stateDirectory else { return }
+    let passwordless = sessionPasswordless
+    let owned = FileManager.default.fileExists(
+      atPath: stateDirectory.appendingPathComponent("owned").path)
+    let restored: Bool
+    if case .ended(_, let value) = observation { restored = value } else { restored = false }
+    LidSleepDiagnostics.record("守护结束：\(observation)，拥有系统开关：\(owned)")
+    let delay = recoveryPolicy.nextDelay()
+    stop()
+    guard directory == nil else { return }
+    // 临时管理员授权不做后台弹窗；免密码恢复也必须仍持有本会话的所有权凭据。
+    guard requested, passwordless, owned else {
+      status = "守护进程失联，已停止会话；若系统仍无法休眠，请运行 sudo pmset -a disablesleep 0"
+      return
+    }
+    phase = .recovering
+    status = "正在恢复守护连接，保留合盖运行开关…"
+    let generation = sessionGeneration
+    recoveryTask = Task {
+      // SIGKILL 不会执行 EXIT trap：先恢复全局开关，再开始新的所有权检查。
+      // 不对仍存活但更新缓慢的 helper 执行此操作，避免两个会话互相覆盖。
+      let error =
+        restored
+        ? nil
+        : await Task.detached {
+          Self.run(
+            executable: "/usr/bin/sudo",
+            arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"])
+        }.value
+      guard sessionGeneration == generation, !Task.isCancelled else { return }
+      if let error {
+        phase = .inactive
+        status = "恢复休眠失败：\(error)"
+        return
+      }
+      guard let delay else {
+        phase = .inactive
+        status = "守护进程反复退出，已停止自动重试；请检查后重试开启。"
+        return
+      }
+      LidSleepDiagnostics.record("将在 \(delay) 秒后自动重建守护会话")
+      do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+      guard sessionGeneration == generation, requested, !Task.isCancelled else { return }
+      activate()
+    }
+  }
+
+  private func updateStatus(_ state: LidSleepPowerState) {
     switch state {
-    case "ac": status = "已插电：合盖保持运行，合盖时请求熄屏"
-    case "ac_closed": status = "已插电、已合盖：已请求屏幕休眠，电脑继续运行"
-    case "ac_display_error": status = "合盖保持运行，但熄屏请求失败"
-    default: status = "未插电：使用正常休眠策略"
+    case .ac: status = "已插电：合盖保持运行，合盖时请求熄屏"
+    case .acClosed: status = "已插电、已合盖：已请求屏幕休眠，电脑继续运行"
+    case .acDisplayError: status = "合盖保持运行，但熄屏请求失败"
+    case .battery: status = "未插电：使用正常休眠策略"
     }
   }
 
@@ -341,67 +403,103 @@ final class LidSleepController: ObservableObject {
     fi
     """
 
-  /// A missing lease still exits immediately. Only a scheduling gap gets bounded
-  /// grace for an existing heartbeat; the app PID is checked by the outer loop.
+  /// 租约表达会话意愿，不表达 UI 调度速度；退出/崩溃由 PID 与进程启动时间兜底。
   nonisolated static let watchdogLeaseScript = """
-    stamp=$(/usr/bin/stat -f %m "$dir/heartbeat" 2>/dev/null) || break
-    now=$(/bin/date +%s)
-    if [ "$((now - lastTick))" -gt 6 ]; then
-      resumeUntil=$((now + 10))
-      # Reapply after wake rather than trusting a pre-sleep cached power setting.
-      current=unknown
-    fi
-    lastTick=$now
-    [ "$((now - stamp))" -le 10 ] || [ "$now" -lt "$resumeUntil" ] || break
+    [ -f "$dir/lease" ] || { reason=lease_removed; break; }
+    appNow=$(/bin/ps -p "$appPID" -o lstart=)
+    [ -n "$appStart" ] && [ "$appNow" = "$appStart" ] || { reason=app_exited; break; }
     """
 
   nonisolated static func watchdogScript(directory: String, pid: Int32, passwordless: Bool = false)
     -> String
   {
-    // The passwordless watchdog is NOT root: only the exact pmset commands use sudo.
-    // Legacy authorized mode passes code inline, never reads a user-writable script.
+    // 免密码 helper 不提权；仅两个精确的 pmset 命令使用 sudo。
+    // 旧授权模式的脚本以内联代码交付，绝不由 root 读取用户可写的脚本。
     let stateDirectory =
       passwordless
       ? directory
       : "/private/var/run/" + URL(fileURLWithPath: directory).lastPathComponent
     let powerCommand = passwordless ? "/usr/bin/sudo -n /usr/bin/pmset" : "/usr/bin/pmset"
-    let cleanup = passwordless ? ":" : "/bin/rm -rf \"$stateDir\""
     return """
       dir=\(shellQuote(directory))
       stateDir=\(shellQuote(stateDirectory))
+      appPID=\(pid)
       umask 022
-      # Root mode must never write into the user's lease directory.
       \(passwordless ? ":" : "/bin/mkdir -m 755 \"$stateDir\" || exit 1")
-      trap '\(cleanup)' EXIT
-      original=$(/usr/bin/pmset -g | /usr/bin/awk '$1 == "SleepDisabled" {print $2; exit}')
+      publish() {
+        printf '%s\\n' "$1" > "$stateDir/state.tmp" &&
+          /bin/mv -f "$stateDir/state.tmp" "$stateDir/state"
+      }
+      readSetting() {
+        settings=$(/usr/bin/pmset -g) || return 1
+        printf '%s\\n' "$settings" | /usr/bin/awk '$1 == "SleepDisabled" {print $2; exit}'
+      }
+      owned=0
+      reason=startup_failed
+      finish() {
+        result=unowned
+        if [ "$owned" = 1 ]; then
+          # 租约目录可能已被 stop() 删除；恢复系统设置绝不能依赖日志文件能否打开。
+          if restoreError=$(\(powerCommand) -a disablesleep 0 2>&1); then
+            result=ok
+          else
+            result=failed
+          fi
+          if [ -d "$stateDir" ]; then
+            printf '%s' "$restoreError" > "$stateDir/restore-error"
+          fi
+        fi
+        if [ -d "$stateDir" ]; then
+          printf '%s:%s\\n' "$reason" "$result" > "$stateDir/exit.tmp"
+          /bin/mv -f "$stateDir/exit.tmp" "$stateDir/exit"
+        fi
+        \(passwordless ? ":" : "/bin/sleep 3; /bin/rm -rf \"$stateDir\"")
+      }
+      trap finish EXIT
+      trap 'reason=signal; exit 1' HUP INT TERM
+      printf '%s\\n' "$$" > "$stateDir/pid.tmp" &&
+        /bin/mv -f "$stateDir/pid.tmp" "$stateDir/pid" || exit 1
+      appStart=$(/bin/ps -p "$appPID" -o lstart=)
+      [ -f "$dir/lease" ] && [ -n "$appStart" ] || exit 1
+      original=$(readSetting) || { reason=power_query_failed; publish error; exit 1; }
       if [ "$original" != 0 ]; then
-        echo conflict > "$stateDir/state"
-        /bin/sleep 3
+        if [ "$original" = 1 ]; then
+          reason=conflict
+          publish conflict
+        else
+          reason=power_query_failed
+          publish error
+        fi
         exit 1
       fi
-      trap '\(powerCommand) -a disablesleep 0; \(cleanup)' EXIT
-      trap 'exit' HUP INT TERM
-      current=0
-      lastTick=$(/bin/date +%s)
-      resumeUntil=0
-      while /bin/kill -0 \(pid) 2>/dev/null; do
+      # 先记录所有权，才能在 SIGKILL 后安全识别本会话是否可能修改了全局开关。
+      : > "$stateDir/owned" || exit 1
+      owned=1
+      reason=app_exited
+      while /bin/kill -0 "$appPID" 2>/dev/null; do
         \(watchdogLeaseScript)
         desired=0
         state=battery
-        if /usr/bin/pmset -g batt | /usr/bin/grep -q "Now drawing from 'AC Power'"; then
-          desired=1
-          state=ac
-        fi
-        if [ "$desired" != "$current" ]; then
-          if ! \(powerCommand) -a disablesleep "$desired"; then
-            echo error > "$stateDir/state"
-            /bin/sleep 3
+        power=$(/usr/bin/pmset -g batt) || { reason=power_query_failed; publish error; exit 1; }
+        case "$power" in
+          *"Now drawing from 'AC Power'"*) desired=1; state=ac ;;
+          *"Now drawing from 'Battery Power'"*) : ;;
+          *) reason=power_query_failed; publish error; exit 1 ;;
+        esac
+        # 每轮重新读取真实系统值，避免唤醒或外部改动后仍相信旧缓存。
+        actual=$(readSetting) || { reason=power_query_failed; publish error; exit 1; }
+        [ "$actual" = 0 ] || [ "$actual" = 1 ] || {
+          reason=power_query_failed; publish error; exit 1;
+        }
+        if [ "$desired" != "$actual" ]; then
+          if ! \(powerCommand) -a disablesleep "$desired" 2>"$stateDir/command-error"; then
+            reason=power_failed
+            publish error
             exit 1
           fi
-          current=$desired
         fi
         \(displaySleepScript)
-        echo "$state" > "$stateDir/state" || break
+        publish "$state" || { reason=state_write_failed; exit 1; }
         /bin/sleep 2
       done
       """

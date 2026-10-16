@@ -24,6 +24,7 @@ final class WorkspaceModel: ObservableObject {
   @Published private(set) var tabs: [Tab] = []
   @Published private(set) var projects: [WorkspaceProject] = []
   @Published private(set) var loadingSessionCatalogs: Set<String> = []
+  @Published private(set) var submittingTitleRegenerations: Set<String> = []
   @Published var selectedTabID: UUID?
   @Published private(set) var projectFilterPath: String?
 
@@ -144,6 +145,11 @@ final class WorkspaceModel: ObservableObject {
       reasons.append("浏览器正在由用户操作")
     }
     if isSettlingIdleSessions { reasons.append("批量 Settle 进行中") }
+    if !submittingTitleRegenerations.isEmpty
+      || server.threads.contains(where: { $0["titleRegeneration"] is [String: Any] })
+    {
+      reasons.append("会话标题重新生成中")
+    }
     if !remoteSubmissionHolds.isEmpty { reasons.append("远程消息正在提交") }
     if !telegram.canRestartSafely { reasons.append("Telegram 有任务、队列或待发送回复") }
     if tabs.contains(where: { !$0.model.canRestartSafely }) { reasons.append("桌面有任务、排队消息或未确认操作") }
@@ -498,6 +504,30 @@ final class WorkspaceModel: ObservableObject {
       case .autoSettle(let enabled):
         return ["type": "thread.auto-settle.set", "enabled": enabled]
       }
+    }
+  }
+
+  func isRegeneratingSessionTitle(threadID: String) -> Bool {
+    submittingTitleRegenerations.contains(threadID)
+      || server.thread(threadID)?["titleRegeneration"] is [String: Any]
+  }
+
+  func regenerateSessionTitle(path: String) async {
+    guard let id = AppModel.threadID(from: path),
+      server.isConnected, server.supportsTitleRegeneration,
+      server.thread(id) != nil, !isRegeneratingSessionTitle(threadID: id)
+    else { return }
+    submittingTitleRegenerations.insert(id)
+    defer { submittingTitleRegenerations.remove(id) }
+    do {
+      // 仅提交生成意图，不发送当前标题；生成模型、上下文和并发覆盖规则均由 Server 决定。
+      // 提交期间的本地锁只覆盖网络往返，后续进度以 shell 的 titleRegeneration 为准。
+      try await server.dispatch(
+        ["type": "thread.metadata.update", "threadId": id, "regenerateTitle": true],
+        refreshAfter: false)
+      try await server.refreshShell()
+    } catch {
+      selectedModel?.statusText = "重新生成标题未确认，请刷新 Server 状态后检查；不会自动重试。"
     }
   }
 

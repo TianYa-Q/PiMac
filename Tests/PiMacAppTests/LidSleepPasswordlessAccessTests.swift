@@ -82,7 +82,8 @@ struct LidSleepPasswordlessAccessTests {
     let script = LidSleepController.watchdogScript(
       directory: "/tmp/pimac-test", pid: 123, passwordless: true)
     #expect(script.contains("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep \"$desired\""))
-    #expect(script.contains("trap '/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0; :"))
+    #expect(script.contains("trap finish EXIT"))
+    #expect(script.contains("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0"))
     #expect(script.contains("stateDir='/tmp/pimac-test'"))
     #expect(!script.contains("/private/var/run"))
     #expect(!script.contains("sudo -n /bin/sh"))
