@@ -27,13 +27,19 @@ struct ConversationTurn: Identifiable, Equatable {
     var turns: [ConversationTurn] = []
     var current: [ChatEntry] = []
     for entry in messages {
-      // Account management is a UI action, not a conversational prompt.
-      // Keep the command in session history, but omit its chat bubble.
-      if entry.kind == .user,
-        entry.text.trimmingCharacters(in: .whitespacesAndNewlines) == "/accounts",
-        entry.attachments.isEmpty
-      {
-        continue
+      // 这些已知命令只控制账户、额度或压缩，不是发给模型的任务；原始历史不变。
+      // 不按斜杠前缀一概隐藏，附带文件或多行任务说明的输入也保留。
+      if entry.kind == .user, entry.attachments.isEmpty {
+        let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let command = text.split(maxSplits: 1, whereSeparator: \.isWhitespace).first
+        if !text.contains(where: \.isNewline), let command,
+          ["/accounts", "/usage", "/compact"].contains(String(command))
+        {
+          // 隐藏气泡仍保留轮次边界，避免执行结果并入上一条正常回复。
+          if !current.isEmpty { turns.append(ConversationTurn(entries: current)) }
+          current = []
+          continue
+        }
       }
       // 系统通知和压缩标记属于发生时的数据流，而非整轮对话的页脚。
       // 两侧分别成组，避免后续正常回复或工具活动被渲染到旧异常之前；

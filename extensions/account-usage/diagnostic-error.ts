@@ -21,6 +21,11 @@ const SAFE_NAMES = new Set([
   "HttpStatusError",
 ]);
 const SAFE_CODES = new Set([
+  "ELOCKED",
+  "ECOMPROMISED",
+  "EACCES",
+  "EPERM",
+  "ENOENT",
   "ECONNREFUSED",
   "ECONNRESET",
   "ETIMEDOUT",

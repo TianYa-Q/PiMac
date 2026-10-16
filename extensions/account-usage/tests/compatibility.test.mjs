@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createJiti } from "jiti";
@@ -908,6 +908,116 @@ try {
     } finally {
       globalThis.fetch = fetchMock;
       if (saved) await modern.saveAccount("same", saved.credential);
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
+  await test("a transient startup store lock does not permanently abort every later prompt", async () => {
+    const app = instance("openai-codex", false);
+    let aborts = 0;
+    app.ctx.abort = () => aborts++;
+    const release = await lockfile.lock(join(root, "codex-accounts.json"), {
+      realpath: false,
+    });
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      assert.equal(app.entries.length, 0);
+      assert.ok(app.notices.some(({ level }) => level === "error"));
+      // The lock still exists: retries must fail closed and identify who cancels the run.
+      await app.events.get("before_agent_start")({}, app.ctx);
+      await app.events.get("turn_start")({}, app.ctx);
+      assert.equal(aborts, 1);
+      const diagnostics = (
+        await readFile(join(root, "account-usage-errors.jsonl"), "utf8")
+      )
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .filter((record) => record.category === "account_auth");
+      assert.ok(
+        diagnostics.some(
+          (record) =>
+            record.operation === "read_state" &&
+            record.error?.code === "ELOCKED",
+        ),
+      );
+      assert.equal(diagnostics.at(-1).operation, "block_run");
+      assert.equal(diagnostics.at(-1).source, "account-usage");
+      assert.equal(diagnostics.at(-1).sessionId, "synthetic-session");
+      assert.doesNotMatch(
+        JSON.stringify(diagnostics),
+        /synthetic-refresh|synthetic-account-id|Bearer/u,
+      );
+    } finally {
+      await release();
+    }
+    try {
+      // Reproduce the original "continue" path after another process releases its lease.
+      await app.events.get("before_agent_start")({}, app.ctx);
+      await app.events.get("turn_start")({}, app.ctx);
+      assert.equal(aborts, 1);
+      assert.equal(app.tokens.get("openai-codex"), "legacy");
+      assert.equal(app.entries.at(-1).data.accountName, "same");
+    } finally {
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+  });
+
+  await test("startup recovery cleans partially applied auth and preserves the original provider overlay", async () => {
+    const app = instance("openai-codex", false);
+    const registry = app.ctx.modelRegistry;
+    const previousConfig = { apiKey: "previous-provider-config" };
+    registry.registerProvider("openai-codex", previousConfig);
+    const resolve = registry.getApiKeyForProvider;
+    let rejectActivation = true;
+    registry.getApiKeyForProvider = async (id) =>
+      rejectActivation ? "not-applied" : resolve(id);
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      assert.ok(
+        app.notices.some(({ message }) => message.includes("未能应用")),
+      );
+      rejectActivation = false;
+      await app.events.get("before_agent_start")({}, app.ctx);
+      await app.events.get("turn_start")({}, app.ctx);
+      assert.equal(app.tokens.get("openai-codex"), "legacy");
+    } finally {
+      await app.events.get("session_shutdown")({}, app.ctx);
+    }
+    assert.deepEqual(
+      registry.getRegisteredProviderConfig("openai-codex"),
+      previousConfig,
+    );
+  });
+
+  await test("startup recovery never discards an invalid explicit session binding", async () => {
+    const app = instance("openai-codex", false, [
+      {
+        type: "custom",
+        customType: "codex-account-selection",
+        data: {
+          version: 1,
+          sessionId: "synthetic-session",
+          provider: "openai-codex",
+          accountName: "missing-account",
+        },
+      },
+    ]);
+    let aborts = 0;
+    app.ctx.abort = () => aborts++;
+    try {
+      await app.events.get("session_start")({ reason: "startup" }, app.ctx);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await app.events.get("before_agent_start")({}, app.ctx);
+        await app.events.get("turn_start")({}, app.ctx);
+      }
+      assert.equal(aborts, 2);
+      assert.equal(app.tokens.size, 0);
+      assert.equal(app.entries.length, 1);
+      assert.ok(
+        app.notices.some(({ message }) => message.includes("missing-account")),
+      );
+    } finally {
       await app.events.get("session_shutdown")({}, app.ctx);
     }
   });

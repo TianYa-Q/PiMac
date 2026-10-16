@@ -30,7 +30,7 @@ import { buildUsageHealthReport, formatUsageHealth } from "./health.js";
 import { CodexSessionAuth } from "./auth.js";
 import { queryAccountUsage } from "./codex.js";
 import { mapWithConcurrency } from "./concurrency.js";
-import { logQuotaFailure } from "./diagnostics.js";
+import { logAccountAuthFailure, logQuotaFailure } from "./diagnostics.js";
 import { formatStatusSegment, formatUsageSummary } from "./format.js";
 import { loginCodexAccount } from "./oauth.js";
 import { readThroughSharedCache } from "./shared-cache.js";
@@ -569,6 +569,14 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       if (auth === sessionAuth) authFailed = false;
     } catch (error) {
       if (auth === sessionAuth) authFailed = true;
+      logAccountAuthFailure(
+        {
+          provider: providerId,
+          operation: "activate",
+          sessionId: ctx.sessionManager.getSessionId(),
+        },
+        error,
+      );
       throw error;
     }
   };
@@ -1110,6 +1118,14 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       } catch (error) {
         sessionAccount = undefined;
         authFailed = true;
+        logAccountAuthFailure(
+          {
+            provider: providerId,
+            operation: "initialize",
+            sessionId: ctx.sessionManager.getSessionId(),
+          },
+          error,
+        );
         ctx.ui.notify(errorMessage(error), "error");
       }
     } else {
@@ -1152,6 +1168,12 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
 
   pi.on("before_agent_start", async (_event, ctx) => {
     automaticRetryUsed = false;
+    // 启动读取/激活失败时还没有托管绑定，旧逻辑会永久跳过认证并在每轮 abort。
+    // 仅在新运行边界重试一次；数据仍损坏或凭据仍无效时继续由认证守卫阻止请求。
+    if (authFailed && !managesSelectedAuth) {
+      await sessionAuth.clear(ctx);
+      await initializeAccounts(ctx);
+    }
     await rotateAccounts(ctx, true);
     if (ctx.model?.provider !== providerId || ctx.model.api === "pi-virtual")
       return;
@@ -1179,8 +1201,18 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       ctx.model?.provider === providerId &&
       ctx.model.api !== "pi-virtual" &&
       authFailed
-    )
+    ) {
+      // Pi 的 cancelled 信号并不区分用户停止和扩展主动取消，单独保留取消来源。
+      logAccountAuthFailure(
+        {
+          provider: providerId,
+          operation: "block_run",
+          sessionId: ctx.sessionManager.getSessionId(),
+        },
+        undefined,
+      );
       ctx.abort();
+    }
   });
 
   pi.on("turn_end", async (event, ctx) => {
@@ -1438,6 +1470,14 @@ function readAccountStateSafely(
   try {
     return createAccountStore(provider).readCodexAccountState();
   } catch (error) {
+    logAccountAuthFailure(
+      {
+        provider,
+        operation: "read_state",
+        sessionId: ctx.sessionManager.getSessionId(),
+      },
+      error,
+    );
     ctx.ui.setStatus(STATUS_KEY, "Codex 账户读取失败");
     ctx.ui.notify(errorMessage(error), "error");
     return undefined;

@@ -82,6 +82,13 @@ future-session default or other live sessions. Manual `/accounts switch` still
 updates the default. Failed activation restores the prior account when possible;
 if restoration fails, the existing auth-failure guard prevents the next turn.
 
+Startup authentication failures are re-evaluated once at the next run boundary
+when no managed binding was established. A transient account-file lock must not
+leave every later prompt permanently aborted. Partially applied provider overlays
+are cleared before reinitialization; invalid explicit session bindings and
+unavailable credentials still fail closed. This does not retry a model request or
+change the user's default account.
+
 The policy is in `rotation.ts`; lifecycle and credential application are in
 `index.ts` / `auth.ts`. Tests use synthetic credentials and mocked quota endpoints,
 not live paid requests. Live quota exhaustion/continuation still needs validation.
@@ -98,7 +105,7 @@ The existing warm-up behavior is retained: a full, unused 5-hour or 7-day window
 
 Account queries and warm-ups run with at most two workers. Cancellation or a failed worker stops queued work and drains active workers before releasing shared-cache leases. Refreshes await both providers and publish successful results even when the other provider fails; obsolete refreshes cannot publish or reschedule timers. Overlapping automatic Gemini refreshes await the same in-flight query. Failed Gemini queries do not start a freshness cooldown. Incremental HTTP storage grows geometrically rather than retaining one object per received chunk.
 
-Failures are recorded in the private `account-usage-errors.jsonl` diagnostic log, excluding credentials, headers, URLs, and response bodies. Error names, transport codes and syscall metadata use finite allowlists; unknown values are omitted, and recursive/aggregate errors are bounded. Account-name context is retained in this private log, not in the JSON health report. Diagnostic writes reject symlinks, hardlinks and special files using no-follow/nonblocking opens; permissions are set on validated descriptors. Logs rotate before crossing 1 MiB (one backup); records are capped at 16 KiB and context strings are bounded. Logging failures never interrupt refresh. Multi-process rotation remains best-effort, not a transactional audit trail. See [dashboard and log hardening](../../docs/usage-dashboard-log-hardening.md). HTTP read failures preserve the caller's cancellation or deadline when a transport returns a generic network error during abort.
+Failures are recorded in the private `account-usage-errors.jsonl` diagnostic log, excluding credentials, headers, URLs, and response bodies. Authentication diagnostics use `category: "account_auth"`, `source: "account-usage"`, the native Pi `sessionId` and `pid`, with `read_state` / `initialize` / `activate` / `block_run` stages. A `block_run` record identifies an extension-initiated cancellation, not a user Stop; look backward in the same session for its failure (for example `ELOCKED` for account-file contention). Missing historical diagnostics cannot establish which startup failure happened. Lock/permission error codes are allowlisted; raw filesystem paths and exception messages are not retained. Error names, transport codes and syscall metadata use finite allowlists; unknown values are omitted, and recursive/aggregate errors are bounded. Account-name context is retained in this private log, not in the JSON health report. Diagnostic writes reject symlinks, hardlinks and special files using no-follow/nonblocking opens; permissions are set on validated descriptors. Logs rotate before crossing 1 MiB (one backup); records are capped at 16 KiB and context strings are bounded. Logging failures never interrupt refresh. Multi-process rotation remains best-effort, not a transactional audit trail. See [dashboard and log hardening](../../docs/usage-dashboard-log-hardening.md). HTTP read failures preserve the caller's cancellation or deadline when a transport returns a generic network error during abort.
 
 ## RPC protocol
 

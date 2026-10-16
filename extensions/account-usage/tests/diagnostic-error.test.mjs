@@ -38,6 +38,14 @@ test("known transport metadata and safe HTTP statuses remain actionable", () => 
   );
 });
 
+test("account-store contention is identifiable without retaining the path or credentials", () => {
+  for (const code of ["ELOCKED", "ECOMPROMISED", "EACCES", "EPERM", "ENOENT"]) {
+    const error = new Error("private /account/path Bearer secret");
+    error.code = code;
+    assert.deepEqual(describeQuotaError(error), { name: "Error", code });
+  }
+});
+
 test("cycles, aggregate width and non-error values are bounded", () => {
   const error = new AggregateError(
     Array.from({ length: 100 }, () => new Error("secret")),

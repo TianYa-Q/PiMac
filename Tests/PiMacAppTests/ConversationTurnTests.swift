@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import PiMacApp
@@ -11,6 +12,56 @@ struct ConversationTurnTests {
     #expect(turns.count == 1)
     #expect(turns.first?.user == nil)
     #expect(turns.first?.finalAssistant == reply)
+  }
+
+  @Test(arguments: [
+    "/accounts", " /accounts switch Work \n", "/accounts login", "/usage",
+    "/usage refresh", "/usage cached json", "/compact", "/compact 保留实现细节",
+    "/accounts\tswitch Work",
+  ])
+  func hidesKnownControlCommands(text: String) {
+    let command = ChatEntry(id: "command", kind: .user, title: "你", text: text)
+    #expect(ConversationTurn.group([command]).isEmpty)
+  }
+
+  @Test(arguments: [
+    "/review 检查代码", "/accounts-extra", "/usage-report", "/compaction", "/pimac-fast on",
+    "/accounts\n请解释这个命令", "/compact\r\n然后检查代码", "解释 /usage", "/", "",
+  ])
+  func preservesTasksAndUnknownCommands(text: String) {
+    let prompt = ChatEntry(id: "prompt", kind: .user, title: "你", text: text)
+    #expect(ConversationTurn.group([prompt]).first?.user == prompt)
+  }
+
+  @Test func preservesControlTextWithAttachmentsAndNonUserOutput() {
+    let attachment = PromptAttachment(
+      url: URL(fileURLWithPath: "/tmp/control-command-fixture.txt"), mimeType: "text/plain")
+    let prompt = ChatEntry(
+      id: "prompt", kind: .user, title: "你", text: "/accounts", attachments: [attachment])
+    let reply = ChatEntry(id: "reply", kind: .assistant, title: "Pi", text: "/usage")
+    #expect(ConversationTurn.group([prompt, reply]).first?.entries == [prompt, reply])
+  }
+
+  @Test func hiddenCommandsKeepResultsSeparateFromEarlierConversation() {
+    let prompt = ChatEntry(id: "prompt", kind: .user, title: "你", text: "检查任务")
+    let reply = ChatEntry(id: "reply", kind: .assistant, title: "Pi", text: "已完成")
+    let command = ChatEntry(id: "command", kind: .user, title: "你", text: "/accounts switch Work")
+    let result = ChatEntry(id: "result", kind: .tool, title: "notify", text: "已切换账户")
+    let failedCommand = ChatEntry(id: "failed", kind: .user, title: "你", text: "/usage refresh")
+    let failure = ChatEntry(
+      id: "failure", kind: .system, title: "刷新失败", text: "连接失败", isError: true)
+    let compactCommand = ChatEntry(id: "compact-command", kind: .user, title: "你", text: "/compact")
+    let compact = ChatEntry(id: "compact", kind: .compaction, title: "上下文已压缩", text: "摘要")
+    let messages = [
+      prompt, reply, command, result, failedCommand, failure, compactCommand, compact,
+    ]
+    let turns = ConversationTurn.group(messages)
+    #expect(turns.map(\.entries) == [[prompt, reply], [result], [failure], [compact]])
+    #expect(turns[1].user == nil)
+    #expect(turns[2].supplementaryEntries.first?.isError == true)
+    // 展示过滤不得改写持久历史或用户输入。
+    #expect(messages.count == 8)
+    #expect(messages[2].text == "/accounts switch Work")
   }
 
   @Test func compactionStaysBetweenEarlierAndLaterWork() {
