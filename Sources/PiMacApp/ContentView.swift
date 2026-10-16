@@ -141,29 +141,37 @@ struct ContentView: View {
             }
         }
 
-      ZStack {
-        VStack(spacing: 0) {
-          conversation
-            .environment(\.messageQuoteAction, { quote in
-              guard let result = MessageQuote.inserting(
-                quote, into: app.composerText, selection: composerSelection
-              ) else { return }
-              app.composerText = result.text
-              composerSelection = result.selection
-              composerFocused = true
-            })
-          Divider()
-          composer
-        }
-        // Keep the AppKit-backed conversation alive while viewing usage so returning to the
-        // task preserves its scroll position and editor selection.
-        .opacity(selectedPage == .conversation ? 1 : 0)
-        .allowsHitTesting(selectedPage == .conversation)
-        .accessibilityHidden(selectedPage != .conversation)
+      BrowserPreviewWorkspace(
+        server: workspace.server, threadID: app.threadID, model: app.browserPreview
+      ) {
+        ZStack {
+          VStack(spacing: 0) {
+            conversation
+              .environment(
+                \.messageQuoteAction,
+                { quote in
+                  guard
+                    let result = MessageQuote.inserting(
+                      quote, into: app.composerText, selection: composerSelection
+                    )
+                  else { return }
+                  app.composerText = result.text
+                  composerSelection = result.selection
+                  composerFocused = true
+                })
+            Divider()
+            composer
+          }
+          // Keep the AppKit-backed conversation alive while viewing usage so returning to the
+          // task preserves its scroll position and editor selection.
+          .opacity(selectedPage == .conversation ? 1 : 0)
+          .allowsHitTesting(selectedPage == .conversation)
+          .accessibilityHidden(selectedPage != .conversation)
 
-        if selectedPage == .usage {
-          UsageDashboardView(server: workspace.server)
-            .transition(.opacity)
+          if selectedPage == .usage {
+            UsageDashboardView(server: workspace.server)
+              .transition(.opacity)
+          }
         }
       }
       // Keep this subtree alive across task changes. Re-keying even only the detail pane tears
@@ -355,6 +363,7 @@ struct ContentView: View {
             .font(.system(size: 16, weight: .bold, design: .rounded))
           ServerConnectionBadge(server: workspace.server)
           Spacer(minLength: 0)
+          BrowserPreviewButton(model: app.browserPreview, hasThread: app.threadID != nil)
           Button {
             showingScheduledTasks = true
           } label: {
@@ -1121,9 +1130,10 @@ struct ContentView: View {
   }
 
   private var conversation: some View {
-    let children = app.threadID.map {
-      ConversationSubagent.children(parentID: $0, threads: workspace.server.threads)
-    } ?? []
+    let children =
+      app.threadID.map {
+        ConversationSubagent.children(parentID: $0, threads: workspace.server.threads)
+      } ?? []
     let rows = ConversationTimelineRow.build(messages: app.messages, children: children)
     let activeTurnID = rows.reversed().compactMap { row -> String? in
       if case .turn(let turn) = row { return turn.id }
@@ -1146,7 +1156,9 @@ struct ContentView: View {
               case .subagents(let tasks):
                 ConversationSubagentsView(tasks: tasks) { id in
                   let path = "t3:\(id)"
-                  guard let projectURL = workspace.project(forSessionPath: path)?.url else { return }
+                  guard let projectURL = workspace.project(forSessionPath: path)?.url else {
+                    return
+                  }
                   workspace.openSession(path: path, in: projectURL)
                 }
               }

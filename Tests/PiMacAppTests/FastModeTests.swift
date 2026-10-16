@@ -49,15 +49,24 @@ struct FastModeTests {
     try await client.waitUntilReady()
     model.attach(to: client)
     model.connect(to: root)
-    for _ in 0..<200 where model.threadID == nil || model.isLoadingConfiguration {
+    for _ in 0..<200 where model.isLoadingConfiguration {
       try await Task.sleep(for: .milliseconds(25))
     }
-    let id = try #require(model.threadID)
+    #expect(model.threadID == nil)
+    #expect(model.canSubmitPrompt)
     #expect(model.supportsFastMode)
     #expect(!model.fastModeEnabled)
     model.changeThinkingLevel(to: "high")
     try await Task.sleep(for: .milliseconds(150))
     model.changeFastMode(to: true)
+    #expect(client.threads.isEmpty)
+    let previousSettledTurn = model.lastSettledTurnID
+    model.composerText = "Fast request"
+    model.sendPrompt()
+    for _ in 0..<200 where model.threadID == nil {
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    let id = try #require(model.threadID)
     func waitForOption(_ value: String) async throws {
       for _ in 0..<200 {
         let options = client.thread(id)?["modelSelection"] as? [String: Any]
@@ -74,9 +83,6 @@ struct FastModeTests {
     try await client.refresh()
     #expect(model.fastModeEnabled)
     #expect(model.selectedThinkingLevel == "high")
-    let previousSettledTurn = model.lastSettledTurnID
-    model.composerText = "Fast request"
-    model.sendPrompt()
     for _ in 0..<200 {
       if FileManager.default.fileExists(
         atPath: root.appendingPathComponent("fixture-rpc.ndjson").path),

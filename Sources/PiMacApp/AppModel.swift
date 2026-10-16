@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 /// Presentation state for one T3 thread. No Pi process, RPC transport or file writer.
 @MainActor
 final class AppModel: ObservableObject {
+  let browserPreview = BrowserPreviewModel()
   @Published var connectionState: ConnectionState = .disconnected
   @Published var projectURL: URL?
   @Published var messages: [ChatEntry] = []
@@ -216,36 +217,25 @@ final class AppModel: ObservableObject {
         try await server.waitUntilReady()
         try Task.checkCancellation()
         self.refreshModels()
-        let projectID = try await server.ensureProject(project)
-        let id: String
         if let path {
+          let projectID = try await server.ensureProject(project)
+          guard self.generation == current, !Task.isCancelled else { return }
           guard let target = Self.threadID(from: path), let thread = server.thread(target),
             thread["projectId"] as? String == projectID
           else {
             throw T3DesktopClient.ClientError.rejected
           }
-          id = target
+          self.observeThread(target, on: server)
         } else {
+          // 新聊天仅准备本地输入和模型选项；首次发送前不创建 Server 会话。
           guard !self.selectedModelId.isEmpty else { throw T3DesktopClient.ClientError.rejected }
-          id = UUID().uuidString
-          try await server.dispatch([
-            "type": "thread.create", "threadId": id, "projectId": projectID,
-            "title": "新任务", "modelSelection": self.modelSelection, "runtimeMode": "full-access",
-            "interactionMode": "default", "branch": NSNull(), "worktreePath": NSNull(),
-          ])
+          self.currentSessionPath = ""
         }
         guard self.generation == current, !Task.isCancelled else { return }
-        self.currentSessionPath = "t3:\(id)"
         self.pendingThreadPath = nil
         self.connectionState = .connected
         self.isLoadingConfiguration = false
         self.statusText = ""
-        server.watch(
-          id, owner: self.observerID,
-          receiveUI: { [weak self] snapshot in
-            self?.applyExtensionUI(snapshot)
-          }
-        ) { [weak self] detail in self?.apply(detail) }
         completion?(true)
       } catch {
         guard self.generation == current else { return }
@@ -255,6 +245,14 @@ final class AppModel: ObservableObject {
         completion?(false)
       }
     }
+  }
+
+  private func observeThread(_ id: String, on server: T3DesktopClient) {
+    currentSessionPath = "t3:\(id)"
+    server.watch(
+      id, owner: observerID,
+      receiveUI: { [weak self] snapshot in self?.applyExtensionUI(snapshot) },
+      receive: { [weak self] detail in self?.apply(detail) })
   }
 
   func newSession(completion: ((Bool) -> Void)? = nil) {
@@ -282,6 +280,7 @@ final class AppModel: ObservableObject {
   // UI selection never suspends a Provider runtime.
   func suspendProcess() {}
   func disconnect() {
+    browserPreview.stop()
     extensionUI?.removeRequests(from: self)
     isManagingAccounts = false
     queuedPrompts.removeAll()
@@ -312,7 +311,6 @@ final class AppModel: ObservableObject {
     guard canSubmitPrompt,
       let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
     else { return }
-    guard threadID != nil else { return }
     // 先更新界面，再进行附件上传和网络请求；新输入不会被异步完成回调清空。
     composerText = ""
     let ids = Set(prompt.attachments.map(\.id))
@@ -334,7 +332,7 @@ final class AppModel: ObservableObject {
   private func submit(
     _ prompt: QueuedPrompt, messageID: String? = nil, completion: @escaping (Bool) -> Void
   ) {
-    guard let id = threadID, let server, !submitting else {
+    guard let server, let projectURL, !submitting else {
       completion(false)
       return
     }
@@ -344,6 +342,7 @@ final class AppModel: ObservableObject {
     awaitingAgentStart = !isSteering && !isQueueing
     submittedFromTurnID = lastTurnID
     let selection = modelSelection
+    let existingThreadID = threadID
     let submittedMessageID = messageID ?? UUID().uuidString
     let current = generation
     let entry = ChatEntry(
@@ -364,6 +363,29 @@ final class AppModel: ObservableObject {
             "type": "image", "name": attachment.url.lastPathComponent, "mimeType": mime,
             "sizeBytes": data.count, "dataUrl": "data:\(mime);base64,\(data.base64EncodedString())",
           ]
+        }
+        let id: String
+        if let existingThreadID {
+          id = existingThreadID
+        } else {
+          let projectID = try await server.ensureProject(projectURL)
+          guard self.generation == current else {
+            completion(false)
+            return
+          }
+          id = UUID().uuidString
+          // 先记录 ID：创建响应丢失时保留可核验的会话，不自动另建线程或重发消息。
+          self.currentSessionPath = "t3:\(id)"
+          try await server.dispatch([
+            "type": "thread.create", "threadId": id, "projectId": projectID,
+            "title": "新任务", "modelSelection": selection, "runtimeMode": "full-access",
+            "interactionMode": "default", "branch": NSNull(), "worktreePath": NSNull(),
+          ])
+          guard self.generation == current else {
+            completion(false)
+            return
+          }
+          self.observeThread(id, on: server)
         }
         try await server.dispatch(
           [

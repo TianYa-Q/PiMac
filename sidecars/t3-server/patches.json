@@ -105,6 +105,16 @@
       "newText": "        // 每次选项应用都明确同步开/关，防止切模型或恢复会话沿用旧进程状态。\n        const fast = getModelSelectionStringOptionValue(modelSelection, \"fastMode\") ?? \"off\";\n        if (fast !== \"on\" && fast !== \"off\") return yield* protocolError(\"Invalid Fast mode\");\n        if (fast === \"on\" || fastStatus === \"on\") {\n          const commands = recordField(yield* request({ type: \"get_commands\" }), \"commands\");\n          if (!Array.isArray(commands) || !commands.some(command =>\n            recordString(command, \"name\") === \"pimac-fast\" &&\n            recordString(command, \"source\") === \"extension\")) {\n            return yield* protocolError(\"Fast extension unavailable; no prompt was sent\");\n          }\n          if (fast === \"on\") {\n            const current = recordField(yield* request({ type: \"get_state\" }), \"model\");\n            if (![\"openai\", \"openai-codex\"].includes(recordString(current, \"provider\") ?? \"\") ||\n                ![\"openai-responses\", \"openai-codex-responses\"].includes(recordString(current, \"api\") ?? \"\")) {\n              return yield* protocolError(\"Model does not support Fast mode\");\n            }\n          }\n          fastStatus = undefined;\n          const result = yield* request({ type: \"prompt\", message: \"/pimac-fast \" + fast });\n          // UI 事件由另一条 fiber 消费；只接受有明确状态确认的命令，不把 handled 当作成功。\n          for (let attempt = 0; attempt < 50 && fastStatus !== fast; attempt++) {\n            yield* Effect.sleep(\"20 millis\");\n          }\n          if (recordString(result, \"disposition\") !== \"handled\" || fastStatus !== fast) {\n            return yield* protocolError(\"Fast mode not confirmed; extension unavailable or command failed\");\n          }\n        }\n        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&"
     }
   ],
+  "packages/provider-pi/src/server/textGeneration.ts": [
+    {
+      "oldText": "        // No user is present to answer a text-generation extension dialog.\n        disableExtensions: true,",
+      "newText": "        // Provider 也可能由用户扩展注册（如 pi-antigravity）；禁用扩展会让\n        // 前台可用的模型在后台消失。保留正常扩展加载，但不注入 T3 会话。\n        disableExtensions: false,"
+    },
+    {
+      "oldText": "        // Extensions and tools are disabled because no user is present to\n        // answer a dialog and background text generation is read-only. User\n        // model config and auth still apply.",
+      "newText": "        // 用户 Provider 扩展、模型配置和认证沿用正常 Pi 加载流程；\n        // 内置工具仍禁用，临时进程不持久化会话、不携带 T3 MCP 凭据。"
+    }
+  ],
   "packages/contracts/src/orchestrationV2.ts": [
 {
   "oldText": "  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),",

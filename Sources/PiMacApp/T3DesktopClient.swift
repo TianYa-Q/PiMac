@@ -430,9 +430,10 @@ final class T3DesktopClient: ObservableObject {
 
   func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws
   {
-    try await dispatch(Self.sessionControlCommand(
-      threadID: threadID, messageID: UUID().uuidString,
-      operation: operation, accountName: accountName))
+    try await dispatch(
+      Self.sessionControlCommand(
+        threadID: threadID, messageID: UUID().uuidString,
+        operation: operation, accountName: accountName))
   }
 
   static func sessionControlCommand(
@@ -598,6 +599,46 @@ final class T3DesktopClient: ObservableObject {
     }
     guard !failed, let result else { throw ClientError.rejected }
     return result
+  }
+
+  func browserPreviewSessions(threadID: String) async throws -> [T3BrowserTab] {
+    let result = try await rpc("preview.list", payload: ["threadId": threadID])
+    return try T3BrowserTab.read(result)
+  }
+
+  func updateBrowserPreviewTab(threadID: String, closing tabID: String?) async throws {
+    if let tabID {
+      _ = try await rpc("preview.close", payload: ["threadId": threadID, "tabId": tabID])
+    } else {
+      _ = try await rpc(
+        "preview.open",
+        payload: [
+          "threadId": threadID, "runtime": "server", "reveal": true,
+        ], timeoutSeconds: 90)
+    }
+  }
+
+  /// 允许上游原生交互；是否能操作及控制权归属均由 Server 的 control 通知决定。
+  func browserPreviewSocket(threadID: String, tabID: String) async throws
+    -> URLSessionWebSocketTask
+  {
+    let ticket = try await request("/api/auth/websocket-ticket", method: "POST", body: [:])
+    guard let secret = ticket["ticket"] as? String, let base = service?.serverURL,
+      var components = URLComponents(url: base, resolvingAgainstBaseURL: false)
+    else { throw ClientError.unavailable }
+    components.scheme = base.scheme == "https" ? "wss" : "ws"
+    components.path = "/api/preview-stream/ws"
+    components.queryItems = [
+      .init(name: "wsTicket", value: secret), .init(name: "threadId", value: threadID),
+      .init(name: "tabId", value: tabID), .init(name: "interactive", value: "true"),
+      .init(name: "maxWidth", value: "2560"), .init(name: "maxHeight", value: "1600"),
+      .init(name: "quality", value: "80"),
+    ]
+    guard let url = components.url else { throw ClientError.rejected }
+    let socket = session.webSocketTask(with: url)
+    socket.maximumMessageSize = 8 * 1024 * 1024
+    socket.resume()
+    return socket
   }
 
   private func rpc(

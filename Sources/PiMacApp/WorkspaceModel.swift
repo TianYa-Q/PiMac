@@ -140,6 +140,9 @@ final class WorkspaceModel: ObservableObject {
     if persistsState && !server.isConnected { reasons.append("Server 未连接，无法确认空闲") }
     if server.hasRunningThread { reasons.append("Server 有运行中的线程") }
     if git.busy { reasons.append("Git 操作进行中") }
+    if tabs.contains(where: { $0.model.browserPreview.control.isControlling }) {
+      reasons.append("浏览器正在由用户操作")
+    }
     if isSettlingIdleSessions { reasons.append("批量 Settle 进行中") }
     if !remoteSubmissionHolds.isEmpty { reasons.append("远程消息正在提交") }
     if !telegram.canRestartSafely { reasons.append("Telegram 有任务、队列或待发送回复") }
@@ -282,8 +285,7 @@ final class WorkspaceModel: ObservableObject {
   }
 
   func newSession(in projectURL: URL) {
-    // Also reuse a draft while its thread.create is still in flight, even when
-    // another tab is selected. Do not depend on a shell refresh between clicks.
+    // 未发送的本地草稿跨标签复用；旧版本遗留的空线程仍可安全复用，避免继续累积。
     let reusablePath = server.projectID(for: projectURL).flatMap {
       Self.latestEmptySessionPath(threads: server.threads, projectID: $0)
     }

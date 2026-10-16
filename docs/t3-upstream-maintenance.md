@@ -61,6 +61,10 @@ redemption credentials or implement unsupported account operations.
 - Atomic parent/descendant settlement and bounded subtree identity lookup,
   retaining validation, cycle handling and archived/deleted-node exclusion.
 - Mobile first-message title compatibility for native drafts without titleSeed.
+- Background Pi text generation retains user extensions so extension-registered
+  Providers (for example `pi-antigravity`) remain available. Ephemeral sessions,
+  disabled built-in tools and T3 MCP credential isolation are preserved. This
+  does not sandbox user extension code; extensions retain normal Pi behavior.
 - Review of active externally bound worktrees, supplementing official root
   validation because the host cwd is its private state directory.
 - Pi quota sources for stock mobile Limits; usage history and image output now
