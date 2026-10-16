@@ -36,7 +36,7 @@ export function previewServerConfig(environmentId, models = [], defaultModelId =
     settings: { ...defaults, providerInstances: {}, enableProviderUpdateChecks: false,
       defaultModelSelection: selection, defaultRuntimeMode: 'full-access',
       defaultThreadEnvMode: 'local', enableAgentDeviceAccess: false,
-      enableAgentBrowserAccess: false },
+      enableAgentBrowserAccess: true },
     shellResumeCompletionMarker: true, threadResumeCompletionMarker: true,
     threadSnapshotPagination: false, reasoningMessages: true,
   });
