@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const root = new URL('../', import.meta.url);
 const pin = JSON.parse(await readFile(new URL('upstream-pin.json', root), 'utf8'));
@@ -19,6 +22,11 @@ test('native provider SDKs, terminal and workspace search have no host disabling
     'apps/server/src/terminal/NodePtyAdapter.ts',
     'apps/server/src/workspace/WorkspaceSearchIndex.ts',
   ]) assert(!Object.hasOwn(patches, file), file);
+});
+
+test('source fetcher accepts pinned native patch filenames and verifies the cached release', async () => {
+  const { stdout } = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('fetch-upstream.mjs', root))]);
+  assert(stdout.includes(`T3 upstream verified (${pin.commit}; ${Object.keys(pin.files).length} files)`));
 });
 
 test('every pinned upstream file is pristine and every host patch still matches', async () => {

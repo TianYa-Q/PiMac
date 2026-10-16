@@ -2,9 +2,14 @@
 
 ## Current upgrade
 
-- Repository: https://github.com/pingdotgg/t3code, branch `main`.
-- Previous pin: `442735897f6f92af33798075baa12d4fd4d710dd` (2026-10-06 UTC).
-- New pin: `26fffe5aee22ea9bdd39c5b4c400f643c560b4a0` (2026-10-15 UTC).
+- Repository: https://github.com/pingdotgg/t3code, release tag `v0.1.0` (not floating `main`).
+- Previous pin: `26fffe5aee22ea9bdd39c5b4c400f643c560b4a0` (2026-10-15 UTC).
+- New pin: `81493efb71e8e8244f95d3e9f71d8369654ab151` (`v0.1.0`, 2026-10-15 UTC).
+- The release adds six commits, including ACP malformed-session-update recovery
+  and HTML-render caching. The manifest includes the three new ACP fixture files;
+  existing host patches still match unchanged. Dependencies are unchanged.
+- The source fetcher's safe filename validation now accepts `@`, required by
+  the already-pinned native dependency patch filenames; traversal checks remain.
 - The commit, pristine source hashes and dependency catalog are recorded in
   `sidecars/t3-server/upstream-pin.json`. Generated sources/bundles and installed
   dependencies are not source-controlled.
@@ -77,6 +82,14 @@ validation, overwrite local changes, or restart an active production Server.
 
 ## Validation
 
+For the `v0.1.0` pin update, all 2,078 pristine source hashes and existing patch
+anchors pass, together with all six upstream-maintenance tests, JavaScript syntax
+checks, targeted TypeScript `--allowJs --checkJs --noEmit`, and `git diff --check`.
+The bundle/native-runtime check reports stale local generated runtime artifacts;
+no build, full bundled-Server test run, app restart or live-state migration was
+performed for this pin-only update. Regenerate and validate artifacts before
+publishing the release-pinned runtime.
+
 ```sh
 ./scripts/prepare-t3-server.sh
 npm --prefix sidecars/t3-server run check
@@ -84,7 +97,7 @@ npm --prefix sidecars/t3-server test
 swift test
 ```
 
-Upgrade validation passed: reproducible bundle/native-runtime check, all **123**
+Previous main-snapshot upgrade validation passed: reproducible bundle/native-runtime check, all **123**
 Server tests, all **431** Swift tests, and all **32** development-watcher tests.
 An isolated standalone runtime smoke also exercised SDK imports, real PTY output,
 indexed workspace search and native content grep. Protocol fixtures explicitly

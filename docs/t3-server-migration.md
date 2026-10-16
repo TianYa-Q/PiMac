@@ -2,7 +2,7 @@
 
 ## 固定版本与所有权
 
-当前使用 `pingdotgg/t3code` 官方 main 提交 **`26fffe5aee22ea9bdd39c5b4c400f643c560b4a0`**（2026-10-15 UTC），使用 orchestrator V2 和 Effect/platform **4.0.4**。Provider 已按上游拆分为 workspace packages。Server 提交不是 iOS 构建号；手机实机兼容性仍需单独验收。工具详情沿用官方 `orchestration.getTurnItem` 及上游权限、线程隔离。
+当前使用 `pingdotgg/t3code` 官方 **v0.1.0 release** 提交 **`81493efb71e8e8244f95d3e9f71d8369654ab151`**（2026-10-15 UTC），使用 orchestrator V2 和 Effect/platform **4.0.4**。Provider 已按上游拆分为 workspace packages。Server 提交不是 iOS 构建号；手机实机兼容性仍需单独验收。工具详情沿用官方 `orchestration.getTurnItem` 及上游权限、线程隔离。
 
 本软件面向单用户，PiMac 主要提供习惯的 UI 和宿主集成，不额外限制官方 Server 的 Provider、模型、委派或工具能力。已移除父模型锁及 Pi-only/native-disabled 权限策略；认证与权限模式仍由官方 T3 决定。用户的“只检查 Pi”单独实现为可更改的发现偏好，不是 Provider 白名单。
 

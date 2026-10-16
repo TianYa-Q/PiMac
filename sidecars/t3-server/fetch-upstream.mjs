@@ -10,7 +10,7 @@ const pin = JSON.parse(await readFile(join(root, 'upstream-pin.json'), 'utf8'));
 if (pin.repository !== 'https://github.com/pingdotgg/t3code' || !/^[a-f0-9]{40}$/.test(pin.commit)) throw new Error('Invalid upstream pin');
 const files = Object.entries(pin.files);
 for (const [file, hash] of files) {
-  if (!/^[A-Za-z0-9_./-]+$/.test(file) || file.startsWith('/') || file.split('/').some(part => !part || part === '..' || part === '.') || !/^[a-f0-9]{64}$/.test(hash)) throw new Error('Invalid pinned file');
+  if (!/^[A-Za-z0-9_@./-]+$/.test(file) || file.startsWith('/') || file.split('/').some(part => !part || part === '..' || part === '.') || !/^[a-f0-9]{64}$/.test(hash)) throw new Error('Invalid pinned file');
 }
 async function verify(directory) {
   if (!(await lstat(directory)).isDirectory()) throw new Error('Unsafe upstream directory');

@@ -1,6 +1,6 @@
 # Official T3 Server sidecar
 
-Pinned upstream: `pingdotgg/t3code@26fffe5aee22ea9bdd39c5b4c400f643c560b4a0` (2026-10-15 UTC).
+Pinned upstream: **v0.1.0 release**, `pingdotgg/t3code@81493efb71e8e8244f95d3e9f71d8369654ab151` (2026-10-15 UTC).
 This uses upstream orchestrator V2 and all official Provider drivers, including
 Pi's package-owned driver, adapter and RPC transport. A presentation-focused Pi adapter patch records per-message usage and
 model-response duration (excluding tools), exposing normalized turn usage and
@@ -49,7 +49,7 @@ to load the updated Server; never interrupt active work just to publish it.
 ## Reproducible build
 
 Commit host sources, patches, tests, dependency locks, and `upstream-pin.json`.
-The manifest hashes 2,075 upstream files, including native dependency patches.
+The manifest hashes 2,078 upstream files, including native dependency patches.
 Effect and its Node platform packages are pinned together at `4.0.4`.
 `upstream/`, `node_modules/`, `generated/` and the app's generated
 `vendor/t3-server.mjs`, `vendor/node_modules/` and `vendor/native-runtime.json`
