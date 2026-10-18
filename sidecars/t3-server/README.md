@@ -163,9 +163,14 @@ never infer a binding from global `auth.json` or the future-session default.
 It starts fixed one-minute checks when the supervised Server becomes ready and
 stops/drains with the gateway. Startup and macOS wake trigger a catch-up sample.
 Desktop account queries, background checks and mobile limits use this same runtime.
-Private account-control IPC presents native dialogs without sending `/accounts`
-to a thread. Login reuses the installed Pi's official OAuth implementation and
-a stable PiMac device ID; managed credential refreshes use the shared locked store.
+Private account-control IPC backs a persistent native account workspace without
+sending `/accounts` to a thread. Snapshot, default-account, explicit visibility,
+delete, refresh and health operations return structured state; activation records
+are part of the snapshot, not transient notifications. Only official OAuth uses
+a polled login flow, with prompts rendered inside the same workspace. Reauthorization
+is explicit and preserves the future-session default. Login reuses the installed
+Pi's official OAuth implementation and a stable PiMac device ID; managed credential
+refreshes use the shared locked store.
 Global native auth remains Pi-owned and is never replaced by a host login.
 
 Only session authentication, session-local switching, boundary-safe rotation and

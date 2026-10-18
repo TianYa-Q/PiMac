@@ -70,12 +70,16 @@ test("private PiMac account manager and quota queries work without creating a Pi
       return response.json();
     };
     const opened = await post("account-control", {
-      operation: "open",
+      operation: "snapshot",
       provider: "openai-codex",
     });
     const state = JSON.parse(opened.payload);
-    assert.ok(state.busy);
-    assert.match(state.requests[0].title, /X（新会话默认）/u);
+    assert.deepEqual(
+      state.accounts.map((row: { name: string }) => row.name),
+      ["X"],
+    );
+    assert.equal(state.accounts[0].isDefault, true);
+    assert.equal(state.requests, undefined);
     const quota = JSON.parse(
       (
         await post("account-status", {
@@ -89,12 +93,15 @@ test("private PiMac account manager and quota queries work without creating a Pi
       JSON.stringify(quota),
       /private-access|private-refresh/u,
     );
-    await post("account-control", {
-      operation: "respond",
-      flowID: state.flowID,
-      id: state.requests[0].id,
-      value: "关闭",
-    });
+    const checked = JSON.parse(
+      (
+        await post("account-control", {
+          operation: "health",
+          provider: "openai-codex",
+        })
+      ).payload,
+    );
+    assert.equal(checked.accounts[0].primary.remainingPercent, 90);
     await post("account-monitor-refresh", {});
     assert.equal(sdkLoads, 0);
     const unauthenticated = await fetch(

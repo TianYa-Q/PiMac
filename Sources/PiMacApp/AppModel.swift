@@ -27,10 +27,8 @@ final class AppModel: ObservableObject {
   @Published private(set) var streamActivity = StreamActivity()
   @Published private(set) var codexRotationInFlight = false
   @Published private var isManagingSessionAccounts = false
-  var isManagingAccounts: Bool { isManagingSessionAccounts || hostAccountFlowID != nil }
-  private var startingAccountManagement = false
-  @Published private var hostAccountFlowID: String?
-  private var hostAccountTask: Task<Void, Never>?
+  var isManagingAccounts: Bool { isManagingSessionAccounts || accountWorkspace != nil }
+  @Published private(set) var accountWorkspace: AccountWorkspaceModel?
   private var extensionUIEpoch = ""
   private var extensionUISerial = 0
   private var answeredDialogIDs: Set<String> = []
@@ -112,7 +110,7 @@ final class AppModel: ObservableObject {
   var isBusy: Bool {
     isStreaming || isCompacting || submitting || awaitingAgentStart || pendingSelection != nil
       || codexRotationInFlight || isChangingFastMode || isManagingAccounts
-      || startingAccountManagement || extensionUI?.hasPendingDialog(for: self) == true
+      || extensionUI?.hasPendingDialog(for: self) == true
   }
   var canRestartSafely: Bool { !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty }
   var canReloadModelList: Bool { server?.isConnected == true && !isBusy }
@@ -130,7 +128,7 @@ final class AppModel: ObservableObject {
     server?.isConnected == true && connectionState == .connected && !isLoadingConfiguration
       && !isCompacting && !codexRotationInFlight && !submitting && !awaitingAgentStart
       && pendingSelection == nil
-      && !isManagingAccounts && !startingAccountManagement
+      && !isManagingAccounts
       && extensionUI?.hasPendingDialog(for: self) != true
   }
   var canReuseProcessForNewSession: Bool { false }  // A tab is a view, not a process pool slot.
@@ -146,7 +144,7 @@ final class AppModel: ObservableObject {
       hasAvailableSession: server?.isConnected == true
         && (accountUsageProvider == .chatGPT || accountUsageProvider == .legacyCodex),
       isLoadingConfiguration: isLoadingConfiguration,
-      isAlreadyPresenting: startingAccountManagement || isManagingAccounts
+      isAlreadyPresenting: isManagingAccounts
         || extensionUI?.hasPendingDialog(for: self) == true)
   }
   var supportsAccountSwitch: Bool {
@@ -193,8 +191,8 @@ final class AppModel: ObservableObject {
     open(project: projectURL, path: nil)
   }
   private func open(project: URL, path: String?, completion: ((Bool) -> Void)? = nil) {
+    closeAccountWorkspace()
     extensionUI?.removeRequests(from: self)
-    hostAccountTask?.cancel()
     extensionUIEpoch = ""
     extensionUISerial = 0
     answeredDialogIDs.removeAll()
@@ -285,7 +283,7 @@ final class AppModel: ObservableObject {
   // UI selection never suspends a Provider runtime.
   func suspendProcess() {}
   func disconnect() {
-    hostAccountTask?.cancel()
+    closeAccountWorkspace()
     browserPreview.stop()
     extensionUI?.removeRequests(from: self)
     isManagingSessionAccounts = false
@@ -844,62 +842,17 @@ final class AppModel: ObservableObject {
   }
   func openCodexAccountManager() {
     guard canManageAccounts, let provider = accountUsageProvider, let server else { return }
-    startingAccountManagement = true
-    statusText = "正在打开 PiMac 账户管理…"
-    hostAccountTask = Task { [weak self] in
-      guard let self else { return }
-      var flowID: String?
-      var serial = 0
-      defer {
-        self.hostAccountFlowID = nil
-        self.startingAccountManagement = false
-        self.hostAccountTask = nil
-        self.extensionUI?.reconcileRequests(
-          ids: [], from: self, matchingPrefix: "pimac-account:")
-        if let flowID {
-          Task { _ = try? await server.accountControl(["operation": "cancel", "flowID": flowID]) }
-        }
-        self.refreshCodexAccounts(force: true)
-      }
-      do {
-        var state = try await server.accountControl([
-          "operation": "open", "provider": provider.rawValue,
-        ])
-        guard let openedID = state["flowID"] as? String else {
-          throw T3DesktopClient.ClientError.rejected
-        }
-        flowID = openedID
-        self.hostAccountFlowID = openedID
-        self.startingAccountManagement = false
-        while true {
-          try Task.checkCancellation()
-          let requests = state["requests"] as? [[String: Any]] ?? []
-          self.extensionUI?.reconcileRequests(
-            ids: Set(requests.compactMap { $0["id"] as? String }), from: self,
-            matchingPrefix: "pimac-account:")
-          for event in state["events"] as? [[String: Any]] ?? [] {
-            guard let next = event["serial"] as? Int, next > serial else { continue }
-            serial = next
-            if event["method"] as? String == "account_auth_url",
-              let value = event["url"] as? String, let url = URL(string: value),
-              url.scheme == "https", url.host != nil, url.user == nil, url.password == nil
-            {
-              NSWorkspace.shared.open(url)
-            } else {
-              self.extensionUI?.handle(event, from: self)
-            }
-          }
-          for request in requests { self.extensionUI?.handle(request, from: self) }
-          if state["busy"] as? Bool != true { break }
-          try await Task.sleep(for: .milliseconds(500))
-          state = try await server.accountControl(["operation": "poll", "flowID": openedID])
-        }
-      } catch is CancellationError {
-        // 关闭标签只取消管理交互，不停止宿主后台监测或任何 Pi 任务。
-      } catch {
-        self.statusText = "PiMac 账户管理未完成；请检查本机 Server、授权和文件权限。"
-      }
-    }
+    accountWorkspace = AccountWorkspaceModel(
+      provider: provider, snapshot: nil,
+      transport: { input in try await server.accountControl(input) },
+      openURL: { NSWorkspace.shared.open($0) })
+  }
+
+  func closeAccountWorkspace() {
+    guard let accountWorkspace else { return }
+    accountWorkspace.close()
+    self.accountWorkspace = nil
+    refreshCodexAccounts(force: true)
   }
 
   func applyExtensionUI(_ snapshot: [String: Any]) {
@@ -933,21 +886,6 @@ final class AppModel: ObservableObject {
   func sendExtensionResponse(
     id: String, value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false
   ) {
-    if id.hasPrefix("pimac-account:"), let flowID = hostAccountFlowID, let server {
-      Task {
-        do {
-          _ = try await server.accountControl([
-            "operation": "respond", "flowID": flowID, "id": id,
-            "value": value as Any? ?? NSNull(), "confirmed": confirmed as Any? ?? NSNull(),
-            "cancelled": cancelled,
-          ])
-        } catch {
-          statusText = "账户管理回复未确认；不会自动重发。"
-          hostAccountTask?.cancel()
-        }
-      }
-      return
-    }
     guard let threadID, let server else { return }
     let current = generation
     answeredDialogIDs.insert(id)

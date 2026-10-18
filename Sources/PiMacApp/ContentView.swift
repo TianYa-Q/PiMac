@@ -259,6 +259,15 @@ struct ContentView: View {
         .id(presentation.id)
         .interactiveDismissDisabled()
     }
+    .sheet(
+      isPresented: Binding(
+        get: { app.accountWorkspace != nil },
+        set: { if !$0 { app.closeAccountWorkspace() } })
+    ) {
+      if let model = app.accountWorkspace {
+        AccountWorkspaceView(model: model, close: app.closeAccountWorkspace)
+      }
+    }
     .onChange(of: app.connectionState) {
       if case .connected = app.connectionState {
         composerFocused = true

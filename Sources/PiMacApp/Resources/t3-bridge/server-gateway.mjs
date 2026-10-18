@@ -78,7 +78,7 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
         return json(res, 200, { payload: JSON.stringify({ ...payload, sessionSelection }) });
       }
       if (route === 'POST /internal/auth/account-monitor-refresh') { void piAccounts.tick('wake'); return json(res, 200, { ok: true }); }
-      if (route === 'POST /internal/auth/account-control') return json(res, 200, { payload: JSON.stringify(piAccounts.control(body)) });
+      if (route === 'POST /internal/auth/account-control') return json(res, 200, { payload: JSON.stringify(await piAccounts.control(body)) });
       if (route === 'POST /internal/auth/model-preferences') return json(res, 200, await manager.modelPreferences(body));
       if (route === 'POST /internal/auth/model-context') return json(res, 200, await manager.modelContext(body));
       if (route === 'POST /internal/auth/text-generation-model') return json(res, 200, await manager.textGenerationModel(body));

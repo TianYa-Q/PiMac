@@ -413,28 +413,16 @@ test("host login supplies a persistent official OAuth device ID without a Pi ses
   } as unknown as AccountSDK;
   const runtime = f.create({ sdk: async () => sdk });
   try {
-    let state = runtime.control({
-      operation: "open",
+    const state = await runtime.control({
+      operation: "login",
       provider: "openai-codex",
+      name: "Login",
     });
-    runtime.control({
-      operation: "respond",
-      flowID: state.flowID,
-      id: state.requests[0].id,
-      value: "登录新账户",
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-    state = runtime.control({ operation: "poll", flowID: state.flowID });
-    runtime.control({
-      operation: "respond",
-      flowID: state.flowID,
-      id: state.requests[0].id,
-      value: "Login",
-    });
+    assert.ok("flowID" in state);
     await settle(
       () => f.store.readCodexAccountState().activeAccount === "Login",
     );
-    assert.match(deviceIDs[0], /^[0-9a-f-]{36}$/u);
+    assert.match(deviceIDs[0]!, /^[0-9a-f-]{36}$/u);
     assert.equal(
       JSON.parse(
         await readFile(join(f.directory, "pimac-account-device.json"), "utf8"),
@@ -443,59 +431,183 @@ test("host login supplies a persistent official OAuth device ID without a Pi ses
     );
     assert.doesNotMatch(
       JSON.stringify(
-        runtime.control({ operation: "poll", flowID: state.flowID }),
+        await runtime.control({ operation: "poll", flowID: state.flowID }),
       ),
       /private-logged-in|private-refresh/u,
     );
-    runtime.control({ operation: "cancel", flowID: state.flowID });
+    await runtime.control({ operation: "cancel", flowID: state.flowID });
   } finally {
     await runtime.close();
     await f.cleanup();
   }
 });
 
-test("host account management changes future default without a thread and validates response options", async () => {
+test("workspace actions persist directly without dialog cycles, protect defaults, and separate providers", async () => {
   const f = await fixture();
   const runtime = f.create();
   try {
     await f.store.saveAccount("Y", credential("second"));
-    let state = runtime.control({
-      operation: "open",
-      provider: "openai-codex",
-    });
-    assert.ok(state.busy);
-    assert.match(state.requests[0].title, /多账户管理/u);
-    assert.throws(
-      () =>
-        runtime.control({
-          operation: "respond",
-          flowID: state.flowID,
-          id: state.requests[0].id,
-          value: "injected-action",
-        }),
-      /Invalid response/u,
+    const input = { provider: "openai-codex" };
+    let state = await runtime.control({ ...input, operation: "snapshot" });
+    assert.ok("accounts" in state);
+    assert.deepEqual(
+      state.accounts.map((row) => row.name),
+      ["X", "Y"],
     );
-    runtime.control({
-      operation: "respond",
-      flowID: state.flowID,
-      id: state.requests[0].id,
-      value: "切换账户",
+    assert.equal("requests" in state, false);
+    assert.equal(f.queries, 0);
+    state = await runtime.control({
+      ...input,
+      operation: "set-default",
+      name: "Y",
     });
-    await new Promise((resolve) => setImmediate(resolve));
-    state = runtime.control({ operation: "poll", flowID: state.flowID });
-    assert.match(state.requests[0].title, /现有会话不变/u);
-    runtime.control({
-      operation: "respond",
-      flowID: state.flowID,
-      id: state.requests[0].id,
-      value: "Y",
-    });
-    await settle(() => f.store.readCodexAccountState().activeAccount === "Y");
-    runtime.control({ operation: "cancel", flowID: state.flowID });
-    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok("accounts" in state);
     assert.equal(
-      runtime.control({ operation: "poll", flowID: state.flowID }).busy,
+      state.accounts.find((row) => row.name === "Y")?.isDefault,
+      true,
+    );
+    assert.equal(f.store.readCodexAccountState().activeAccount, "Y");
+    await assert.rejects(
+      runtime.control({ ...input, operation: "delete", name: "Y" }),
+    );
+    state = await runtime.control({
+      ...input,
+      operation: "visibility",
+      name: "X",
+      visible: false,
+    });
+    assert.ok("accounts" in state);
+    assert.equal(
+      state.accounts.find((row) => row.name === "X")?.isVisible,
       false,
+    );
+    assert.deepEqual(f.store.readSettings().hiddenAccounts, ["X"]);
+    await runtime.control({ ...input, operation: "refresh" });
+    assert.equal(f.queries, 1);
+    state = await runtime.control({ ...input, operation: "snapshot" });
+    assert.ok("accounts" in state);
+    assert.equal(
+      state.accounts.find((row) => row.name === "Y")?.primary?.remainingPercent,
+      100,
+    );
+    assert.equal(state.accounts.find((row) => row.name === "X")?.primary, null);
+    await settle(
+      async () => (await f.store.readAutoWarmupRecords()).length === 2,
+    );
+    state = await runtime.control({ ...input, operation: "snapshot" });
+    assert.ok("records" in state);
+    assert.equal(state.records.length, 2);
+    assert.equal(state.records[0]?.status, "success");
+    state = await runtime.control({ ...input, operation: "delete", name: "X" });
+    assert.ok("accounts" in state);
+    assert.deepEqual(
+      state.accounts.map((row) => row.name),
+      ["Y"],
+    );
+    assert.deepEqual(f.store.readSettings().hiddenAccounts, []);
+    const other = await runtime.control({
+      operation: "snapshot",
+      provider: "openai",
+    });
+    assert.ok("accounts" in other);
+    assert.deepEqual(other.accounts, []);
+    await assert.rejects(
+      runtime.control({ ...input, operation: "set-default", name: "unknown" }),
+    );
+    await assert.rejects(
+      runtime.control({
+        ...input,
+        operation: "visibility",
+        name: "Y",
+        visible: "false",
+      }),
+    );
+    await assert.rejects(
+      runtime.control({ ...input, operation: "login", name: "Y" }),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(state),
+      /private-|refresh_token|access_token/u,
+    );
+  } finally {
+    await runtime.close();
+    await f.cleanup();
+  }
+});
+
+test("official OAuth prompts stay in a login flow and cancellation leaves credentials unchanged", async () => {
+  const f = await fixture();
+  const sdk = {
+    ...f.sdk,
+    providers: [
+      {
+        ...f.sdk.providers[0],
+        auth: {
+          oauth: {
+            ...f.sdk.providers[0]!.auth.oauth,
+            login: async (interaction: {
+              prompt: (input: unknown) => Promise<string>;
+            }) => {
+              const choice = await interaction.prompt({
+                type: "select",
+                message: "Choose authorization",
+                options: [{ id: "browser", label: "Browser" }],
+              });
+              assert.equal(choice, "browser");
+              await interaction.prompt({
+                type: "input",
+                message: "Paste callback",
+              });
+              return credential("authorized");
+            },
+          },
+        },
+      },
+    ],
+  } as unknown as AccountSDK;
+  const runtime = f.create({ sdk: async () => sdk });
+  try {
+    let state = await runtime.control({
+      operation: "login",
+      provider: "openai-codex",
+      name: "New",
+    });
+    assert.ok("flowID" in state);
+    const flowID = state.flowID;
+    await settle(async () => {
+      state = await runtime.control({ operation: "poll", flowID });
+      return "requests" in state && state.requests.length === 1;
+    });
+    assert.ok("requests" in state);
+    await assert.rejects(
+      runtime.control({
+        operation: "respond",
+        flowID,
+        id: state.requests[0]!.id,
+        value: "injected",
+      }),
+    );
+    await runtime.control({
+      operation: "respond",
+      flowID,
+      id: state.requests[0]!.id,
+      value: "Browser",
+    });
+    await settle(async () => {
+      state = await runtime.control({ operation: "poll", flowID });
+      return "requests" in state && state.requests[0]?.method === "input";
+    });
+    state = await runtime.control({ operation: "cancel", flowID });
+    assert.ok("outcome" in state);
+    assert.equal(state.outcome, "cancelled");
+    assert.equal(state.requests.length, 0);
+    await settle(async () => {
+      const terminal = await runtime.control({ operation: "poll", flowID });
+      return "busy" in terminal && !terminal.busy;
+    });
+    assert.deepEqual(
+      f.store.readCodexAccountState().accounts.map((row) => row.name),
+      ["X"],
     );
   } finally {
     await runtime.close();

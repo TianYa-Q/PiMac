@@ -16,7 +16,10 @@ import {
   accountUsageCacheKey,
 } from "../../extensions/account-usage/account-identity.js";
 import { withDeadline } from "../../extensions/account-usage/deadline.js";
-import { writeHostSnapshot } from "../../extensions/account-usage/host-snapshot.js";
+import {
+  readHostSnapshot,
+  writeHostSnapshot,
+} from "../../extensions/account-usage/host-snapshot.js";
 import { appendPrivateDiagnostic } from "../../extensions/account-usage/private-log.js";
 import {
   readPrivateRegularFile,
@@ -48,7 +51,18 @@ type Event = Record<string, unknown> & {
   serial: number;
 };
 type Control =
-  | { operation: "open"; provider: AccountProvider }
+  | { operation: "snapshot" | "refresh" | "health"; provider: AccountProvider }
+  | {
+      operation: "set-default" | "delete" | "login" | "reauthorize";
+      provider: AccountProvider;
+      name: string;
+    }
+  | {
+      operation: "visibility";
+      provider: AccountProvider;
+      name: string;
+      visible: boolean;
+    }
   | { operation: "poll" | "cancel"; flowID: string }
   | {
       operation: "respond";
@@ -63,21 +77,59 @@ function parseControl(value: unknown): Control {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid control");
   const input = value as Record<string, unknown>;
-  if (input.operation === "open") {
+  const operation = input.operation;
+  if (
+    [
+      "snapshot",
+      "refresh",
+      "health",
+      "set-default",
+      "delete",
+      "login",
+      "reauthorize",
+      "visibility",
+    ].includes(String(operation))
+  ) {
     if (input.provider !== "openai" && input.provider !== "openai-codex")
       throw new Error("Unsupported provider");
-    return { operation: "open", provider: input.provider };
+    if (
+      operation === "snapshot" ||
+      operation === "refresh" ||
+      operation === "health"
+    )
+      return { operation, provider: input.provider };
+    if (
+      typeof input.name !== "string" ||
+      !/^[A-Za-z0-9._-]{1,64}$/u.test(input.name)
+    )
+      throw new Error("Invalid account name");
+    if (operation === "visibility") {
+      if (typeof input.visible !== "boolean")
+        throw new Error("Invalid visibility");
+      return {
+        operation,
+        provider: input.provider,
+        name: input.name,
+        visible: input.visible,
+      };
+    }
+    if (
+      operation === "set-default" ||
+      operation === "delete" ||
+      operation === "login" ||
+      operation === "reauthorize"
+    )
+      return { operation, provider: input.provider, name: input.name };
   }
-  if (
-    input.operation !== "poll" &&
-    input.operation !== "cancel" &&
-    input.operation !== "respond"
-  )
+  if (operation !== "poll" && operation !== "cancel" && operation !== "respond")
     throw new Error("Invalid operation");
-  if (typeof input.flowID !== "string" || input.flowID.length > 128)
+  if (
+    typeof input.flowID !== "string" ||
+    !input.flowID ||
+    input.flowID.length > 128
+  )
     throw new Error("Invalid flow ID");
-  if (input.operation !== "respond")
-    return { operation: input.operation, flowID: input.flowID };
+  if (operation !== "respond") return { operation, flowID: input.flowID };
   if (
     typeof input.id !== "string" ||
     input.id.length > 128 ||
@@ -88,7 +140,7 @@ function parseControl(value: unknown): Control {
   )
     throw new Error("Invalid response");
   return {
-    operation: "respond",
+    operation,
     flowID: input.flowID,
     id: input.id,
     ...(typeof input.value === "string" ? { value: input.value } : {}),
@@ -108,6 +160,7 @@ type Flow = {
   events: Event[];
   serial: number;
   busy: boolean;
+  outcome: "working" | "success" | "cancelled" | "failed";
 };
 
 /** 加载当前安装的 Pi 官方 provider 实现，不内置另一套 OAuth 或锁定宿主模型目录。 */
@@ -587,210 +640,135 @@ export function createAccountRuntime({
   }
   const notify = (flow: Flow, message: string) =>
     emit(flow, "notify", { message });
-  /** 宿主对话框不启动线程；每个请求与回复共享同一记录。取消/浏览器回调
-   * 都移除同一个请求，新会话默认设置绝不修改正在运行的会话认证。 */
-  async function manage(flow: Flow, provider: AccountProvider): Promise<void> {
+  /** 工作台直接操作持久化状态；只有官方 OAuth 的交互保留请求/回复协议。 */
+  async function login(
+    flow: Flow,
+    provider: AccountProvider,
+    name: string,
+    replacing: boolean,
+  ): Promise<void> {
     const store = storeFor(provider);
-    while (!flow.controller.signal.aborted) {
-      const state = store.readCodexAccountState();
-      const action = await ask(flow, {
-        method: "select",
-        title: [
-          `${provider === "openai" ? "OpenAI ChatGPT" : "Codex legacy"} 多账户管理`,
-          "",
-          ...state.accounts.map(
-            (account) =>
-              `${account.name}${account.name === state.activeAccount ? "（新会话默认）" : ""}`,
-          ),
-          ...(state.accounts.length ? [] : ["尚未登录账户"]),
-        ].join("\n"),
-        options: [
-          "切换账户",
-          "刷新额度",
-          "登录新账户",
-          "删除账户",
-          "额度显示设置",
-          "自动启动记录",
-          "健康检查",
-          "关闭",
-        ],
-      });
-      if (!action || action === "关闭") return;
-      if (action === "刷新额度") {
-        await accountStatus({ provider, force: true });
-        notify(flow, "PiMac 已刷新额度，后台独立检查激活。");
-      }
-      if (action === "切换账户") {
-        const name = await ask(flow, {
-          method: "select",
-          title: "选择新会话默认账户（现有会话不变）",
-          options: state.accounts.map((account) => account.name),
-        });
-        if (typeof name === "string") {
-          await store.setActiveAccount(name);
-          notify(
-            flow,
-            `已将 ${name} 设为新会话默认；当前会话切换仍使用额度卡片的切换按钮。`,
-          );
-        }
-      }
-      if (action === "额度显示设置") {
-        const settings = store.readSettings();
-        const selected = await ask(flow, {
-          method: "select",
-          title: "选择要显示或隐藏额度的账户",
-          options: state.accounts.map(
-            (account) =>
-              `${settings.hiddenAccounts.includes(account.name) ? "○" : "✓"} ${account.name}`,
-          ),
-        });
-        if (typeof selected === "string") {
-          const name = selected.replace(/^[○✓]\s+/u, "");
-          if (!state.accounts.some((account) => account.name === name))
-            throw new Error("Unknown account");
-          const hidden = new Set(settings.hiddenAccounts);
-          if (hidden.has(name)) hidden.delete(name);
-          else hidden.add(name);
-          store.writeSettings({ version: 1, hiddenAccounts: [...hidden] });
-          await accountStatus({ provider, force: true });
-        }
-      }
-      if (action === "删除账户") {
-        const name = await ask(flow, {
-          method: "select",
-          title: "选择要删除的账户",
-          options: state.accounts
-            .filter((account) => account.name !== state.activeAccount)
-            .map((account) => account.name),
-        });
-        if (
-          typeof name === "string" &&
-          (await ask(flow, {
-            method: "confirm",
-            title: "删除账户",
-            message: `确定删除 ${name}？正在使用它的旧会话之后可能无法继续请求。`,
-          })) === true
-        ) {
-          await store.removeAccount(name);
-          const settings = store.readSettings();
-          store.writeSettings({
-            version: 1,
-            hiddenAccounts: settings.hiddenAccounts.filter(
-              (value) => value !== name,
-            ),
+    const original = store
+      .readCodexAccountState()
+      .accounts.find((account) => account.name === name);
+    if (replacing !== Boolean(original)) throw new Error("Account changed");
+    const { oauth } = await providerFor(provider);
+    const interaction: ProviderAuthInteraction = {
+      signal: flow.controller.signal,
+      prompt: async (prompt) => {
+        const response = await ask(
+          flow,
+          prompt.type === "select"
+            ? {
+                method: "select",
+                title: `[account-usage login] ${prompt.message}`,
+                options: prompt.options.map((option) => option.label),
+              }
+            : {
+                method: "input",
+                title: `[account-usage login] ${prompt.message}`,
+                placeholder:
+                  "placeholder" in prompt ? prompt.placeholder : undefined,
+              },
+          prompt.signal ?? flow.controller.signal,
+        );
+        if (typeof response !== "string") throw new Error("Login cancelled");
+        return prompt.type === "select"
+          ? (prompt.options.find((option) => option.label === response)?.id ??
+              response)
+          : response;
+      },
+      notify: (event) => {
+        if (event.type === "auth_url" || event.type === "device_code") {
+          emit(flow, "account_auth_url", {
+            url: event.type === "auth_url" ? event.url : event.verificationUri,
           });
         }
-      }
-      if (action === "自动启动记录") {
-        const records = await store.readAutoWarmupRecords();
         notify(
           flow,
-          records.length
-            ? records
-                .slice(-30)
-                .map(
-                  (record) =>
-                    `${new Date(record.timestamp).toLocaleString("zh-CN")} ${record.accountName} ${record.windowKind ?? "5h"} ${record.status === "success" ? "已发送“你好”（未验证计时）" : "失败"}`,
-                )
-                .join("\n")
-            : "尚无自动启动记录。",
+          event.type === "auth_url"
+            ? `${event.instructions ?? "打开浏览器完成授权"}\n${event.url}`
+            : event.type === "device_code"
+              ? `${event.verificationUri}\n${event.userCode}`
+              : event.message,
         );
-      }
-      if (action === "健康检查") {
-        const snapshot = await accountStatus({ provider, force: true });
-        notify(
-          flow,
-          `PiMac 后台监测运行中；${snapshot.accounts.length} 个可见账户，${snapshot.accounts.filter((account) => account.error).length} 个查询失败。检查原因记录在 pimac-account-monitor.jsonl。`,
-        );
-      }
-      if (action === "登录新账户") {
-        const name = await ask(flow, {
-          method: "input",
-          title: "新账户名称",
-          placeholder: "仅允许字母、数字、点、下划线和连字符",
-        });
-        if (typeof name !== "string") continue;
-        if (!/^[A-Za-z0-9._-]{1,64}$/u.test(name)) {
-          notify(flow, "账户名称格式无效。");
-          continue;
-        }
-        if (
-          state.accounts.some((account) => account.name === name) &&
-          (await ask(flow, {
-            method: "confirm",
-            title: "覆盖账户",
-            message: `重新登录并覆盖 ${name}？`,
-          })) !== true
-        )
-          continue;
-        const { oauth } = await providerFor(provider);
-        const interaction: ProviderAuthInteraction = {
-          signal: flow.controller.signal,
-          prompt: async (prompt) => {
-            const response = await ask(
-              flow,
-              prompt.type === "select"
-                ? {
-                    method: "select",
-                    title: `[account-usage login] ${prompt.message}`,
-                    options: prompt.options.map((option) => option.label),
-                  }
-                : {
-                    method: "input",
-                    title: `[account-usage login] ${prompt.message}`,
-                    placeholder:
-                      "placeholder" in prompt ? prompt.placeholder : undefined,
-                  },
-              prompt.signal ?? flow.controller.signal,
-            );
-            if (typeof response !== "string")
-              throw new Error("Login cancelled");
-            return prompt.type === "select"
-              ? (prompt.options.find((option) => option.label === response)
-                  ?.id ?? response)
-              : response;
-          },
-          notify: (event) => {
-            if (event.type === "auth_url" || event.type === "device_code") {
-              emit(flow, "account_auth_url", {
-                url:
-                  event.type === "auth_url" ? event.url : event.verificationUri,
-              });
-            }
-            notify(
-              flow,
-              event.type === "auth_url"
-                ? `${event.instructions ?? "打开浏览器完成授权"}\n${event.url}`
-                : event.type === "device_code"
-                  ? `${event.verificationUri}\n${event.userCode}`
-                  : event.message,
-            );
-          },
+      },
+    };
+    const credential = await withDeadline(
+      (signal) =>
+        oauth.login({ ...interaction, signal }, { getDeviceId: deviceID }),
+      flow.controller.signal,
+      300_000,
+    );
+    flow.controller.signal.throwIfAborted();
+    const latest = store
+      .readCodexAccountState()
+      .accounts.find((account) => account.name === name);
+    if (
+      (original ? accountUsageCacheKey([original]) : null) !==
+      (latest ? accountUsageCacheKey([latest]) : null)
+    )
+      throw new Error("Account changed during authorization");
+    await store.saveAccount(name, credential);
+    if (!replacing) await store.setActiveAccount(name);
+    const settings = store.readSettings();
+    store.writeSettings({
+      version: 1,
+      hiddenAccounts: settings.hiddenAccounts.filter((value) => value !== name),
+    });
+    notify(
+      flow,
+      replacing
+        ? `账户 ${name} 授权已更新，默认账户设置不变。`
+        : `账户 ${name} 已登录并设为新会话默认；现有会话不受影响。`,
+    );
+    flow.outcome = "success";
+  }
+
+  async function workspaceSnapshot(provider: AccountProvider) {
+    const store = storeFor(provider);
+    const state = store.readCodexAccountState();
+    const settings = store.readSettings();
+    const quotas = readHostSnapshot(
+      provider,
+      state.accounts.filter(
+        (account) => !settings.hiddenAccounts.includes(account.name),
+      ),
+      directory,
+    );
+
+    const records = await store.readAutoWarmupRecords();
+    return {
+      provider,
+      accounts: state.accounts.map((account) => {
+        const usage = quotas.find((row) => row.accountName === account.name);
+        return {
+          name: account.name,
+          isDefault: account.name === state.activeAccount,
+          isVisible: !settings.hiddenAccounts.includes(account.name),
+          primary: usage?.primary ?? null,
+          secondary: usage?.secondary ?? null,
+          capturedAt: usage?.capturedAt ?? null,
+          error: usage?.error ?? null,
         };
-        const credential = await withDeadline(
-          (signal) =>
-            oauth.login({ ...interaction, signal }, { getDeviceId: deviceID }),
-          flow.controller.signal,
-          300_000,
-        );
-        flow.controller.signal.throwIfAborted();
-        await store.saveAccount(name, credential);
-        await store.setActiveAccount(name);
-        const settings = store.readSettings();
-        store.writeSettings({
-          version: 1,
-          hiddenAccounts: settings.hiddenAccounts.filter(
-            (value) => value !== name,
-          ),
-        });
-        notify(flow, `账户 ${name} 已登录并设为新会话默认；现有会话不受影响。`);
-      }
-    }
+      }),
+      records: records
+        .slice(-30)
+        .reverse()
+        .map((record) => ({
+          timestamp: record.timestamp,
+          accountName: record.accountName,
+          windowKind: record.windowKind ?? "5h",
+          status: record.status,
+        })),
+      monitorRunning: timer !== undefined,
+    };
   }
   function flowState(flow: Flow) {
     return {
       flowID: flow.id,
       busy: flow.busy,
+      outcome: flow.outcome,
       requests: [...flow.requests.values()].map((entry) => entry.dialog),
       events: flow.events,
     };
@@ -808,10 +786,51 @@ export function createAccountRuntime({
       }, intervalMs);
       timer.unref();
     },
-    control(value: unknown) {
+    async control(value: unknown) {
       const input = parseControl(value);
       if (owner.signal.aborted) throw new Error("Closed");
-      if (input.operation === "open") {
+      if (
+        "provider" in input &&
+        input.operation !== "login" &&
+        input.operation !== "reauthorize"
+      ) {
+        const store = storeFor(input.provider);
+        if (
+          "name" in input &&
+          !store
+            .readCodexAccountState()
+            .accounts.some((account) => account.name === input.name)
+        )
+          throw new Error("Unknown account");
+        if (input.operation === "set-default")
+          await store.setActiveAccount(input.name);
+        if (input.operation === "visibility") {
+          const settings = store.readSettings();
+          const hidden = new Set(settings.hiddenAccounts);
+          if (input.visible) hidden.delete(input.name);
+          else hidden.add(input.name);
+          store.writeSettings({ version: 1, hiddenAccounts: [...hidden] });
+        }
+        if (input.operation === "delete") {
+          await store.removeAccount(input.name);
+          const settings = store.readSettings();
+          store.writeSettings({
+            version: 1,
+            hiddenAccounts: settings.hiddenAccounts.filter(
+              (name) => name !== input.name,
+            ),
+          });
+        }
+        if (input.operation === "refresh" || input.operation === "health")
+          await accountStatus({ provider: input.provider, force: true });
+        return workspaceSnapshot(input.provider);
+      }
+      if (input.operation === "login" || input.operation === "reauthorize") {
+        const exists = storeFor(input.provider)
+          .readCodexAccountState()
+          .accounts.some((account) => account.name === input.name);
+        if (exists !== (input.operation === "reauthorize"))
+          throw new Error("Account changed");
         if ([...flows.values()].some((flow) => flow.busy))
           throw new Error("Account management already open");
         flows.clear();
@@ -822,12 +841,22 @@ export function createAccountRuntime({
           events: [],
           serial: 0,
           busy: true,
+          outcome: "working",
         };
         flows.set(flow.id, flow);
-        const task = manage(flow, input.provider)
-          .catch(() =>
-            notify(flow, "账户操作未完成，请检查授权、网络或文件权限。"),
-          )
+        const task = login(
+          flow,
+          input.provider,
+          input.name,
+          input.operation === "reauthorize",
+        )
+          .catch(() => {
+            if (flow.controller.signal.aborted) flow.outcome = "cancelled";
+            else {
+              flow.outcome = "failed";
+              notify(flow, "授权未完成，请检查授权、网络或文件权限。");
+            }
+          })
           .finally(() => {
             flow.busy = false;
             for (const { reply } of flow.requests.values()) reply(undefined);
@@ -837,13 +866,16 @@ export function createAccountRuntime({
         flowTasks.add(task);
         return flowState(flow);
       }
+      if (!("flowID" in input)) throw new Error("Unsupported operation");
       const flow = flows.get(input.flowID);
       if (!flow) throw new Error("Unknown account flow");
       if (input.operation === "cancel") {
-        flow.controller.abort();
-        for (const { reply } of flow.requests.values()) reply(undefined);
-        flow.busy = false;
-        flow.requests.clear();
+        if (flow.busy) {
+          flow.outcome = "cancelled";
+          flow.controller.abort();
+          for (const { reply } of flow.requests.values()) reply(undefined);
+          flow.requests.clear();
+        }
       } else if (input.operation === "respond") {
         const entry = flow.requests.get(input.id);
         if (!entry) throw new Error("Expired account request");
