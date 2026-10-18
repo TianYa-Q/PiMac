@@ -15,6 +15,7 @@ import { BUILT_IN_DRIVERS } from './upstream/apps/server/src/provider/builtInDri
 import { configureModelPreferences } from './model-preferences.mjs';
 import { prepareServerPort } from './server-port.mjs';
 export { originAllowed } from './origin-policy.mjs';
+export { createAccountRuntime } from './account-runtime.ts';
 
 function checkPrivateTree(directory, toolsDirectory, inTools = false) {
   const entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -30,7 +31,7 @@ function checkPrivateTree(directory, toolsDirectory, inTools = false) {
   }
 }
 
-export async function startPiServer({ directory, environmentId, onFailure, piConfig = {}, signal }) {
+export async function startPiServer({ directory, environmentId, onFailure, piConfig = {}, signal, accounts }) {
   process.umask(0o077);
   // Supervisor credentials have already been captured by the gateway. They
   // must not enter upstream's inherited environment or any provider subprocess.
@@ -41,7 +42,7 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('Unsafe T3 Server directory');
   checkPrivateTree(directory, path.join(directory, 'tools'));
-  const broker = configureNative({ environmentId, directory });
+  const broker = configureNative({ environmentId, directory, accounts });
   let binding;
   try {
     configureModelPreferences(directory);

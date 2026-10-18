@@ -1,4 +1,4 @@
-// Read-only host capability. Official Pi remains the sole auth/session writer.
+// Host quota transport. Session bindings remain owned by official Pi.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -41,7 +41,7 @@ function window(value) {
     ...(Number.isFinite(value.reset_at) && value.reset_at > 0 ? { resetAt: value.reset_at } : {}),
     ...(Number.isFinite(value.limit_window_seconds) && value.limit_window_seconds > 0 ? { windowSeconds: value.limit_window_seconds } : {}) };
 }
-export function createPiAccountManagement({ agentDirectory = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent'), fetchImpl = fetch, now = Date.now } = {}) {
+export function createPiAccountManagement({ agentDirectory = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent'), fetchImpl = fetch, now = Date.now, resolveCredential = async (_provider, _name, credential, _signal, _force) => credential } = {}) {
   const cache = new Map(), pending = new Map(), successfulAccounts = new Map();
   let successfulGemini;
   const controller = new AbortController();
@@ -181,23 +181,36 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
     const rows = [];
     const previousAccounts = successfulAccounts.get(provider) ?? new Map();
     const nextAccounts = new Map();
-    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(12000)]);
-    for (const [name, credential] of accounts) {
+    for (let offset = 0; offset < accounts.length; offset += 2) await Promise.all(accounts.slice(offset, offset + 2).map(async ([name, storedCredential]) => {
       controller.signal.throwIfAborted();
       const row = { name, hidden: settings.hiddenAccounts?.includes(name) === true, capturedAt: now() };
       // 隐藏账户不查询，也不向桌面/iOS 的额度接口返回占位或旧缓存。
-      if (row.hidden) continue;
+      if (row.hidden) return;
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]);
+      let credential = storedCredential;
+      try { credential = await resolveCredential(provider, name, storedCredential, signal, false); }
+      catch { row.error = '授权刷新失败，请重新登录或稍后重试。'; }
       const id = accountID(credential);
-      if (!id || typeof credential.access !== 'string') row.error = '授权缺少 ChatGPT account ID，无法查询额度。';
-      else if (!Number.isFinite(credential.expires) || credential.expires <= now()) row.error = '授权已过期，请通过 Pi 登录或账户扩展刷新授权。';
+      if (row.error) { /* 不使用刷新失败的旧凭据继续查询。 */ }
+      else if (!id || typeof credential.access !== 'string') row.error = '授权缺少 ChatGPT account ID，无法查询额度。';
+      else if (!Number.isFinite(credential.expires) || credential.expires <= now()) row.error = '授权已过期，请在 PiMac 重新登录托管账户，或通过 Pi 更新原生授权。';
       else {
         try {
           signal.throwIfAborted();
-          const response = await fetchImpl('https://chatgpt.com/backend-api/wham/usage', {
-            headers: { authorization: `Bearer ${credential.access}`, 'chatgpt-account-id': id },
-            redirect: 'error', signal,
-          });
-          if (!response.ok) { discardBody(response); throw new Error('http'); }
+          let response;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            response = await fetchImpl('https://chatgpt.com/backend-api/wham/usage', {
+              headers: { authorization: `Bearer ${credential.access}`, 'chatgpt-account-id': id },
+              redirect: 'error', signal,
+            });
+            if (response.status !== 401 || attempt > 0) break;
+            discardBody(response);
+            const refreshed = await resolveCredential(provider, name, credential, signal, true);
+            if (accountID(refreshed) !== id) throw new Error('identity changed');
+            if (refreshed.access === credential.access && refreshed.expires === credential.expires) break;
+            credential = refreshed;
+          }
+          if (!response?.ok) { if (response) discardBody(response); throw new Error('http'); }
           const body = await boundedJSON(response, { maxBytes: MAX_BYTES, signal });
           row.primary = window(body.rate_limit?.primary_window);
           row.secondary = window(body.rate_limit?.secondary_window);
@@ -224,7 +237,7 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
         nextAccounts.set(key, { ...row });
       }
       rows.push(row);
-    }
+    }));
     successfulAccounts.set(provider, nextAccounts);
     return { version: 2, provider, supportsAccountSwitch: false, managesSelectedAuth: false,
       updatedAt: now(), accounts: rows, gemini: await geminiTask, source: 'host-query',

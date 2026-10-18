@@ -56,6 +56,17 @@ struct AccountManagementDialogTests {
     #expect(!legacy.supportsHealthCheck)
   }
 
+  @Test func hostManagementHasNoImpliedCurrentSessionBinding() throws {
+    let result = try #require(
+      AccountManagementPresentation(
+        dialog: ExtensionDialog(
+          id: "pimac-account:fixture", title: "Codex legacy 多账户管理\n\nX（新会话默认）",
+          kind: .select(options: options))))
+    #expect(result.isHostManaged)
+    #expect(result.accounts.first?.isDefault == true)
+    #expect(result.accounts.first?.isCurrent == false)
+  }
+
   @Test func leavesOtherExtensionDialogsUnchanged() {
     #expect(
       AccountManagementPresentation(

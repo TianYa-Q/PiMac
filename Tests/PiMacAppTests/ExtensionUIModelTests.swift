@@ -5,6 +5,26 @@ import Testing
 
 @MainActor
 struct ExtensionUIModelTests {
+  @Test func hostAndSessionDialogPollingDoNotCancelEachOther() {
+    let ui = ExtensionUIModel()
+    let source = AppModel(restoreLastProjectOnLaunch: false)
+    ui.handle(
+      ["method": "select", "id": "pimac-account:one", "title": "宿主", "options": ["关闭"]],
+      from: source)
+    ui.handle(
+      ["method": "input", "id": "pi-request", "title": "会话"], from: source)
+    #expect(ui.pendingDialogCount == 2)
+    ui.reconcileRequests(ids: ["pi-request"], from: source)
+    #expect(ui.dialog?.id == "pimac-account:one")
+    #expect(ui.dialogSourceLabel == "PiMac 账户管理")
+    ui.reconcileRequests(ids: [], from: source, matchingPrefix: "pimac-account:")
+    #expect(ui.dialog?.id == "pi-request")
+    #expect(ui.pendingDialogCount == 1)
+    ui.reconcileRequests(ids: [], from: source)
+    #expect(ui.dialog == nil)
+    #expect(ui.pendingDialogCount == 0)
+  }
+
   @Test
   func accountStatusFollowsSelectedSession() throws {
     let ui = ExtensionUIModel()

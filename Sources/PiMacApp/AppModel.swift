@@ -26,8 +26,11 @@ final class AppModel: ObservableObject {
   @Published private(set) var outputTokensPerSecond: Double?
   @Published private(set) var streamActivity = StreamActivity()
   @Published private(set) var codexRotationInFlight = false
-  @Published private(set) var isManagingAccounts = false
+  @Published private var isManagingSessionAccounts = false
+  var isManagingAccounts: Bool { isManagingSessionAccounts || hostAccountFlowID != nil }
   private var startingAccountManagement = false
+  @Published private var hostAccountFlowID: String?
+  private var hostAccountTask: Task<Void, Never>?
   private var extensionUIEpoch = ""
   private var extensionUISerial = 0
   private var answeredDialogIDs: Set<String> = []
@@ -140,7 +143,8 @@ final class AppModel: ObservableObject {
   @Published private(set) var isRefreshingAccountQuota = false
   var canManageAccounts: Bool {
     AccountManagementAccess.canOpen(
-      hasAvailableSession: accountUsageProvider != nil && isProcessRunning,
+      hasAvailableSession: server?.isConnected == true
+        && (accountUsageProvider == .chatGPT || accountUsageProvider == .legacyCodex),
       isLoadingConfiguration: isLoadingConfiguration,
       isAlreadyPresenting: startingAccountManagement || isManagingAccounts
         || extensionUI?.hasPendingDialog(for: self) == true)
@@ -190,10 +194,11 @@ final class AppModel: ObservableObject {
   }
   private func open(project: URL, path: String?, completion: ((Bool) -> Void)? = nil) {
     extensionUI?.removeRequests(from: self)
+    hostAccountTask?.cancel()
     extensionUIEpoch = ""
     extensionUISerial = 0
     answeredDialogIDs.removeAll()
-    isManagingAccounts = false
+    isManagingSessionAccounts = false
     queuedPrompts.removeAll()
     pendingSentMessages.removeAll()
     submitting = false
@@ -280,9 +285,10 @@ final class AppModel: ObservableObject {
   // UI selection never suspends a Provider runtime.
   func suspendProcess() {}
   func disconnect() {
+    hostAccountTask?.cancel()
     browserPreview.stop()
     extensionUI?.removeRequests(from: self)
-    isManagingAccounts = false
+    isManagingSessionAccounts = false
     queuedPrompts.removeAll()
     generation = UUID()
     connectTask?.cancel()
@@ -837,19 +843,61 @@ final class AppModel: ObservableObject {
     }
   }
   func openCodexAccountManager() {
-    guard canManageAccounts, let id = threadID, let server else { return }
-    let current = generation
+    guard canManageAccounts, let provider = accountUsageProvider, let server else { return }
     startingAccountManagement = true
-    statusText = "正在打开账户管理…"
-    Task {
-      defer { if generation == current { startingAccountManagement = false } }
+    statusText = "正在打开 PiMac 账户管理…"
+    hostAccountTask = Task { [weak self] in
+      guard let self else { return }
+      var flowID: String?
+      var serial = 0
+      defer {
+        self.hostAccountFlowID = nil
+        self.startingAccountManagement = false
+        self.hostAccountTask = nil
+        self.extensionUI?.reconcileRequests(
+          ids: [], from: self, matchingPrefix: "pimac-account:")
+        if let flowID {
+          Task { _ = try? await server.accountControl(["operation": "cancel", "flowID": flowID]) }
+        }
+        self.refreshCodexAccounts(force: true)
+      }
       do {
-        try await server.sessionControl(threadID: id, operation: "manage-accounts")
-        guard generation == current else { return }
-        statusText = "已提交 /accounts；需要安装 account-usage 扩展，请等待 Pi 的回复或对话框。"
+        var state = try await server.accountControl([
+          "operation": "open", "provider": provider.rawValue,
+        ])
+        guard let openedID = state["flowID"] as? String else {
+          throw T3DesktopClient.ClientError.rejected
+        }
+        flowID = openedID
+        self.hostAccountFlowID = openedID
+        self.startingAccountManagement = false
+        while true {
+          try Task.checkCancellation()
+          let requests = state["requests"] as? [[String: Any]] ?? []
+          self.extensionUI?.reconcileRequests(
+            ids: Set(requests.compactMap { $0["id"] as? String }), from: self,
+            matchingPrefix: "pimac-account:")
+          for event in state["events"] as? [[String: Any]] ?? [] {
+            guard let next = event["serial"] as? Int, next > serial else { continue }
+            serial = next
+            if event["method"] as? String == "account_auth_url",
+              let value = event["url"] as? String, let url = URL(string: value),
+              url.scheme == "https", url.host != nil, url.user == nil, url.password == nil
+            {
+              NSWorkspace.shared.open(url)
+            } else {
+              self.extensionUI?.handle(event, from: self)
+            }
+          }
+          for request in requests { self.extensionUI?.handle(request, from: self) }
+          if state["busy"] as? Bool != true { break }
+          try await Task.sleep(for: .milliseconds(500))
+          state = try await server.accountControl(["operation": "poll", "flowID": openedID])
+        }
+      } catch is CancellationError {
+        // 关闭标签只取消管理交互，不停止宿主后台监测或任何 Pi 任务。
       } catch {
-        guard generation == current else { return }
-        statusText = "账户管理未确认；请检查扩展配置，不会自动重试。"
+        self.statusText = "PiMac 账户管理未完成；请检查本机 Server、授权和文件权限。"
       }
     }
   }
@@ -862,7 +910,7 @@ final class AppModel: ObservableObject {
       answeredDialogIDs.removeAll()
     }
     let busy = snapshot["busy"] as? Bool ?? false
-    if isManagingAccounts != busy { isManagingAccounts = busy }
+    if isManagingSessionAccounts != busy { isManagingSessionAccounts = busy }
     let requests = snapshot["requests"] as? [[String: Any]] ?? []
     let ids = Set(requests.compactMap { $0["id"] as? String })
     answeredDialogIDs.formIntersection(ids)
@@ -885,6 +933,21 @@ final class AppModel: ObservableObject {
   func sendExtensionResponse(
     id: String, value: String? = nil, confirmed: Bool? = nil, cancelled: Bool = false
   ) {
+    if id.hasPrefix("pimac-account:"), let flowID = hostAccountFlowID, let server {
+      Task {
+        do {
+          _ = try await server.accountControl([
+            "operation": "respond", "flowID": flowID, "id": id,
+            "value": value as Any? ?? NSNull(), "confirmed": confirmed as Any? ?? NSNull(),
+            "cancelled": cancelled,
+          ])
+        } catch {
+          statusText = "账户管理回复未确认；不会自动重发。"
+          hostAccountTask?.cancel()
+        }
+      }
+      return
+    }
     guard let threadID, let server else { return }
     let current = generation
     answeredDialogIDs.insert(id)

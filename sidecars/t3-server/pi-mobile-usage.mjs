@@ -152,6 +152,7 @@ export async function readPiLimitSources(accounts, now = Date.now) {
     ...(errors.length || !rows.length ? { error: errors[0] || 'No Pi OAuth accounts found. API keys do not expose subscription limits.' } : {}) }];
 }
 export function createPiMobileUsage(options) {
-  const accounts = createPiAccountManagement(options);
-  return { readLimits: () => readPiLimitSources(accounts), close: () => accounts.close() };
+  const shared = options?.accounts;
+  const accounts = shared ?? createPiAccountManagement(options);
+  return { readLimits: () => readPiLimitSources(accounts), close: () => { if (!shared) accounts.close(); } };
 }

@@ -102,6 +102,10 @@ final class WorkspaceModel: ObservableObject {
     }
     addTab(model: AppModel(restoreLastProjectOnLaunch: false), path: nil, draft: false)
     server.onShell = { [weak self] snapshot in self?.applyShell(snapshot) }
+    server.onAccountPoll = { [weak self] in
+      guard let self else { return }
+      for tab in self.tabs { tab.model.refreshCodexAccounts() }
+    }
     guard restoreUserState else { return }
     server.onTaskStatus = { TaskStatusNotifications.shared.deliver($0) }
     // Cached shell is presentation only; all commands still require live readiness.

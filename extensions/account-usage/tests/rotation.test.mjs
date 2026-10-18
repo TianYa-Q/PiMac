@@ -38,6 +38,32 @@ test("5% threshold is strict; missing short telemetry and missing active account
     undefined,
   );
 });
+test("confirmed quota failures may outrun host telemetry but still require a fresh valid spare", () => {
+  assert.deepEqual(
+    choose([usage("active", 90), usage("spare", 80)], {
+      confirmedQuotaFailure: true,
+      allowRebalance: false,
+    }),
+    { accountName: "spare", reason: "low-quota" },
+  );
+  assert.equal(
+    choose(
+      [
+        usage("active", 90),
+        { ...usage("spare", 80), capturedAt: now - 180001 },
+      ],
+      { confirmedQuotaFailure: true },
+    ),
+    undefined,
+  );
+  assert.equal(
+    choose([usage("active", 90), usage("spare", 0)], {
+      confirmedQuotaFailure: true,
+    }),
+    undefined,
+  );
+});
+
 test("hidden, failed, stale, unknown and exhausted candidate quotas are skipped", () => {
   const rows = [
     usage("active", 0),

@@ -4,10 +4,10 @@ import { createPiMobileUsage } from './pi-mobile-usage.mjs';
 import { createTunnelHealth } from './tunnel-health.mjs';
 import { createPiAccountSelections } from './pi-account-selection.mjs';
 let host;
-export function configureNative({ environmentId, directory }) {
+export function configureNative({ environmentId, directory, accounts }) {
   if (host && !host.closed) throw new Error('Server host already owned');
   const connectionDiagnostics = createConnectionDiagnostics(directory);
-  host = { environmentId, closed: false, accountSelections: createPiAccountSelections(), mobileUsage: createPiMobileUsage(), connectionDiagnostics,
+  host = { environmentId, closed: false, accountSelections: createPiAccountSelections(), mobileUsage: createPiMobileUsage({ accounts }), connectionDiagnostics,
     tunnelHealth: createTunnelHealth(connectionDiagnostics),
     diagnostics: { requests: 0, accepted: 0, queuedDeliveries: 0, successfulDeliveries: 0, failedDeliveries: 0 },
     message: '', browserURL: null, close() { this.closed = true; this.mobileUsage.close(); this.accountSelections.close(); } };

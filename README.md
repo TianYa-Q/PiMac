@@ -11,6 +11,8 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 
 > **Source architecture update:** migrated to the official main Pi Provider and orchestration protocol 2. Native extension dialogs, /compact and steering are supported; private account status, Fast/compaction-model overrides and rich tool output are no longer provided. Release-era descriptions below are not feature-parity claims. Real historical upgrades and mobile acceptance remain pending. See [current architecture and limits](docs/t3-server-migration.md).
 
+> **Account ownership:** PiMac now owns account login/management, background quota monitoring and activation independently of Pi sessions. The companion extension only handles session authentication, switching and safe rotation; its old `/usage` and management menu are removed. See [account ownership and diagnostics](extensions/account-usage/README.md).
+
 ![Pi Mac overview](docs/images/pi-mac-overview-new.png)
 
 ## Features
@@ -46,7 +48,7 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 - Support select, confirm, input, and editor dialogs provided by Pi extensions
 - Native extension dialogs add searchable choices, project/session context and waiting-request counts. Presentation-scoped responses reject stale callbacks; bounded queues and hardened private account JSON prevent runaway requests and unsafe local reads. See [dialog and storage hardening](docs/extension-dialog-storage-hardening.md).
 - Account cards show actual quota sample age, stale/clock-skew warnings and refresh progress. Account management supports search (more than four accounts) and a read-only Health Check; expired dialogs cannot act on a replacement session/provider. See [snapshot and lifecycle hardening](docs/account-snapshot-lifecycle.md).
-- Manage OpenAI ChatGPT / Codex accounts and Gemini quotas with the companion [account-usage](extensions/account-usage/README.md), maintained in this repository. Credentials, defaults and quotas stay provider-isolated; API keys are never automatically replaced. Low-quota rotation and weekly-budget balancing run inside the extension at safe Pi boundaries, independent of the desktop UI; automatic changes affect only the current session
+- PiMac manages OpenAI ChatGPT / Codex accounts, Gemini quota display and background activation independently of conversations; the companion [session adapter](extensions/account-usage/README.md) handles only session execution. Credentials, defaults and quotas stay provider-isolated; API keys are never automatically replaced. Low-quota rotation and weekly-budget balancing run inside the extension at safe Pi boundaries, independent of the desktop UI; automatic changes affect only the current session
 - Reuse existing authentication, models, skills, extensions, and settings from `~/.pi/agent`
 
 ## Download and Installation
@@ -54,14 +56,14 @@ A native macOS [Pi coding agent](https://github.com/earendil-works/pi) client bu
 1. Download the latest `Pi-Mac-vX.Y.Z.zip` from [GitHub Releases](https://github.com/TianYa-Q/PiMac/releases/latest).
 2. Extract the archive and move **Pi Mac.app** to your Applications folder.
 3. Make sure Pi is installed and you are signed in.
-4. Install the companion `account-usage` from this repository (new OpenAI support requires Pi 0.99.1+):
+4. For session-local account authentication, switching and rotation, install the companion `account-usage` from this repository (new OpenAI support requires Pi 0.99.1+):
 
    ```bash
    npm --prefix extensions/account-usage ci --ignore-scripts
    ./scripts/link-account-usage.sh
    ```
 
-   Back up/remove an old installation first to avoid duplicate loading. Select an `openai` model and use `/accounts` to log in to ChatGPT; legacy tokens are not migrated. Account data remains under `~/.pi/agent`, never in the repository. Restart Pi / reconnect sessions after updates. Run `./scripts/check.sh` for full validation.
+   Back up/remove an old installation first to avoid duplicate loading. Select an `openai` model and open PiMac's account manager to log in to ChatGPT; legacy tokens are not migrated. Account data remains under `~/.pi/agent`, never in the repository. Restart Pi / reconnect sessions after updates. Run `./scripts/check.sh` for full validation.
 
 > Current releases use ad-hoc signing and are not notarized by Apple. If macOS blocks the app the first time, right-click it in Finder and choose **Open**, or allow it under **System Settings → Privacy & Security**.
 

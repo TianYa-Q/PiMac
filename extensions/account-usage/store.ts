@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readPrivateRegularFile, writePrivateJson } from "./private-json.js";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDirectory } from "./agent-directory.js";
 import lockfile from "proper-lockfile";
 import type {
   AutoWarmupRecord,
@@ -11,13 +11,16 @@ import type {
   AccountProvider,
 } from "./types.js";
 
-export function createAccountStore(provider: AccountProvider = "openai-codex") {
+export function createAccountStore(
+  provider: AccountProvider = "openai-codex",
+  agentDirectory: string = getAgentDirectory(),
+) {
   const prefix = provider === "openai" ? "openai-chatgpt" : "codex";
-  const STORE_PATH = join(getAgentDir(), `${prefix}-accounts.json`);
-  const LEGACY_ACCOUNTS_PATH = join(getAgentDir(), "pi-accounts.json");
-  const SETTINGS_PATH = join(getAgentDir(), `${prefix}-account-usage.json`);
+  const STORE_PATH = join(agentDirectory, `${prefix}-accounts.json`);
+  const LEGACY_ACCOUNTS_PATH = join(agentDirectory, "pi-accounts.json");
+  const SETTINGS_PATH = join(agentDirectory, `${prefix}-account-usage.json`);
   const AUTO_WARMUP_STATE_PATH = join(
-    getAgentDir(),
+    agentDirectory,
     `${prefix}-account-auto-warmup.json`,
   );
   const ACCOUNT_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/u;
@@ -142,8 +145,10 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
     successfulCooldownMs: number,
     bypassSuccessCooldown = false,
     windowKind: "5h" | "7d" = "5h",
+    identityKey: string = accountName,
   ): Promise<boolean> {
     validateAccountName(accountName);
+    validateAccountName(identityKey);
     if (!Number.isFinite(windowResetAt) || windowResetAt <= 0) {
       throw new Error("自动唤醒窗口重置时间无效。");
     }
@@ -161,7 +166,9 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
       const state = readAutoWarmupState();
       const hasRecentSuccess = state.records.some(
         (record) =>
-          record.accountName === accountName &&
+          (record.identityKey
+            ? record.identityKey === identityKey
+            : record.accountName === accountName) &&
           (record.windowKind ?? "5h") === windowKind &&
           record.status === "success" &&
           now - record.timestamp < successfulCooldownMs,
@@ -174,14 +181,24 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
         windowKind === "7d"
           ? state.weeklyClaimedAtByAccount
           : state.claimedAtByAccount;
-      const claimedResetAt = resetMap[accountName];
-      const claimedAt = claimMap[accountName];
-      const hasLiveClaim =
-        claimedAt !== undefined && now - claimedAt < AUTO_WARMUP_CLAIM_LEASE_MS;
+      const claimedResetAt = resetMap[identityKey];
+      const claimedAt = claimMap[identityKey];
+      const hasLiveClaim = [claimMap[identityKey], claimMap[accountName]].some(
+        (at) => at !== undefined && now - at < AUTO_WARMUP_CLAIM_LEASE_MS,
+      );
       if (
         (!bypassSuccessCooldown && hasRecentSuccess) ||
         hasLiveClaim ||
-        (claimedResetAt !== undefined && claimedResetAt >= windowResetAt)
+        (claimedResetAt !== undefined &&
+          claimedResetAt >= windowResetAt &&
+          state.records.some(
+            (record) =>
+              (record.identityKey ?? record.accountName) === identityKey &&
+              (record.windowKind ?? "5h") === windowKind &&
+              record.status === "success" &&
+              claimedAt !== undefined &&
+              record.timestamp >= claimedAt,
+          ))
       ) {
         return false;
       }
@@ -192,16 +209,16 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
           ? {
               weeklyClaimedWindowResetAtByAccount: {
                 ...resetMap,
-                [accountName]: windowResetAt,
+                [identityKey]: windowResetAt,
               },
-              weeklyClaimedAtByAccount: { ...claimMap, [accountName]: now },
+              weeklyClaimedAtByAccount: { ...claimMap, [identityKey]: now },
             }
           : {
               claimedWindowResetAtByAccount: {
                 ...resetMap,
-                [accountName]: windowResetAt,
+                [identityKey]: windowResetAt,
               },
-              claimedAtByAccount: { ...claimMap, [accountName]: now },
+              claimedAtByAccount: { ...claimMap, [identityKey]: now },
             }),
       } satisfies AutoWarmupState);
       return true;
@@ -439,15 +456,22 @@ export function createAccountStore(provider: AccountProvider = "openai-codex") {
       (value.windowKind !== undefined &&
         value.windowKind !== "5h" &&
         value.windowKind !== "7d") ||
+      (value.identityKey !== undefined &&
+        typeof value.identityKey !== "string") ||
       (value.error !== undefined && typeof value.error !== "string")
     ) {
       throw new Error("自动启动记录数据无效。");
     }
     validateAccountName(value.accountName);
+    if (typeof value.identityKey === "string")
+      validateAccountName(value.identityKey);
     return {
       timestamp: value.timestamp,
       accountName: value.accountName,
       status: value.status,
+      ...(value.identityKey === undefined
+        ? {}
+        : { identityKey: value.identityKey }),
       ...(value.windowKind === undefined
         ? {}
         : { windowKind: value.windowKind }),

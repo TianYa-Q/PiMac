@@ -52,5 +52,6 @@ export type AutoWarmupRecord = {
   accountName: string;
   status: "success" | "failed";
   windowKind?: "5h" | "7d";
+  identityKey?: string;
   error: string | undefined;
 };

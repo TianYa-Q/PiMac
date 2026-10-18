@@ -48,12 +48,14 @@ export function nextAccount({
   hiddenAccounts = [],
   now = Date.now(),
   allowRebalance = true,
+  confirmedQuotaFailure = false,
 }: {
   activeAccount: string;
   usages: readonly AccountUsage[];
   hiddenAccounts?: readonly string[];
   now?: number;
   allowRebalance?: boolean;
+  confirmedQuotaFailure?: boolean;
 }): RotationDecision | undefined {
   const fresh = usages.filter(
     (usage) =>
@@ -63,12 +65,15 @@ export function nextAccount({
       now - usage.capturedAt <= MAX_USAGE_AGE_MS,
   );
   const active = fresh.find((usage) => usage.accountName === activeAccount);
-  if (!active) return undefined;
-  const shortRemaining = remaining(active, FIVE_HOURS, now);
-  if (shortRemaining === undefined) return undefined;
-  const weeklyRemaining = remaining(active, WEEK, now);
+  if (!active && !confirmedQuotaFailure) return undefined;
+  const shortRemaining = active && remaining(active, FIVE_HOURS, now);
+  if (shortRemaining === undefined && !confirmedQuotaFailure) return undefined;
+  const weeklyRemaining = active && remaining(active, WEEK, now);
+  // 实际请求已确认额度失败时，宿主快照可能尚未更新当前账户；只豁免当前账户
+  // 的低额度判定，候选账户仍必须有新鲜、成功且充足的额度，不能盲目重试。
   const urgent =
-    shortRemaining < 5 ||
+    confirmedQuotaFailure ||
+    (shortRemaining !== undefined && shortRemaining < 5) ||
     (weeklyRemaining !== undefined && weeklyRemaining <= 5);
   if (!urgent && !allowRebalance) return undefined;
 
@@ -102,7 +107,7 @@ export function nextAccount({
   if (!best) return undefined;
   if (urgent)
     return { accountName: best.usage.accountName, reason: "low-quota" };
-  const current = weeklyBudget(active, now);
+  const current = active && weeklyBudget(active, now);
   if (
     current &&
     best.budget?.paced &&

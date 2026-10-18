@@ -95,10 +95,18 @@ final class ExtensionUIModel: ObservableObject {
   }
 
   /// Expired or closed server requests must disappear without replaying a reply.
-  func reconcileRequests(ids: Set<String>, from source: AppModel) {
-    queuedDialogs.removeAll { $0.source === source && !ids.contains($0.dialog.id) }
+  func reconcileRequests(
+    ids: Set<String>, from source: AppModel, matchingPrefix: String? = nil
+  ) {
+    // 宿主管理与 Pi 会话请求独立轮询，不能用其中一方的列表取消另一方的对话框。
+    let matches: (String) -> Bool = { id in
+      matchingPrefix.map { id.hasPrefix($0) } ?? !id.hasPrefix("pimac-account:")
+    }
+    queuedDialogs.removeAll {
+      $0.source === source && matches($0.dialog.id) && !ids.contains($0.dialog.id)
+    }
     if let presentedDialog, presentedDialog.source === source,
-      !ids.contains(presentedDialog.dialog.id)
+      matches(presentedDialog.dialog.id), !ids.contains(presentedDialog.dialog.id)
     {
       self.presentedDialog = nil
       dialog = nil
@@ -108,6 +116,7 @@ final class ExtensionUIModel: ObservableObject {
 
   var dialogSourceLabel: String {
     guard let source = presentedDialog?.source else { return "Pi 扩展" }
+    if presentedDialog?.dialog.id.hasPrefix("pimac-account:") == true { return "PiMac 账户管理" }
     let project = source.projectURL?.lastPathComponent ?? "未选择项目"
     return source.sessionName.isEmpty ? project : "\(project) · \(source.sessionName)"
   }

@@ -78,7 +78,6 @@ struct ContentView: View {
   @State private var showingSettings = false
   @State private var showingModelSettings = false
   @State private var showingScheduledTasks = false
-  @State private var gitContext: GitWorkspaceContext?
   @State private var selectedPage: MainPage = .conversation
   @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
@@ -217,9 +216,6 @@ struct ContentView: View {
     }
     .sheet(isPresented: $showingScheduledTasks) {
       ScheduledTasksView(workspace: workspace)
-    }
-    .sheet(item: $gitContext) { context in
-      GitWorkspaceView(store: workspace.git, server: workspace.server, context: context)
     }
     .sheet(isPresented: $showingModelSettings) {
       ModelSettingsView()
@@ -1482,11 +1478,15 @@ struct ContentView: View {
         .modifier(ComposerControlChrome())
         .disabled(app.isBusy)
         .help("压缩上下文")
-        ComposerGitButton(server: workspace.server, hasProject: app.projectURL != nil) {
+        ComposerGitButton(
+          server: workspace.server, store: workspace.git,
+          hasProject: workspace.selectedGitDirectory != nil
+        ) {
           guard let cwd = workspace.selectedGitDirectory else { return }
-          gitContext = GitWorkspaceContext(
+          let context = GitWorkspaceContext(
             cwd: cwd, threadID: app.threadID,
             projectID: app.projectURL.flatMap { workspace.server.projectID(for: $0) })
+          Task { await workspace.git.publish(client: workspace.server, context: context) }
         }
         Spacer(minLength: 8)
         let promptIsEmpty =
@@ -1867,19 +1867,39 @@ private struct ServerConnectionBadge: View {
 
 private struct ComposerGitButton: View {
   @ObservedObject var server: T3DesktopClient
+  @ObservedObject var store: GitWorkspaceStore
   let hasProject: Bool
-  let openGit: () -> Void
+  let publish: () -> Void
 
   var body: some View {
-    Button(action: openGit) {
-      Label("Git", systemImage: "arrow.triangle.branch").font(.caption)
+    HStack(spacing: 6) {
+      Button(action: publish) {
+        HStack(spacing: 5) {
+          if store.busy {
+            ProgressView().controlSize(.mini)
+          } else {
+            Image(systemName: "arrow.up.circle")
+          }
+          Text(store.busy ? "提交推送中" : "提交并推送")
+        }
+        .font(.caption)
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+      .modifier(ComposerControlChrome())
+      .disabled(!hasProject || !server.isConnected || store.busy || store.loading)
+      .help("一键暂存当前工作区全部改动、AI 生成提交说明、提交并推送；不强推")
+      .accessibilityLabel("一键暂存、生成提交说明、提交并推送")
+      if !store.progress.isEmpty || !store.message.isEmpty {
+        Text(store.busy ? store.progress : store.message)
+          .font(.caption2)
+          .foregroundStyle(store.requiresRefresh ? Color.orange : Color.secondary)
+          .lineLimit(1)
+          .truncationMode(.tail)
+          .frame(maxWidth: 180, alignment: .leading)
+          .help(store.busy ? store.progress : store.message)
+      }
     }
-    .buttonStyle(.plain)
-    .foregroundStyle(.secondary)
-    .modifier(ComposerControlChrome())
-    .disabled(!hasProject || !server.isConnected)
-    .help("查看当前线程工作区的分支与变更")
-    .accessibilityLabel("源代码管理")
   }
 }
 

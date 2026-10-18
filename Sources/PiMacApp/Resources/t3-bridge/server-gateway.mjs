@@ -7,9 +7,8 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { acquireChildLease } from './child-lease.mjs';
 import { isLoopbackPeer } from './network.mjs';
-import { startPiServer } from './vendor/t3-server.mjs';
+import { startPiServer, createAccountRuntime } from './vendor/t3-server.mjs';
 import { createLANListener } from './lan-listener.mjs';
-import { createPiAccountManagement } from './pi-account-management.mjs';
 
 const json = (res, status, value) => {
   if (res.writableEnded) return;
@@ -37,11 +36,11 @@ function identity(directory) {
   if (!state.isFile() || state.uid !== process.getuid() || (state.mode & 0o077) || state.size > 100) throw new Error('Unsafe environment identity');
   const id = fs.readFileSync(file, 'utf8'); if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('Invalid environment identity'); return id;
 }
-export async function createServerGateway({ token, directory, publicEndpoint, piConfig, onFailure, signal }) {
+export async function createServerGateway({ token, directory, publicEndpoint, piConfig, onFailure, signal, accountRuntime }) {
   if (!/^[a-f0-9]{64}$/.test(token ?? '')) throw new Error('Invalid supervisor token');
   const expected = Buffer.from('Bearer ' + token);
   let official, lan, closed = false;
-  const piAccounts = createPiAccountManagement();
+  const piAccounts = accountRuntime ?? createAccountRuntime({ binaryPath: piConfig?.binaryPath ?? 'pi' });
   const server = http.createServer((req, res) => {
     const supplied = Buffer.from(req.headers.authorization ?? '');
     if (!isLoopbackPeer(req.socket.remoteAddress) || req.headers.origin !== undefined ||
@@ -78,6 +77,8 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
         const sessionSelection = official.broker.accountSelections.read(body.threadID, body.provider);
         return json(res, 200, { payload: JSON.stringify({ ...payload, sessionSelection }) });
       }
+      if (route === 'POST /internal/auth/account-monitor-refresh') { void piAccounts.tick('wake'); return json(res, 200, { ok: true }); }
+      if (route === 'POST /internal/auth/account-control') return json(res, 200, { payload: JSON.stringify(piAccounts.control(body)) });
       if (route === 'POST /internal/auth/model-preferences') return json(res, 200, await manager.modelPreferences(body));
       if (route === 'POST /internal/auth/model-context') return json(res, 200, await manager.modelContext(body));
       if (route === 'POST /internal/auth/text-generation-model') return json(res, 200, await manager.textGenerationModel(body));
@@ -89,11 +90,12 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
   });
   server.requestTimeout = 15000; server.headersTimeout = 10000;
   const close = async () => {
-    if (closed) return; closed = true; piAccounts.close(); server.close(); server.closeAllConnections(); await lan?.close(); await official?.close();
+    if (closed) return; closed = true; server.close(); server.closeAllConnections(); await piAccounts.close(); await lan?.close(); await official?.close();
   };
   try {
-    official = await startPiServer({ directory: path.join(directory, 'server-owned'), environmentId: identity(directory), piConfig, signal,
+    official = await startPiServer({ directory: path.join(directory, 'server-owned'), environmentId: identity(directory), piConfig, signal, accounts: piAccounts,
       onFailure: () => { void close(); onFailure?.(); } });
+    piAccounts.start();
     lan = createLANListener({ localURL: official.localURL });
     if (publicEndpoint) await lan.configure(publicEndpoint);
     return { server, serverURL: official.localURL, official, lan, close };

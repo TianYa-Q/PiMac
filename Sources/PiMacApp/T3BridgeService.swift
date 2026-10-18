@@ -12,6 +12,7 @@ final class T3BridgeService: ObservableObject {
   private let stateDirectory: URL?
   private let startupTimeout: Duration
   private var startupWatchdog: Task<Void, Never>?
+  private var wakeObservation: AnyCancellable?
   private var stoppingPID: Int32?
   private var stoppingProcess: Process?
   @Published private(set) var serverURL: URL?
@@ -48,6 +49,16 @@ final class T3BridgeService: ObservableObject {
     self.startupTimeout = startupTimeout
     // Legacy endpoint data is not reused; current LAN policy owns address selection.
     defaults.removeObject(forKey: "t3RememberedNetworkEndpoint")
+    wakeObservation = NSWorkspace.shared.notificationCenter.publisher(
+      for: NSWorkspace.didWakeNotification
+    ).sink { [weak self] _ in
+      Task { @MainActor [weak self] in
+        guard let self, self.port != nil else { return }
+        struct Response: Decodable { let ok: Bool }
+        let _: Response? = try? await self.admin(
+          "account-monitor-refresh", method: "POST", body: [:])
+      }
+    }
   }
 
   private var process: Process?
@@ -318,6 +329,16 @@ final class T3BridgeService: ObservableObject {
       ])
     return try JSONSerialization.jsonObject(with: Data(response.payload.utf8)) as? [String: Any]
       ?? [:]
+  }
+
+  func accountControl(_ input: [String: Any]) async throws -> [String: Any] {
+    struct Response: Decodable { let payload: String }
+    let response: Response = try await admin("account-control", method: "POST", body: input)
+    guard
+      let value = try JSONSerialization.jsonObject(with: Data(response.payload.utf8))
+        as? [String: Any]
+    else { throw ServiceError.managementFailed }
+    return value
   }
 
   func desktopCredential() async throws -> String {

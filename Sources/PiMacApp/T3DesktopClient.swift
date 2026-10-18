@@ -15,6 +15,7 @@ final class T3DesktopClient: ObservableObject {
   let textGenerationModels = TextGenerationModelStore()
   var modelContextWindows: [String: Int] { modelContextSettings.overrides }
   var onShell: ((JSON) -> Void)?
+  var onAccountPoll: (() -> Void)?
   var onTaskStatus: ((TaskStatusTracker.Event) -> Void)?
   private var taskStatusTracker = TaskStatusTracker()
   private weak var service: T3BridgeService?
@@ -129,6 +130,8 @@ final class T3DesktopClient: ObservableObject {
             phase = "读取会话状态"
             try await self.refresh()
             if !self.isConnected { self.isConnected = true }
+            // 额度可在没有任何会话变化时更新，不依赖 shell 的内容去重回调。
+            self.onAccountPoll?()
             if self.status != "T3 Server 已连接" { self.status = "T3 Server 已连接" }
           }
         } catch {
@@ -503,6 +506,11 @@ final class T3DesktopClient: ObservableObject {
     else { return nil }
     return try await service.accountStatus(
       threadID: threadID, provider: provider, force: force, selectionOnly: selectionOnly)
+  }
+
+  func accountControl(_ input: JSON) async throws -> JSON {
+    guard let service else { throw ClientError.unavailable }
+    return try await service.accountControl(input)
   }
 
   func requestRefresh() {

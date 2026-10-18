@@ -11,6 +11,8 @@
 
 > **源码架构更新：**已迁移至官方 main 的 Pi Provider 和 orchestration protocol 2。支持原生扩展对话、/compact 和 steering；旧私有账户状态、Fast/独立压缩模型和工具富输出不再提供。下方发行版说明不代表当前源码功能对等；真实历史升级和手机验收仍待完成。以[当前架构与限制](docs/t3-server-migration.md)为准。
 
+> **账户职责迁移：** PiMac 独立负责账户登录／管理、后台额度监测与激活，不再依赖 Pi 会话。扩展仅保留会话认证、切换和安全轮换，旧 Pi `/usage` 命令与管理菜单已移除。详见[账户职责与诊断](extensions/account-usage/README.md)。
+
 ![Pi Mac 主界面](docs/images/pi-mac-overview-new.png)
 
 ## 功能特性
@@ -47,7 +49,7 @@
 - OpenAI Responses / Codex 模型支持 Fast 开关（优先处理，可能消耗更多额度，不改变思考等级）；偏好跨重启保留，桌面与 Telegram 共用，不修改全局 Pi 配置
 - 支持 Pi 扩展提供的选择、确认、输入和编辑对话框
 - 账户额度卡显示实际采样年龄、过期／时钟异常提示与刷新进度；账户管理支持搜索（超过四个账户时）与只读健康检查，旧对话框不能操作切换后的会话／provider。详见[快照与生命周期加固](docs/account-snapshot-lifecycle.md)。
-- 内置维护的 [account-usage](extensions/account-usage/README.md) 支持 OpenAI ChatGPT / Codex 多账户与 Gemini 额度；凭据、默认账户和额度按 provider 隔离，API Key 不会被自动覆盖
+- PiMac 独立管理 OpenAI ChatGPT / Codex 多账户、Gemini 额度展示与后台激活；[会话适配扩展](extensions/account-usage/README.md) 仅负责会话执行，凭据、默认账户和额度按 provider 隔离，API Key 不会被自动覆盖
 - 自动切换与周额度负载平衡由 `account-usage` Pi 扩展执行，不依赖 PiMac UI。托管 OAuth 账户的 5h 剩余额度低于 5%（或周额度不高于 5%）时，在安全边界切换到可用账户；按周剩余额度与距离重置的天数分配消耗，采用 1.5 倍差距与 10 分钟冷却防抖。跳过隐藏、过期、额度未知或报错的候选；不替换未托管 API key。自动切换只更新当前会话绑定，不改其他会话或新会话默认账户。执行中等待工具完成后的 turn 边界，不中断请求、不重放提示；已确认额度错误且切换成功时最多自动续跑一次，取消、其他错误或切换失败不续跑。无可用账户保持不变。详见 [扩展说明](extensions/account-usage/README.md)。
 - 直接复用 `~/.pi/agent` 中已有的登录、模型、Skills、扩展与配置
 
@@ -74,14 +76,14 @@
 1. 从 [GitHub Releases](https://github.com/TianYa-Q/PiMac/releases/latest) 下载最新的 `Pi-Mac-vX.Y.Z.zip`。
 2. 解压后，将 **Pi Mac.app** 移入“应用程序”目录。
 3. 确保已经安装并登录 Pi。
-4. 如需账户管理与额度显示，从本项目安装统一维护的 `account-usage`（新版 OpenAI 需要 Pi 0.99.1+）：
+4. 如需会话认证、切换与自动轮换，从本项目安装会话适配扩展 `account-usage`（新版 OpenAI 需要 Pi 0.99.1+）：
 
    ```bash
    npm --prefix extensions/account-usage ci --ignore-scripts
    ./scripts/link-account-usage.sh
    ```
 
-   已安装旧版时请先备份/移除旧安装，避免重复加载。选中 `openai` 模型后用 `/accounts` 登录 ChatGPT；legacy Codex token 不会自动迁移。账户数据仍在 `~/.pi/agent/`，不写入项目。更新后重启 Pi / 重新连接会话；完整验证运行 `./scripts/check.sh`。
+   已安装旧版时请先备份/移除旧安装，避免重复加载。选中 `openai` 模型后通过 PiMac 账户管理登录 ChatGPT；legacy Codex token 不会自动迁移。账户数据仍在 `~/.pi/agent/`，不写入项目。更新后重启 Pi / 重新连接会话；完整验证运行 `./scripts/check.sh`。
 
 > 当前 Release 使用 ad-hoc 签名，尚未经过 Apple 公证。macOS 首次拦截时，请在 Finder 中右键应用并选择“打开”，或前往“系统设置 → 隐私与安全性”确认打开。
 

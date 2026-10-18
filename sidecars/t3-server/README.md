@@ -157,5 +157,24 @@ and returns them through the private desktop account-status socket. Lightweight
 selection reads are independent of the 60/180-second quota refresh cadence; they
 never infer a binding from global `auth.json` or the future-session default.
 
+## Account runtime ownership
+
+`account-runtime.ts` is owned by the PiMac gateway, not by a Pi conversation.
+It starts fixed one-minute checks when the supervised Server becomes ready and
+stops/drains with the gateway. Startup and macOS wake trigger a catch-up sample.
+Desktop account queries, background checks and mobile limits use this same runtime.
+Private account-control IPC presents native dialogs without sending `/accounts`
+to a thread. Login reuses the installed Pi's official OAuth implementation and
+a stable PiMac device ID; managed credential refreshes use the shared locked store.
+Global native auth remains Pi-owned and is never replaced by a host login.
+
+Only session authentication, session-local switching, boundary-safe rotation and
+one confirmed-quota-error continuation remain in the extension. Sessions read
+validated, identity-keyed host snapshots, never query quotas or send `你好`.
+The host records eligibility, skip reasons and results in the private bounded
+`pimac-account-monitor.jsonl`; see `extensions/account-usage/README.md` for policy,
+retry behavior and storage details. The reusable storage/policy library remains
+shared rather than duplicating credential parsing in Swift.
+
 See `docs/t3-server-migration.md` for capabilities, limitations and acceptance
 boundaries, and `docs/t3-upstream-maintenance.md` for the upgrade and patch audit. Protocol-fixture tests do not prove real-model or App Store acceptance.

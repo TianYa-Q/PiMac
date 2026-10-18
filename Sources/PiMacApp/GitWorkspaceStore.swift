@@ -163,6 +163,92 @@ final class GitWorkspaceStore: ObservableObject {
     }
   }
 
+  /// 自动流程不传 commitMessage/filePaths，让上游根据整个工作区生成说明并暂存全部变更。
+  /// 从读取状态到最终核验始终持有 busy，避免双击、切换工作区刷新或开发热载打断流程。
+  @discardableResult
+  func publish(client: T3DesktopClient, context: GitWorkspaceContext) async -> Bool {
+    await publish(context: context) { method, payload in
+      if method != "git.runStackedAction" {
+        return try await client.gitRPC(method, payload: payload)
+      }
+      return try await client.gitAction(payload: payload) { [weak self] event in
+        self?.updateProgress(event)
+      }
+    }
+  }
+
+  @discardableResult
+  func publish(
+    context: GitWorkspaceContext,
+    rpc: (String, [String: Any]) async throws -> [String: Any]
+  ) async -> Bool {
+    guard !busy, !loading, !Task.isCancelled else { return false }
+    busy = true
+    progress = "正在检查工作区…"
+    defer {
+      busy = false
+      progress = ""
+    }
+    await refreshSnapshot(cwd: context.cwd, rpc: rpc, reconcilingMutation: true)
+    guard !requiresRefresh, !Task.isCancelled, let status else { return false }
+    guard status.isRepo else {
+      message = "当前工作区不是 Git 仓库。"
+      return false
+    }
+    guard status.branch != nil else {
+      message = "当前处于 detached HEAD，请先在 VS Code 切换到分支。"
+      return false
+    }
+    if status.files.isEmpty && status.ahead == 0 && status.hasUpstream {
+      message = "没有需要提交或推送的改动。"
+      return true
+    }
+    var payload: [String: Any] = [
+      "cwd": context.cwd, "action": "commit_push", "actionId": UUID().uuidString,
+    ]
+    if let threadID = context.threadID { payload["threadId"] = threadID }
+    if let projectID = context.projectID { payload["projectId"] = projectID }
+    progress = "正在暂存并生成提交说明…"
+    do {
+      try Task.checkCancellation()
+      let result = try await rpc("git.runStackedAction", payload)
+      // 必须收到明确的提交/推送结果，不能把缺失或损坏的结果当作成功。
+      guard result["action"] as? String == "commit_push",
+        let commit = result["commit"] as? [String: Any],
+        let commitStatus = commit["status"] as? String,
+        ["created", "skipped_no_changes"].contains(commitStatus),
+        let push = result["push"] as? [String: Any],
+        let pushStatus = push["status"] as? String,
+        ["pushed", "skipped_up_to_date"].contains(pushStatus)
+      else { throw GitWorkspaceStatus.InvalidSnapshot.malformed }
+      await refreshSnapshot(cwd: context.cwd, rpc: rpc, reconcilingMutation: true)
+      if requiresRefresh {
+        message = "Server 已完成提交并推送，但状态刷新失败；请核对后再操作。"
+        return false
+      }
+      message = commitStatus == "created" ? "已提交并推送。" : "已推送，工作区没有新增提交。"
+      return true
+    } catch {
+      requiresRefresh = true
+      message = "流程未完成或结果未确认，未自动重试。可能已生成本地提交，请在 VS Code 核对；再次点击会先刷新状态。"
+      return false
+    }
+  }
+
+  private func updateProgress(_ event: [String: Any]) {
+    // 不展示 hook 输出或任意服务端文本，避免凭据随错误/进度泄露。
+    switch event["phase"] as? String {
+    case "branch": progress = "正在准备分支…"
+    case "commit":
+      progress =
+        event["label"] as? String == "Generating commit message..."
+        ? "正在暂存并生成提交说明…" : "正在提交（包括 Git hooks）…"
+    case "push": progress = "正在推送…"
+    case "pr": progress = "正在创建 Pull Request…"
+    default: break
+    }
+  }
+
   static func actionPayload(cwd: String, action: String, message: String, files: Set<String>)
     -> [String: Any]?
   {
@@ -199,14 +285,7 @@ final class GitWorkspaceStore: ObservableObject {
         return try await client.gitRPC(method, payload: payload)
       }
       return try await client.gitAction(payload: payload) { [weak self] event in
-        // Hook output may contain secrets; show only fixed progress categories.
-        switch event["phase"] as? String {
-        case "branch": self?.progress = "正在准备分支…"
-        case "commit": self?.progress = "正在提交（包括 Git hooks）…"
-        case "push": self?.progress = "正在推送…"
-        case "pr": self?.progress = "正在创建 Pull Request…"
-        default: break
-        }
+        self?.updateProgress(event)
       }
     }
   }

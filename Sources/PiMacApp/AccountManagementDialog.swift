@@ -12,6 +12,7 @@ struct AccountManagementPresentation {
   let provider: String
   let accounts: [Account]
   let supportsHealthCheck: Bool
+  let isHostManaged: Bool
 
   func filteredAccounts(query: String) -> [Account] {
     let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -35,6 +36,7 @@ struct AccountManagementPresentation {
       options.filter({ $0 == "健康检查" }).count <= 1
     else { return nil }
     supportsHealthCheck = options.contains("健康检查")
+    isHostManaged = dialog.id.hasPrefix("pimac-account:")
     let lines = dialog.title.components(separatedBy: "\n")
     switch lines.first {
     case "Codex legacy 多账户管理": provider = "Codex legacy"
@@ -120,9 +122,14 @@ struct AccountManagementDialogView: View {
 
       VStack(spacing: 10) {
         HStack(spacing: 10) {
-          action("切换账户", icon: "arrow.triangle.2.circlepath", prominent: true, detail: "下一步选择要使用的账户")
-            .disabled(presentation.accounts.isEmpty)
-          action("登录新账户", icon: "person.badge.plus", prominent: presentation.accounts.isEmpty,
+          action(
+            "切换账户", icon: "arrow.triangle.2.circlepath", prominent: true,
+            label: presentation.isHostManaged ? "新会话默认账户" : "切换账户",
+            detail: presentation.isHostManaged ? "仅影响之后创建的会话" : "下一步选择要使用的账户"
+          )
+          .disabled(presentation.accounts.isEmpty)
+          action(
+            "登录新账户", icon: "person.badge.plus", prominent: presentation.accounts.isEmpty,
             label: presentation.loginTitle, detail: "添加账户并完成授权")
         }
         HStack(spacing: 10) {
@@ -132,13 +139,19 @@ struct AccountManagementDialogView: View {
         }
       }
 
-      Text("当前会话用于此会话；新会话默认用于以后创建的会话。")
-        .font(.caption).foregroundStyle(.secondary)
+      Text(
+        presentation.isHostManaged
+          ? "PiMac 持续检查额度与自动激活，不依赖 Pi 会话。当前会话切换请使用额度卡片。"
+          : "当前会话用于此会话；新会话默认用于以后创建的会话。"
+      )
+      .font(.caption).foregroundStyle(.secondary)
 
       Text(
-        presentation.provider == "Codex legacy"
-          ? "新版登录请先选择 openai 模型。Legacy 与新版凭据分开保存，不能直接迁移。"
-          : "使用 Pi 原生 ChatGPT OAuth 登录新版凭据，不会自动覆盖 API Key。"
+        presentation.isHostManaged
+          ? "使用已安装 Pi 的官方 OAuth 完成授权；Legacy 与新版凭据分开保存，不覆盖 API Key。"
+          : presentation.provider == "Codex legacy"
+            ? "新版登录请先选择 openai 模型。Legacy 与新版凭据分开保存，不能直接迁移。"
+            : "使用 Pi 原生 ChatGPT OAuth 登录新版凭据，不会自动覆盖 API Key。"
       )
       .font(.caption).foregroundStyle(.secondary)
 
@@ -199,8 +212,7 @@ struct AccountManagementDialogView: View {
 
   private func action(
     _ title: String, icon: String, prominent: Bool = false, label: String? = nil, detail: String
-  ) -> some View
-  {
+  ) -> some View {
     Button {
       answer(title)
     } label: {
