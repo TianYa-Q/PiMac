@@ -38,10 +38,14 @@ final class TranscriptCache {
       return
     }
     remove(path)
+    // 拆分累计表达式，避免发布环境 Swift 编译器在嵌套 reduce 中类型推断超时。
     let cost = entries.reduce(0) { total, entry in
-      total + 256 + entry.id.utf8.count + entry.title.utf8.count + entry.text.utf8.count
-        + (entry.toolInput?.utf8.count ?? 0) + (entry.diff?.utf8.count ?? 0)
-        + entry.attachments.reduce(0) { $0 + 128 + $1.url.absoluteString.utf8.count }
+      let textBytes = entry.id.utf8.count + entry.title.utf8.count + entry.text.utf8.count
+      let toolBytes = (entry.toolInput?.utf8.count ?? 0) + (entry.diff?.utf8.count ?? 0)
+      let attachmentBytes = entry.attachments.reduce(0) { bytes, attachment in
+        bytes + 128 + attachment.url.absoluteString.utf8.count
+      }
+      return total + 256 + textBytes + toolBytes + attachmentBytes
     }
     guard !entries.isEmpty, cost <= maximumBytes, maximumSessions > 0 else { return }
     snapshots[path] = Snapshot(key: key, entries: entries, cost: cost)
