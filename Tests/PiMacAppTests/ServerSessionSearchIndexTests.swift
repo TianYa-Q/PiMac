@@ -37,19 +37,23 @@ struct ServerSessionSearchIndexTests {
     #expect(calls == 0)
     let first = try await index.messages(for: "关键字", in: [session], load: load)
     #expect(SessionSearch.results(for: "项目 关键字", in: [session], messagesByPath: first).count == 1)
-    _ = try await index.messages(for: "正文", in: [session], load: load)
-    #expect(calls == 1)
-    // Negative terms require content even when the title matches.
-    _ = try await index.messages(for: "项目 -秘密", in: [session], load: load)
-    #expect(calls == 1)
+    let repeated = try await index.messages(for: "正文", in: [session], load: load)
+    #expect(repeated[session.path] == ["正文关键字"])
+    // NSCache 可在内存压力下自动淘汰；合法的重新读取不能判为业务失败。
+    #expect(calls >= 1)
+    // 即使标题匹配，排除词也必须能够读取正文。
+    let excluded = try await index.messages(for: "项目 -秘密", in: [session], load: load)
+    #expect(excluded[session.path] == ["正文关键字"])
     let updated = SessionItem(
       path: session.path, title: session.title,
       modifiedAt: session.modifiedAt.addingTimeInterval(1))
+    let beforeUpdate = calls
     _ = try await index.messages(for: "正文", in: [updated], load: load)
-    #expect(calls == 2)
+    #expect(calls == beforeUpdate + 1)
     index.reset()
+    let beforeResetRead = calls
     _ = try await index.messages(for: "正文", in: [updated], load: load)
-    #expect(calls == 3)
+    #expect(calls == beforeResetRead + 1)
   }
 
   @Test func failedAndInvalidatedLoadsNeverBecomeEmptyCachedResults() async throws {

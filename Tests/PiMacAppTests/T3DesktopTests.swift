@@ -211,7 +211,8 @@ struct T3DesktopTests {
     // This is the same shutdown barrier used by development hot reload.
     #expect(await service.stopAndWait())
     let marker = state.appendingPathComponent("child-owner.json")
-    #expect(!FileManager.default.fileExists(atPath: marker.path))
+    // 超时强制退出可保留诊断 PID 文件；真正的停止屏障是进程退出与内核租约释放。
+    #expect(T3BridgeStateLease.isAvailable(state.appendingPathComponent("child-owner.lock")))
     #expect(!service.isStopping)
     for _ in 0..<100 where client.isConnected {
       try await Task.sleep(for: .milliseconds(50))
@@ -325,7 +326,7 @@ struct T3DesktopTests {
     #expect(!model.canManageAccounts)
   }
 
-  @Test(.timeLimit(.minutes(1)))
+  @Test(.timeLimit(.minutes(2)))
   func desktopUsesNativeLoopbackServerWithoutPublicAdministration() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -495,6 +496,11 @@ struct T3DesktopTests {
     let stoppedRun = try #require(
       runs?.last { T3V2Presentation.active.contains($0["status"] as? String ?? "") }?["id"]
         as? String)
+    // 执行中状态可能先于 dispatch 回执投影，不能在上一次提交仍锁定时发送后续消息。
+    for _ in 0..<200 where !model.canSubmitPrompt {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    try #require(model.canSubmitPrompt)
     model.composerText = "must-remain-queued"
     model.sendPrompt(delivery: .followUp)
     for _ in 0..<200 where model.queuedPrompts.isEmpty {

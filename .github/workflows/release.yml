@@ -47,8 +47,9 @@ jobs:
       - name: Prepare T3 Server resources
         run: ./scripts/prepare-t3-server.sh
 
+      # 原生窗口测试及多个真实 Server fixture 不在 CI 上争抢同一宿主资源。
       - name: Test
-        run: swift test
+        run: swift test --no-parallel
 
       - name: Build app
         env:

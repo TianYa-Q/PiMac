@@ -105,6 +105,11 @@ struct FastModeTests {
     #expect(records.contains("/pimac-fast on"))
     model.changeFastMode(to: false)
     try await waitForOption("off")
+    // Shell 已持久化不代表线程投影已解除 pendingSelection；等待桌面入口真正可发送。
+    for _ in 0..<400 where !model.canSubmitPrompt {
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    try #require(model.canSubmitPrompt)
     model.composerText = "Normal request"
     model.sendPrompt()
     for _ in 0..<200 {

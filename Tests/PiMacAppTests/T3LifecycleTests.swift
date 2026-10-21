@@ -27,7 +27,8 @@ struct T3LifecycleTests {
       return Int32(try #require(record["pid"] as? Int))
     }
     try startT3ProtocolFixture(
-      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model")
+      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model"
+    )
     for _ in 0..<200 where service.serverURL == nil {
       try await Task.sleep(for: .milliseconds(50))
     }
@@ -41,7 +42,8 @@ struct T3LifecycleTests {
     #expect(await service.stopAndWait())
     #expect(FileManager.default.fileExists(atPath: marker.path))
     try startT3ProtocolFixture(
-      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model")
+      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model"
+    )
     for _ in 0..<200 where service.serverURL == nil {
       try await Task.sleep(for: .milliseconds(50))
     }
@@ -54,7 +56,7 @@ struct T3LifecycleTests {
     #expect(await service.stopAndWait())
     #expect(await service.stopAndWait())
     #expect(!service.isStopping)
-    #expect(!FileManager.default.fileExists(atPath: marker.path))
+    // SIGKILL 可留下诊断文件；所有权只由内核锁决定，不把文件残留误判为进程仍存活。
     #expect(T3BridgeStateLease.isAvailable(root.appendingPathComponent("child-owner.lock")))
   }
 
@@ -74,7 +76,8 @@ struct T3LifecycleTests {
       workspace.disconnectAll()
     }
     try startT3ProtocolFixture(
-      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model")
+      service: service, workspace: workspace, stateDirectory: root, binary: nil, model: "test/model"
+    )
     for _ in 0..<100 where !service.status.contains("启动超时") {
       try await Task.sleep(for: .milliseconds(20))
     }
