@@ -1,5 +1,4 @@
 import AppKit
-import SwiftUI
 import Testing
 
 @testable import PiMacApp
@@ -29,16 +28,24 @@ struct MessageQuoteTests {
     #expect(stale.text == "> 新引用\n\n")
   }
 
-  @MainActor @Test func readsNativeSwiftUISelectionWithoutClipboardChanges() async throws {
+  @MainActor @Test func readsNativeSelectionWithoutClipboardChanges() throws {
     var selected = ""
-    let host = NSHostingView(
-      rootView:
-        VStack(spacing: 24) {
-          MarkdownView("第一段文字\n\n第二段文字")
-            .background { MessageSelectionReader { selected = $0 } }
-          Text("其他消息").textSelection(.enabled)
-        }
-        .frame(width: 400, height: 160))
+    // 用公开的 NSTextView 提供真实 AX 选区，避免依赖不同 macOS 的 SwiftUI 私有子视图结构。
+    // 本测试验证选区读取器的归属和剪贴板边界，不冒充 SwiftUI 手势端到端验收。
+    let host = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 160))
+    let textView = NSTextView(frame: NSRect(x: 0, y: 80, width: 400, height: 80))
+    textView.string = "第一段文字\n\n第二段文字"
+    textView.isEditable = false
+    textView.isSelectable = true
+    let otherView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 40))
+    otherView.string = "其他消息"
+    otherView.isEditable = false
+    otherView.isSelectable = true
+    let anchor = MessageSelectionReader.SelectionAnchor { selected = $0 }
+    anchor.frame = textView.frame
+    host.addSubview(textView)
+    host.addSubview(otherView)
+    host.addSubview(anchor)
     let window = NSWindow(
       contentRect: NSRect(x: 0, y: 0, width: 400, height: 160),
       styleMask: [.borderless], backing: .buffered, defer: false)
@@ -48,44 +55,15 @@ struct MessageQuoteTests {
       window.orderOut(nil)
       window.contentView = nil
     }
-    func descendants(_ view: NSView) -> [NSView] {
-      [view] + view.subviews.flatMap { descendants($0) }
-    }
-    // macOS 15 的 SwiftUI 选择层需挂窗后异步安装；按可观察的 AX 能力等待，不猜固定延迟。
-    for _ in 0..<100 {
-      host.layoutSubtreeIfNeeded()
-      if descendants(host).contains(where: {
-        ($0.accessibilityValue() as? String)?.contains("第一段文字") == true
-          && $0.isAccessibilitySelectorAllowed(
-            NSSelectorFromString("setAccessibilitySelectedTextRange:"))
-      }) {
-        break
-      }
-      try await Task.sleep(for: .milliseconds(50))
-    }
-    let views = descendants(host)
-    let textView = try #require(
-      views.first {
-        ($0.accessibilityValue() as? String)?.contains("第一段文字") == true
-          && $0.isAccessibilitySelectorAllowed(
-            NSSelectorFromString("setAccessibilitySelectedTextRange:"))
-      })
+    host.layoutSubtreeIfNeeded()
     let clipboardRevision = NSPasteboard.general.changeCount
     textView.setAccessibilitySelectedTextRange(NSRange(location: 0, length: 3))
-    let anchor = try #require(
-      views.compactMap { $0 as? MessageSelectionReader.SelectionAnchor }.first)
     anchor.refreshSelection()
     #expect(selected == "第一段")
     #expect(NSPasteboard.general.changeCount == clipboardRevision)
     textView.setAccessibilitySelectedTextRange(NSRange(location: 0, length: 0))
     anchor.refreshSelection()
     #expect(selected.isEmpty)
-    let otherView = try #require(
-      views.first {
-        ($0.accessibilityValue() as? String) == "其他消息"
-          && $0.isAccessibilitySelectorAllowed(
-            NSSelectorFromString("setAccessibilitySelectedTextRange:"))
-      })
     otherView.setAccessibilitySelectedTextRange(NSRange(location: 0, length: 4))
     anchor.refreshSelection()
     #expect(selected.isEmpty)
