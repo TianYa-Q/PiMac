@@ -157,12 +157,14 @@ struct T3DesktopTests {
     #expect(!client.providers.isEmpty)
     let projectID = try await client.ensureProject(root)
     let threadID = UUID().uuidString
-    try await client.dispatch([
-      "type": "thread.create", "threadId": threadID, "projectId": projectID,
-      "title": "Settlement transport", "modelSelection": ["instanceId": "pi", "model": "test/model"],
-      "runtimeMode": "full-access", "interactionMode": "default",
-      "branch": NSNull(), "worktreePath": NSNull(),
-    ], refreshAfter: false)
+    try await client.dispatch(
+      [
+        "type": "thread.create", "threadId": threadID, "projectId": projectID,
+        "title": "Settlement transport",
+        "modelSelection": ["instanceId": "pi", "model": "test/model"],
+        "runtimeMode": "full-access", "interactionMode": "default",
+        "branch": NSNull(), "worktreePath": NSNull(),
+      ], refreshAfter: false)
     try await client.refreshShell()
     #expect(client.thread(threadID) != nil)
     let firstOwner = UUID()
@@ -181,14 +183,16 @@ struct T3DesktopTests {
     #expect(secondDeliveries == 1)
     client.unwatch(owner: firstOwner)
     client.unwatch(owner: secondOwner)
-    try await client.dispatch([
-      "type": "thread.settle", "threadId": threadID,
-    ], refreshAfter: false)
+    try await client.dispatch(
+      [
+        "type": "thread.settle", "threadId": threadID,
+      ], refreshAfter: false)
     try await client.refreshShell()
     #expect(WorkspaceModel.isSettled(try #require(client.thread(threadID))))
-    try await client.dispatch([
-      "type": "thread.unsettle", "threadId": threadID, "reason": "user",
-    ], refreshAfter: false)
+    try await client.dispatch(
+      [
+        "type": "thread.unsettle", "threadId": threadID, "reason": "user",
+      ], refreshAfter: false)
     // 列表专用刷新也必须保留读取途中发出的后续请求，不能把旧快照当成写入确认。
     var shellFollowUp: Task<Void, Error>?
     client.onShell = { [weak client] snapshot in
@@ -356,8 +360,9 @@ struct T3DesktopTests {
     client.start(service: service)
     try await client.waitUntilReady()
     // 所有非 Pi 实例都已禁用；连 pending Codex 快照也不能触发原生探测。
-    #expect(!FileManager.default.fileExists(
-      atPath: root.appendingPathComponent("state/fixture-native-probes.log").path))
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("state/fixture-native-probes.log").path))
     let model = AppModel(startupProjectURL: root, continueLastSession: false)
     defer { model.disconnect() }
     model.attach(to: client)
@@ -365,7 +370,8 @@ struct T3DesktopTests {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(model.canSubmitPrompt)
-    #expect(model.currentSessionPath.hasPrefix("t3:"))
+    // 新聊天在首次发送前只保留本地状态，不应提前创建 Server 线程。
+    #expect(model.currentSessionPath.isEmpty)
     model.changeModel(to: "test/model")
     for _ in 0..<200 where model.isBusy { try await Task.sleep(for: .milliseconds(50)) }
     #expect(model.thinkingLevels.contains("xhigh"))
@@ -383,7 +389,12 @@ struct T3DesktopTests {
     let sent = try #require(model.messages.last)
     #expect(sent.kind == .user && sent.text == "tools")
     #expect(model.composerText.isEmpty)
-    model.apply(["thread": ["id": model.threadID!, "messages": []]])
+    // 首次发送异步创建线程；先等待身份可用，再模拟未包含本地回显的旧快照。
+    for _ in 0..<200 where model.threadID == nil {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    let threadID = try #require(model.threadID)
+    model.apply(["thread": ["id": threadID, "messages": []]])
     #expect(model.messages.last?.id == sent.id)  // 旧快照不能吞掉本地回显。
     for _ in 0..<200 where model.lastSettledTurnID == nil {
       try await Task.sleep(for: .milliseconds(50))
