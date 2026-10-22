@@ -9,8 +9,24 @@ final class AppModel: ObservableObject {
   let browserPreview = BrowserPreviewModel()
   @Published var connectionState: ConnectionState = .disconnected
   @Published var projectURL: URL?
-  @Published var messages: [ChatEntry] = []
+  @Published var messages: [ChatEntry] = [] {
+    didSet {
+      // 较早的工具结果也会原位更新，不能只按条数或末条消息判断失效。
+      conversationTimelineCache = nil
+    }
+  }
+  private var conversationTimelineCache:
+    (children: [ConversationSubagent], snapshot: ConversationTimelineSnapshot)?
   var conversationTurns: [ConversationTurn] { ConversationTurn.group(messages) }
+
+  func conversationTimeline(children: [ConversationSubagent]) -> ConversationTimelineSnapshot {
+    if let cache = conversationTimelineCache, cache.children == children {
+      return cache.snapshot
+    }
+    let snapshot = ConversationTimelineSnapshot(messages: messages, children: children)
+    conversationTimelineCache = (children, snapshot)
+    return snapshot
+  }
   @Published var models: [PiModel] = []
   @Published var allModels: [PiModel] = []
   @Published var modelDefaultThinkingLevels: [String: String] = [:]

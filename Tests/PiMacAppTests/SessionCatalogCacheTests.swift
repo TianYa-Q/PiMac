@@ -66,6 +66,112 @@ struct SessionCatalogCacheTests {
         == T3DesktopClient.date(row["latestMessageAt"]))
   }
 
+  @Test func globalOrderingAndSettlementProjectionsShareTheCatalogOrder() {
+    let cache = SessionCatalogCache()
+    cache.update(threads: [
+      ["id": "key-z", "projectId": "p", "activeOrderKey": "z"],
+      [
+        "id": "key-c", "projectId": "q", "activeOrderKey": "a",
+        "createdAt": "2026-05-01T00:00:00Z",
+      ],
+      [
+        "id": "key-b", "projectId": "p", "activeOrderKey": "a",
+        "createdAt": "2026-03-01T00:00:00Z",
+      ],
+      [
+        "id": "key-a", "projectId": "q", "activeOrderKey": "a",
+        "createdAt": "2026-01-01T00:00:00Z", "settledOverride": "settled",
+      ],
+      [
+        "id": "reopened", "projectId": "q", "createdAt": "2026-01-01T00:00:00Z",
+        "unsettledAt": "2026-04-01T00:00:00Z",
+      ],
+      [
+        "id": "recent", "projectId": "p", "createdAt": "2026-03-01T00:00:00Z",
+        "settledAt": "invalid-but-still-settled",
+      ],
+      ["id": "bad-b", "projectId": "q", "createdAt": "invalid"],
+      ["id": "bad-a", "projectId": "p", "createdAt": "invalid"],
+      ["id": "orphan", "createdAt": "2026-02-01T00:00:00Z"],
+      ["id": "archived", "projectId": "p", "archivedAt": "invalid"],
+    ])
+    #expect(
+      cache.sessions(projectID: nil, settled: false).map(\.path) == [
+        "t3:reopened", "t3:orphan", "t3:bad-a", "t3:bad-b", "t3:key-b", "t3:key-c", "t3:key-z",
+      ])
+    #expect(
+      cache.sessions(projectID: nil, settled: true).map(\.path) == [
+        "t3:recent", "t3:key-a",
+      ])
+    #expect(
+      cache.sessions(projectID: "p").map(\.path) == [
+        "t3:recent", "t3:bad-a", "t3:key-b", "t3:key-z",
+      ])
+    #expect(
+      cache.sessions(projectID: "q", settled: false).map(\.path) == [
+        "t3:reopened", "t3:bad-b", "t3:key-c",
+      ])
+    #expect(cache.sessions(projectID: "q", settled: true).map(\.path) == ["t3:key-a"])
+    #expect(cache.sessions(projectID: "missing", settled: false).isEmpty)
+  }
+
+  @Test func projectionsFollowMetadataMutationsAndRemoval() {
+    let cache = SessionCatalogCache()
+    var rows: [[String: Any]] = [
+      [
+        "id": "one", "projectId": "p", "title": "Before",
+        "createdAt": "2026-01-01T00:00:00Z",
+      ],
+      ["id": "two", "projectId": "q", "createdAt": "2026-02-01T00:00:00Z"],
+    ]
+    cache.update(threads: rows)
+    #expect(cache.sessions(projectID: nil, settled: false).map(\.path) == ["t3:two", "t3:one"])
+    rows[0]["projectId"] = "q"
+    rows[0]["title"] = "After"
+    rows[0]["unsettledAt"] = "2026-03-01T00:00:00Z"
+    rows[0]["latestMessageAt"] = "2026-04-01T00:00:00Z"
+    rows[1]["settledOverride"] = "settled"
+    cache.update(threads: rows)
+    #expect(cache.sessions(projectID: "p").isEmpty)
+    #expect(cache.sessions(projectID: "q").map(\.path) == ["t3:one", "t3:two"])
+    #expect(cache.sessions(projectID: nil, settled: false).first?.title == "After")
+    #expect(
+      cache.sessions(projectID: nil, settled: false).first?.modifiedAt
+        == Date(timeIntervalSince1970: 1_775_001_600))
+    #expect(cache.sessions(projectID: "q", settled: true).map(\.path) == ["t3:two"])
+    rows[1].removeValue(forKey: "settledOverride")
+    rows[1]["settledAt"] = "2026-04-01T00:00:00Z"
+    rows[0]["archivedAt"] = "2026-04-01T00:00:00Z"
+    cache.update(threads: rows)
+    #expect(cache.sessions(projectID: nil, settled: false).isEmpty)
+    #expect(cache.sessions(projectID: "q").map(\.path) == ["t3:two"])
+    rows[1].removeValue(forKey: "settledAt")
+    cache.update(threads: [rows[1]])
+    #expect(cache.sessions(projectID: nil, settled: true).isEmpty)
+    #expect(cache.sessions(projectID: "q", settled: false).map(\.path) == ["t3:two"])
+    cache.update(threads: [])
+    #expect(cache.sessions(projectID: nil, settled: false).isEmpty)
+    #expect(cache.sessions(projectID: "q").isEmpty)
+  }
+
+  @Test func missingAndMalformedMessageTimestampsRemainDistinct() {
+    let cache = SessionCatalogCache()
+    var row: [String: Any] = [
+      "id": "one", "projectId": "p", "createdAt": "2026-01-01T00:00:00Z",
+      "latestMessageAt": 123,
+    ]
+    cache.update(threads: [row])
+    #expect(cache.sessions(projectID: nil, settled: false).first?.modifiedAt == .distantPast)
+    row["latestMessageAt"] = NSNull()
+    cache.update(threads: [row])
+    #expect(
+      cache.sessions(projectID: nil, settled: false).first?.modifiedAt
+        == Date(timeIntervalSince1970: 1_767_225_600))
+    row["latestMessageAt"] = "invalid"
+    cache.update(threads: [row])
+    #expect(cache.sessions(projectID: "p").first?.modifiedAt == .distantPast)
+  }
+
   @Test func identicalCatalogDoesNotPublishAgain() {
     let model = AppModel(restoreLastProjectOnLaunch: false)
     let rows = [SessionItem(path: "t3:one", title: "One", modifiedAt: .distantPast)]

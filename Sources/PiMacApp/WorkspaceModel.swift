@@ -42,8 +42,7 @@ final class WorkspaceModel: ObservableObject {
       server.projectID(for: URL(fileURLWithPath: $0))
     }
     if projectFilterPath != nil && projectID == nil { return [] }
-    return Self.sessionCatalog(
-      threads: server.threads.filter { Self.isSettled($0) == settled }, projectID: projectID)
+    return server.sessions(projectID: projectID, settled: settled)
   }
 
   func project(forSessionPath path: String) -> WorkspaceProject? {

@@ -89,6 +89,10 @@ final class T3DesktopClient: ObservableObject {
   func sessions(projectID: String) -> [SessionItem] {
     sessionCatalog.sessions(projectID: projectID)
   }
+
+  func sessions(projectID: String?, settled: Bool) -> [SessionItem] {
+    sessionCatalog.sessions(projectID: projectID, settled: settled)
+  }
   private var syncedModelPreferences: Data?
   private let session: URLSession = {
     let config = URLSessionConfiguration.ephemeral

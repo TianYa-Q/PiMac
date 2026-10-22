@@ -1160,18 +1160,16 @@ struct ContentView: View {
       app.threadID.map {
         ConversationSubagent.children(parentID: $0, threads: workspace.server.threads)
       } ?? []
-    let rows = ConversationTimelineRow.build(messages: app.messages, children: children)
-    let activeTurnID = rows.reversed().compactMap { row -> String? in
-      if case .turn(let turn) = row { return turn.id }
-      return nil
-    }.first
+    let timeline = app.conversationTimeline(children: children)
+    let rows = timeline.rows
+    let activeTurnID = timeline.lastTurnID
 
     return GeometryReader { viewport in
       ScrollViewReader { proxy in
         ScrollView {
           VStack(alignment: .leading, spacing: 14) {
             VirtualConversationStack(
-              ids: rows.map(\.id),
+              ids: timeline.rowIDs,
               pinnedToBottom: conversationScrollMode == .pinnedToBottom
             ) { index in
               switch rows[index] {
