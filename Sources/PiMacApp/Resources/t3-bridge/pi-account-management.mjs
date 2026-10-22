@@ -5,7 +5,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { boundedJSON, discardBody } from './bounded-json.mjs';
 
-const providers = new Set(['openai', 'openai-codex', 'antigravity']);
+const providers = new Set(['openai', 'openai-codex']);
 const MAX_BYTES = 256 * 1024;
 function privateJSON(file) {
   let fd;
@@ -43,96 +43,9 @@ function window(value) {
 }
 export function createPiAccountManagement({ agentDirectory = process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent'), fetchImpl = fetch, now = Date.now, resolveCredential = async (_provider, _name, credential, _signal, _force) => credential } = {}) {
   const cache = new Map(), pending = new Map(), successfulAccounts = new Map();
-  let successfulGemini;
   const controller = new AbortController();
   // Private identity digests never cross IPC. Names alone cannot identify a login.
   const identity = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-  async function queryGemini(auth, provider) {
-    const credential = auth.antigravity;
-    const key = credential?.type === 'oauth'
-      ? identity([credential.access, credential.projectId]) : undefined;
-    if (successfulGemini?.key !== key) successfulGemini = undefined;
-    const previous = successfulGemini;
-    const result = await queryGeminiUncached(auth, provider);
-    if (result.kind === 'loaded') successfulGemini = { key, result };
-    else if (result.error && previous) {
-      return { ...result, quotas: previous.result.quotas,
-        capturedAt: previous.result.capturedAt };
-    }
-    return result;
-  }
-  async function queryGeminiUncached(auth, provider) {
-    const credential = auth.antigravity;
-    const status = { kind: 'unconfigured', isActive: provider === 'antigravity', quotas: [] };
-    if (credential?.type !== 'oauth') return status;
-    status.kind = 'failed';
-    if (typeof credential.access !== 'string' || !credential.access) {
-      return { ...status, error: 'Antigravity 授权无效，请通过 Pi 重新登录。' };
-    }
-    if (!Number.isFinite(credential.expires) || credential.expires <= now()) {
-      return { ...status, error: 'Antigravity 授权已过期，请通过 Pi 登录或刷新授权。' };
-    }
-    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(12000)]);
-    // Fixed Google origins only; never forward credentials to redirects or a
-    // project/server-provided URL. This capability never refreshes or writes auth.
-    async function request(method, payload) {
-      for (const endpoint of ['https://cloudcode-pa.googleapis.com', 'https://daily-cloudcode-pa.sandbox.googleapis.com']) {
-        try {
-          const response = await fetchImpl(endpoint + '/v1internal:' + method, {
-          method: 'POST', redirect: 'error', signal,
-          headers: { authorization: `Bearer ${credential.access}`, 'content-type': 'application/json',
-            'user-agent': 'antigravity/cli/1.1.23 (aidev_client; os_type=linux; arch=amd64; cl=974125021; auth_method=consumer)' },
-          body: JSON.stringify(payload),
-          });
-          if (!response.ok) { discardBody(response); signal.throwIfAborted(); continue; }
-          return await boundedJSON(response, { maxBytes: MAX_BYTES, signal });
-        } catch {
-          if (signal.aborted) break;
-        }
-      }
-      throw new Error('request');
-    }
-    // Paid accounts expose both short and weekly windows here. Model quotas
-    // alone do not carry the weekly bucket. Free accounts may return 403.
-    try {
-      const summary = await request('retrieveUserQuotaSummary', {});
-      const unique = new Map();
-      for (const group of Array.isArray(summary.groups) ? summary.groups : []) {
-        if (!/gemini/i.test(group?.displayName) || !Array.isArray(group.buckets)) continue;
-        for (const bucket of group.buckets) {
-          if (!Number.isFinite(bucket?.remainingFraction)) continue;
-          const resetAt = typeof bucket.resetTime === 'string' ? Date.parse(bucket.resetTime) : NaN;
-          const window = [bucket.window, bucket.displayName].filter(value => typeof value === 'string').join(' ').trim();
-          const row = {
-            remainingPercent: Math.round(Math.max(0, Math.min(1, bucket.remainingFraction)) * 1000) / 10,
-            ...(Number.isFinite(resetAt) ? { resetAt } : {}),
-            ...(window ? { window } : {}),
-          };
-          unique.set(JSON.stringify(row), row);
-        }
-      }
-      if (unique.size) {
-        const rank = row => /5\s*h|five.?hour/i.test(row.window ?? '') ? 0 : /7\s*d|week/i.test(row.window ?? '') ? 1 : 2;
-        return { ...status, kind: 'loaded', capturedAt: now(), quotas: [...unique.values()].sort((a, b) => rank(a) - rank(b)).slice(0, 64) };
-      }
-    } catch { /* Summary is optional; retain per-model quota fallback. */ }
-    try {
-        const body = await request('fetchAvailableModels', typeof credential.projectId === 'string' ? { project: credential.projectId } : {});
-        if (!body.models || typeof body.models !== 'object' || Array.isArray(body.models)) throw new Error('shape');
-        const unique = new Map();
-        for (const [id, model] of Object.entries(body.models)) {
-          const quota = model?.quotaInfo;
-          if (!/gemini/i.test(id) || model?.isInternal || !Number.isFinite(quota?.remainingFraction)) continue;
-          const remainingPercent = Math.round(Math.max(0, Math.min(1, quota.remainingFraction)) * 1000) / 10;
-          const resetAt = typeof quota.resetTime === 'string' ? Date.parse(quota.resetTime) : NaN;
-          const row = { remainingPercent, ...(Number.isFinite(resetAt) ? { resetAt } : {}) };
-          unique.set(JSON.stringify(row), row);
-        }
-        if (!unique.size) throw new Error('shape');
-        return { ...status, kind: 'loaded', capturedAt: now(), quotas: [...unique.values()].slice(0, 64) };
-    } catch { /* No provider error bodies cross IPC. */ }
-    return { ...status, error: 'Antigravity 额度查询失败，请检查网络和账户授权。' };
-  }
   async function queryResetCredits(credential, id, signal) {
     // Supplementary, read-only metadata: unsupported plans or failures must not
     // discard valid usage windows. Only allowlisted fields cross IPC.
@@ -150,7 +63,7 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
       const credits = (Array.isArray(body.credits) ? body.credits : []).flatMap(credit => {
         if (credit?.status !== 'available') return [];
         const expiry = typeof credit.expires_at === 'string' ? Date.parse(credit.expires_at) : NaN;
-        // Codex timestamps use seconds (unlike the Gemini quota payload).
+        // Codex timestamps use seconds.
         return [Number.isFinite(expiry) ? { expiresAt: expiry / 1000 } : {}];
       });
       return { availableCount: Math.floor(count), credits };
@@ -159,10 +72,6 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
   async function query(provider) {
     const prefix = provider === 'openai' ? 'openai-chatgpt' : 'codex';
     const auth = privateJSON(path.join(agentDirectory, 'auth.json'));
-    const geminiTask = queryGemini(auth, provider);
-    if (provider === 'antigravity') return { version: 2, provider, accounts: [], gemini: await geminiTask,
-      supportsAccountSwitch: false, managesSelectedAuth: false, updatedAt: now(), source: 'host-query',
-      message: (await geminiTask).kind === 'unconfigured' ? '未找到 Antigravity OAuth 授权，请通过 Pi 登录。' : '只读额度查询；不代表当前线程的授权绑定。' };
     const store = privateJSON(path.join(agentDirectory, `${prefix}-accounts.json`));
     const settings = privateJSON(path.join(agentDirectory, `${prefix}-account-usage.json`));
     const accounts = Object.entries(store.accounts ?? {}).filter(([name]) => /^[A-Za-z0-9._-]{1,64}$/.test(name)).slice(0, 64);
@@ -240,12 +149,11 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
     }));
     successfulAccounts.set(provider, nextAccounts);
     return { version: 2, provider, supportsAccountSwitch: false, managesSelectedAuth: false,
-      updatedAt: now(), accounts: rows, gemini: await geminiTask, source: 'host-query',
+      updatedAt: now(), accounts: rows, source: 'host-query',
       message: rows.length ? '只读额度查询；不代表当前线程的授权绑定。' : '未找到可查询的 OAuth 账户；API key 不提供订阅额度。' };
   }
   // 可见性可能在缓存 TTL 或网络查询期间变化，每次出站按最新设置过滤。
   function visibleSnapshot(value, provider) {
-    if (provider === 'antigravity') return value;
     const prefix = provider === 'openai' ? 'openai-chatgpt' : 'codex';
     const settings = privateJSON(path.join(agentDirectory, `${prefix}-account-usage.json`));
     if (settings.hiddenAccounts !== undefined && (!Array.isArray(settings.hiddenAccounts) ||
@@ -265,6 +173,6 @@ export function createPiAccountManagement({ agentDirectory = process.env.PI_CODI
       const task = query(provider).then(value => { cache.set(provider, value); return { ...visibleSnapshot(value, provider), cached: false }; }).finally(() => pending.delete(provider));
       pending.set(provider, task); return task;
     },
-    close() { controller.abort(); cache.clear(); successfulAccounts.clear(); successfulGemini = undefined; },
+    close() { controller.abort(); cache.clear(); successfulAccounts.clear(); },
   };
 }

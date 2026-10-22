@@ -10,7 +10,7 @@ export function createPiAccountSelections() {
       let payload;
       try { payload = JSON.parse(event.statusText); } catch { return; }
       const provider = payload?.provider ?? 'openai-codex';
-      if (![1, 2].includes(payload?.version) || !['openai', 'openai-codex', 'antigravity'].includes(provider) ||
+      if (![1, 2].includes(payload?.version) || !['openai', 'openai-codex'].includes(provider) ||
           !Array.isArray(payload.accounts) || !Number.isFinite(payload.updatedAt) || payload.updatedAt < 0 ||
           (payload.activeAccount !== undefined && typeof payload.activeAccount !== 'string')) return;
       const previous = selections.get(threadId);
@@ -18,8 +18,7 @@ export function createPiAccountSelections() {
       selections.set(threadId, { version: payload.version, provider, updatedAt: payload.updatedAt,
         ...(payload.activeAccount ? { activeAccount: payload.activeAccount } : {}),
         supportsAccountSwitch: payload.version === 1 || payload.supportsAccountSwitch === true,
-        managesSelectedAuth: payload.version === 1 ? !!payload.activeAccount : payload.managesSelectedAuth === true,
-        geminiIsActive: payload.gemini?.isActive === true });
+        managesSelectedAuth: payload.version === 1 ? !!payload.activeAccount : payload.managesSelectedAuth === true });
     },
     read(threadId, provider) {
       const value = selections.get(threadId);

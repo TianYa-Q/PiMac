@@ -191,22 +191,6 @@ struct CodexUsageWindow: Hashable {
   let windowSeconds: Double?
 }
 
-struct GeminiQuota: Identifiable, Hashable {
-  let remainingPercent: Double
-  let resetAt: Date?
-  let window: String?
-
-  var id: String { "\(window ?? "quota")-\(resetAt?.timeIntervalSince1970 ?? 0)" }
-}
-
-struct GeminiUsageStatus: Hashable {
-  let isConfigured: Bool
-  let isActive: Bool
-  let quotas: [GeminiQuota]
-  let error: String?
-  var capturedAt: Date? = nil
-}
-
 struct CodexResetCredits: Hashable {
   let availableCount: Int
   let expirations: [Date]

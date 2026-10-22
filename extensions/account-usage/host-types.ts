@@ -19,7 +19,6 @@ export type HostQuotaSnapshot = {
   provider: string;
   accounts: HostQuotaAccount[];
   updatedAt: number;
-  gemini: unknown;
   source: string;
   cached?: boolean;
 };

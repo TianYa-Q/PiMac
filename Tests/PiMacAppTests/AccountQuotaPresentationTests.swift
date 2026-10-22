@@ -23,20 +23,13 @@ struct AccountQuotaPresentationTests {
     #expect(rows[1].isHidden)
   }
 
-  @Test func onlyConfiguredActiveGeminiIsPlacedFirst() {
-    for configured in [false, true] {
-      for active in [false, true] {
-        let gemini = GeminiUsageStatus(
-          isConfigured: configured, isActive: active, quotas: [], error: nil)
-        #expect(AccountQuotaPresentation.showsGeminiFirst(gemini) == (configured && active))
-      }
-    }
-    #expect(!AccountQuotaPresentation.showsGeminiFirst(nil))
-  }
-
   @Test func hiddenActiveAccountAndAllHiddenAccountsAreExcluded() {
-    #expect(AccountQuotaPresentation.accounts([account("current", active: true, hidden: true), account("work")]).map(\.name) == ["work"])
-    #expect(AccountQuotaPresentation.accounts([account("only", active: true, hidden: true)]).isEmpty)
+    #expect(
+      AccountQuotaPresentation.accounts([
+        account("current", active: true, hidden: true), account("work"),
+      ]).map(\.name) == ["work"])
+    #expect(
+      AccountQuotaPresentation.accounts([account("only", active: true, hidden: true)]).isEmpty)
   }
 
   @Test func emptyAccountsRemainEmpty() {

@@ -5,8 +5,7 @@ import os from 'node:os';
 import { createReadStream } from 'node:fs';
 import { createPiAccountManagement } from '../../Sources/PiMacApp/Resources/t3-bridge/pi-account-management.mjs';
 
-const providerKinds = { anthropic: 'claude', 'openai-codex': 'codex', openai: 'codex',
-  antigravity: 'antigravity', 'google-antigravity': 'antigravity', xai: 'grok' };
+const providerKinds = { anthropic: 'claude', 'openai-codex': 'codex', openai: 'codex', xai: 'grok' };
 const int = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
 export function parsePiUsage(entry, sessionId) {
   const message = entry?.type === 'message' ? entry.message : null;
@@ -77,12 +76,12 @@ export async function collectPiUsage({ agentDirectory = process.env.PI_CODING_AG
     status: partial ? 'partial' : 'ok', message: partial ? 'Some Pi session records could not be read.' : 'Pi session history (not native CLI history).' }));
 }
 
-function quotaWindow(value, id, label, milliseconds = false) {
+function quotaWindow(value, id, label) {
   if (!Number.isFinite(value?.remainingPercent)) return null;
   const duration = value.windowSeconds;
   const kind = duration >= 604800 || /week|7\s*d/i.test(value.window ?? '') ? 'weekly'
     : duration > 0 && duration <= 86400 || /5\s*h|five.?hour/i.test(value.window ?? '') ? 'session' : 'other';
-  const reset = value.resetAt * (milliseconds ? 1 : 1000);
+  const reset = value.resetAt * 1000;
   return { id, label: value.window || label, kind,
     usedPercent: 100 - Math.max(0, Math.min(100, value.remainingPercent)),
     ...(Number.isFinite(reset) && reset > 0 && reset <= 8640000000000000 ? { resetsAt: new Date(reset).toISOString() } : {}),
@@ -125,7 +124,7 @@ function mobileResetCreditsDetail(credits, expirations) {
 export async function readPiLimitSources(accounts, now = Date.now) {
   const checkedAt = new Date(now()).toISOString();
   const rows = [], errors = [];
-  for (const provider of ['openai', 'openai-codex', 'antigravity']) {
+  for (const provider of ['openai', 'openai-codex']) {
     try {
       const result = await accounts.accountStatus({ provider });
       for (const account of result.accounts ?? []) {
@@ -138,11 +137,6 @@ export async function readPiLimitSources(accounts, now = Date.now) {
           ...(resetDetail ? { plan: resetDetail } : {}),
           usageLimits: { checkedAt, windows, ...(resetCredits ? { resetCredits } : {}),
             ...(account.error ? { unavailable: { reason: 'probeFailed', message: account.error } } : {}) } });
-      }
-      if (provider === 'antigravity' && result.gemini?.kind !== 'unconfigured') {
-        const windows = (result.gemini?.quotas ?? []).map((value, index) => quotaWindow(value, `gemini-${index}`, 'Gemini', true)).filter(Boolean);
-        rows.push({ id: 'antigravity', driver: 'antigravity', usageLimits: { checkedAt, windows,
-          ...(result.gemini?.error ? { unavailable: { reason: 'probeFailed', message: result.gemini.error } } : {}) } });
       }
     } catch { errors.push('Pi account credentials could not be read.'); }
   }

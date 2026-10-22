@@ -35,7 +35,6 @@ const options = {
     },
   ],
   maxAgeMs: 100,
-  gemini: "failed",
   refreshing: false,
   now: 1000,
 };
@@ -45,7 +44,6 @@ test("doctor counts only visible snapshots, treats boundary/future dates as stal
   assert.match(report, /新鲜 1 · 过期 2 · 失败 1 · 未知 1/u);
   assert.match(report, /可见 5 · 隐藏 1/u);
   assert.match(report, /扩展托管 OAuth/u);
-  assert.match(report, /Gemini：查询失败/u);
   for (const value of ["secret", "Bearer", "https://", "hidden-secret"])
     assert.equal(report.includes(value), false);
 });
@@ -61,7 +59,6 @@ test("JSON health report is versioned, count-only and read-only", () => {
     accounts: { total: 6, visible: 5, hidden: 1 },
     snapshots: { fresh: 1, stale: 2, failed: 1, missing: 1 },
     refreshing: false,
-    gemini: "failed",
   });
   const text = JSON.stringify(report);
   for (const value of [

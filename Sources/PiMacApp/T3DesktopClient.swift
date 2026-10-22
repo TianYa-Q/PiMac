@@ -528,7 +528,7 @@ final class T3DesktopClient: ObservableObject {
   ) async throws
     -> JSON?
   {
-    guard let service, let provider, ["openai", "openai-codex", "antigravity"].contains(provider)
+    guard let service, let provider, ["openai", "openai-codex"].contains(provider)
     else { return nil }
     return try await service.accountStatus(
       threadID: threadID, provider: provider, force: force, selectionOnly: selectionOnly)

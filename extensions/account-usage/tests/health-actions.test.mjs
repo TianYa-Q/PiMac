@@ -18,7 +18,6 @@ const base = {
     },
   ],
   maxAgeMs: 100,
-  gemini: "unconfigured",
   refreshing: false,
   now: 1000,
 };
@@ -34,9 +33,8 @@ test("action priority repairs auth, then visibility, then stale data", () => {
       ...base,
       authFailed: true,
       hiddenNames: ["account"],
-      gemini: "failed",
     }).recommendations,
-    ["repair_auth", "review_visibility", "refresh_usage"],
+    ["repair_auth", "review_visibility"],
   );
   assert.deepEqual(
     buildUsageHealthReport({ ...base, accountNames: [], usages: [] })

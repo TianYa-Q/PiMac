@@ -146,11 +146,10 @@ categories describe the underlying model service; currently unsupported service
 categories are skipped, not relabeled. Pi history outside this session tree is
 not included.
 
-Limits publishes the existing read-only Pi OAuth account queries (ChatGPT/Codex
-and Antigravity) through the stock multi-account source envelope, labeled
+Limits publishes the existing read-only Pi OAuth account queries (ChatGPT/Codex) through the stock multi-account source envelope, labeled
 `Pi accounts (read-only)`. The stock contract names this envelope `cliproxy`;
 no CLIProxy hub is contacted. Remaining percentages become used percentages,
-with Codex second-based and Gemini millisecond-based reset timestamps normalized.
+with Codex second-based reset timestamps normalized.
 Hidden accounts are omitted; tokens never cross the mobile protocol. No login,
 auth refresh/write, account switching or reset-credit redemption is introduced.
 Absent OAuth and query failures remain visible as notices. Queries share the

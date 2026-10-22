@@ -37,7 +37,7 @@ export function logAccountAuthFailure(
 
 export function logQuotaFailure(
   context: {
-    provider: "codex" | "gemini" | "shared";
+    provider: "codex" | "shared";
     operation: string;
     accountName?: string;
     elapsedMs: number;

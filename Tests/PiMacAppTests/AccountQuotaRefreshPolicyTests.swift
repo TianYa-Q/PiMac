@@ -35,7 +35,7 @@ struct AccountQuotaRefreshPolicyTests {
     #expect(attempt(.chatGPT))
     #expect(attempt(.chatGPT, force: true))
     #expect(!attempt(.chatGPT))
-    #expect(attempt(.antigravity))
-    #expect(attempt(.antigravity, scope: UUID()))
+    #expect(attempt(.legacyCodex))
+    #expect(attempt(.legacyCodex, scope: UUID()))
   }
 }

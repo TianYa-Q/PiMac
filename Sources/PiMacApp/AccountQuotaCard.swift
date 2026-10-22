@@ -133,7 +133,6 @@ struct CodexAccountsView: View {
     CodexAccountsCard(
       snapshot: .init(
         sourceID: ObjectIdentifier(app), accounts: usage.accounts,
-        gemini: usage.gemini,
         emptyStatus: extensionUI.statuses["account-usage"], message: app.accountQuotaMessage,
         canRefresh: app.isProcessRunning && !app.isRefreshingAccountQuota,
         isRefreshing: app.isRefreshingAccountQuota,
@@ -154,7 +153,6 @@ private struct CodexAccountsCard: View, Equatable {
   struct Snapshot: Equatable {
     var sourceID: ObjectIdentifier
     var accounts: [CodexAccountStatus]
-    var gemini: GeminiUsageStatus?
     var emptyStatus: String?
     var message: String
     var canRefresh: Bool
@@ -184,7 +182,7 @@ private struct CodexAccountsCard: View, Equatable {
               .font(.caption2)
               .foregroundStyle(
                 snapshot.accounts.contains { $0.primary != nil || $0.secondary != nil }
-                  || snapshot.gemini?.quotas.isEmpty == false ? Color.orange : Color.red
+                  ? Color.orange : Color.red
               )
               .lineLimit(1)
               .truncationMode(.tail)
@@ -228,25 +226,13 @@ private struct CodexAccountsCard: View, Equatable {
 
   @ViewBuilder
   private var expandedAccounts: some View {
-    if AccountQuotaPresentation.accounts(snapshot.accounts).isEmpty
-      && snapshot.gemini?.isConfigured != true
-    {
+    if AccountQuotaPresentation.accounts(snapshot.accounts).isEmpty {
       emptyStatus
     } else {
       let accounts = AccountQuotaPresentation.accounts(snapshot.accounts)
       ScrollView(showsIndicators: false) {
         LazyVStack(spacing: 7) {
-          if AccountQuotaPresentation.showsGeminiFirst(snapshot.gemini),
-            let gemini = snapshot.gemini
-          {
-            geminiRow(gemini)
-          }
           ForEach(accounts) { account in accountRow(account) }
-          if let gemini = snapshot.gemini, gemini.isConfigured,
-            !AccountQuotaPresentation.showsGeminiFirst(gemini)
-          {
-            geminiRow(gemini)
-          }
         }
       }
       .frame(maxHeight: 240)
@@ -255,28 +241,26 @@ private struct CodexAccountsCard: View, Equatable {
 
   @ViewBuilder
   private var currentAccount: some View {
-    if let gemini = snapshot.gemini, gemini.isConfigured, gemini.isActive {
-      geminiRow(gemini)
-    } else if let account = AccountQuotaPresentation.accounts(snapshot.accounts).first(where: \.isActive)
+    if let account = AccountQuotaPresentation.accounts(snapshot.accounts).first(where: \.isActive)
       ?? AccountQuotaPresentation.accounts(snapshot.accounts).first(where: \.isDefault)
       ?? AccountQuotaPresentation.accounts(snapshot.accounts).first
     {
       accountRow(account)
-    } else if let gemini = snapshot.gemini, gemini.isConfigured {
-      geminiRow(gemini)
     } else {
       emptyStatus
     }
   }
 
   private var emptyStatus: some View {
-    Text(snapshot.accounts.contains(where: \.isHidden)
-      ? "账户额度均已隐藏，可在管理中恢复显示。"
-      : snapshot.emptyStatus ?? "暂无账户额度数据，可点击刷新查询。")
-      .font(.caption2)
-      .foregroundStyle(.secondary)
-      .lineLimit(5)
-      .textSelection(.enabled)
+    Text(
+      snapshot.accounts.contains(where: \.isHidden)
+        ? "账户额度均已隐藏，可在管理中恢复显示。"
+        : snapshot.emptyStatus ?? "暂无账户额度数据，可点击刷新查询。"
+    )
+    .font(.caption2)
+    .foregroundStyle(.secondary)
+    .lineLimit(5)
+    .textSelection(.enabled)
   }
 
   private func accountRow(_ account: CodexAccountStatus) -> some View {
@@ -331,59 +315,6 @@ private struct CodexAccountsCard: View, Equatable {
       in: RoundedRectangle(cornerRadius: 8))
   }
 
-  private func geminiRow(_ status: GeminiUsageStatus) -> some View {
-    VStack(alignment: .leading, spacing: 5) {
-      HStack(spacing: 5) {
-        Circle()
-          .fill(status.isActive ? Color.green : Color.secondary.opacity(0.35))
-          .frame(width: 7, height: 7)
-        Text("Antigravity · Gemini").font(.caption.bold())
-        Text("Antigravity").font(.caption2).foregroundStyle(.secondary)
-        Spacer()
-      }
-      if let error = status.error {
-        Text(status.quotas.isEmpty ? error : "刷新失败，显示上次额度")
-          .font(.caption2).foregroundStyle(status.quotas.isEmpty ? Color.red : Color.orange)
-          .lineLimit(2).help(error)
-      }
-      if status.quotas.isEmpty {
-        if status.error == nil {
-          Text("暂无额度数据").font(.caption2).foregroundStyle(.secondary)
-        }
-      } else {
-        ForEach(status.quotas) { quota in
-          HStack(spacing: 4) {
-            Text(geminiWindowLabel(quota.window))
-              .frame(width: 20, alignment: .leading)
-            QuotaUsageBar(
-              remainingPercent: quota.remainingPercent, color: usageColor(quota.remainingPercent)
-            )
-            .frame(minWidth: 24)
-            .layoutPriority(1)
-            Text("\(Int(quota.remainingPercent.rounded()))%")
-              .monospacedDigit()
-              .frame(width: 30, alignment: .trailing)
-            if let resetAt = quota.resetAt {
-              CompactResetTime(date: resetAt)
-                .monospacedDigit()
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-            }
-          }
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-        }
-      }
-      if !status.quotas.isEmpty {
-        AccountQuotaFreshnessView(capturedAt: status.capturedAt, maxAge: snapshot.maxAge)
-      }
-    }
-    .padding(7)
-    .background(
-      status.isActive ? Color.accentColor.opacity(0.10) : Color.secondary.opacity(0.06),
-      in: RoundedRectangle(cornerRadius: 8))
-  }
-
   private func usageRow(_ window: CodexUsageWindow, label: String) -> some View {
     HStack(spacing: 4) {
       Text(label).frame(width: 20, alignment: .leading)
@@ -409,21 +340,6 @@ private struct CodexAccountsCard: View, Equatable {
   private func windowLabel(_ window: CodexUsageWindow) -> String {
     guard let seconds = window.windowSeconds else { return "Q" }
     return seconds <= 21_600 ? "\(Int((seconds / 3_600).rounded()))H" : "7D"
-  }
-
-  private func geminiWindowLabel(_ window: String?) -> String {
-    guard let window else { return "Q" }
-    if window.localizedCaseInsensitiveContains("5h")
-      || window.localizedCaseInsensitiveContains("5 hour")
-    {
-      return "5H"
-    }
-    if window.localizedCaseInsensitiveContains("7d")
-      || window.localizedCaseInsensitiveContains("week")
-    {
-      return "7D"
-    }
-    return "Q"
   }
 
   private func usageColor(_ percent: Double) -> Color {

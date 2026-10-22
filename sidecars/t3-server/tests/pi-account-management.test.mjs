@@ -180,101 +180,13 @@ test('unsafe permissions, symlinks and malformed files fail closed', async t => 
   fs.renameSync(file, file + '.real'); fs.symlinkSync(file + '.real', file);
   await assert.rejects(f.manager.accountStatus({ provider: 'openai' }), /读取/); assert.equal(f.calls(), 0);
 });
-test('Antigravity quotas are read-only, deduplicated and cached', async t => {
-  const f = fixture(t, { response: (url, input) => {
-    if (url.endsWith(':retrieveUserQuotaSummary')) return new Response('SUBSCRIPTION_REQUIRED', { status: 403 });
-    assert.match(url, /^https:\/\/(?:daily-cloudcode-pa\.sandbox|cloudcode-pa)\.googleapis\.com\/v1internal:fetchAvailableModels$/);
-    assert.equal(input.method, 'POST');
-    assert.deepEqual(JSON.parse(input.body), { project: 'project-id' });
-    return new Response(JSON.stringify({ models: {
-      'gemini-pro': { quotaInfo: { remainingFraction: 0.75, resetTime: '2026-10-04T00:00:00Z' } },
-      'gemini-pro-thinking': { quotaInfo: { remainingFraction: 0.75, resetTime: '2026-10-04T00:00:00Z' } },
-      'claude': { quotaInfo: { remainingFraction: 0.5 } },
-    }, secret: 'server-secret' }));
-  } });
-  f.write('auth.json', { antigravity: { ...f.credential, projectId: 'project-id' } });
-  const before = fs.readFileSync(path.join(f.dir, 'auth.json'), 'utf8');
-  const result = await f.manager.accountStatus({ provider: 'antigravity' });
-  assert.equal(result.gemini.kind, 'loaded'); assert.equal(result.gemini.isActive, true);
-  assert.deepEqual(result.gemini.quotas, [{ remainingPercent: 75, resetAt: Date.parse('2026-10-04T00:00:00Z') }]);
-  assert.deepEqual(result.accounts, []); assert.equal(result.supportsAccountSwitch, false);
-  assert.doesNotMatch(JSON.stringify(result), /secret|project-id/);
-  assert.equal(fs.readFileSync(path.join(f.dir, 'auth.json'), 'utf8'), before);
-  assert.equal(result.gemini.capturedAt, 100000);
-  f.advance();
-  const refreshed = await f.manager.accountStatus({ provider: 'antigravity' });
-  assert.equal(refreshed.gemini.capturedAt, 160001);
-  const cached = await f.manager.accountStatus({ provider: 'antigravity' });
-  assert.equal(cached.cached, true);
-  assert.equal(cached.gemini.capturedAt, refreshed.gemini.capturedAt);
-  assert.equal(f.calls(), 6);
-});
-test('Antigravity summary preserves weekly reset time and window identity', async t => {
-  const resetTime = '2026-10-11T00:00:00Z';
-  const f = fixture(t, { response: (url, input) => {
-    assert.ok(url.endsWith(':retrieveUserQuotaSummary'));
-    assert.deepEqual(JSON.parse(input.body), {});
-    return new Response(JSON.stringify({ groups: [
-      { displayName: 'Gemini', buckets: [
-        { window: 'weekly', displayName: 'Weekly Limit Remaining', remainingFraction: 0.75, resetTime },
-        { window: '5h', displayName: 'Five Hour Limit Remaining', remainingFraction: 0.75, resetTime },
-      ] },
-      { displayName: 'Claude', buckets: [{ remainingFraction: 0.1, resetTime }] },
-    ], secret: 'server-secret' }));
-  } });
-  f.write('auth.json', { antigravity: f.credential });
-  const result = await f.manager.accountStatus({ provider: 'antigravity' });
-  assert.equal(result.gemini.kind, 'loaded');
-  assert.equal(result.gemini.capturedAt, 100000);
-  assert.deepEqual(result.gemini.quotas, [
-    { remainingPercent: 75, resetAt: Date.parse(resetTime), window: '5h Five Hour Limit Remaining' },
-    { remainingPercent: 75, resetAt: Date.parse(resetTime), window: 'weekly Weekly Limit Remaining' },
-  ]);
-  assert.equal(f.calls(), 1);
-  assert.doesNotMatch(JSON.stringify(result), /secret/);
-});
-test('Antigravity malformed summary falls back to model quotas', async t => {
-  const f = fixture(t, { response: url => new Response(JSON.stringify(
-    url.endsWith(':retrieveUserQuotaSummary')
-      ? { groups: [{ displayName: 'Gemini', buckets: [{ remainingFraction: 'invalid' }] }] }
-      : { models: { gemini: { quotaInfo: { remainingFraction: 0.5, resetTime: 'invalid' } } } }
-  )) });
-  f.write('auth.json', { antigravity: f.credential });
-  const result = await f.manager.accountStatus({ provider: 'antigravity' });
-  assert.deepEqual(result.gemini.quotas, [{ remainingPercent: 50 }]);
-  assert.equal(f.calls(), 2);
-});
-test('Antigravity missing and expired OAuth are explicit and never use other providers', async t => {
-  const f = fixture(t);
-  assert.equal((await f.manager.accountStatus({ provider: 'antigravity' })).gemini.kind, 'unconfigured');
-  f.write('auth.json', { antigravity: { ...f.credential, expires: 1 } });
-  const result = await f.manager.accountStatus({ provider: 'antigravity', force: true });
-  assert.match(result.gemini.error, /过期/); assert.equal(f.calls(), 0);
-});
-test('Antigravity failures redact bodies and malformed quotas', async t => {
-  const f = fixture(t, { response: () => new Response('{"secret":"private"}') });
-  f.write('auth.json', { antigravity: f.credential });
-  const result = await f.manager.accountStatus({ provider: 'antigravity' });
-  assert.equal(result.gemini.kind, 'failed'); assert.match(result.gemini.error, /查询失败/);
-  assert.doesNotMatch(JSON.stringify(result), /secret|private/);
-});
-test('OpenAI quota cards also include configured Antigravity usage', async t => {
-  const f = fixture(t, { response: url => url.includes('googleapis.com')
-    ? new Response(JSON.stringify({ models: { gemini: { quotaInfo: { remainingFraction: 0.5 } } } })) : undefined });
-  f.write('auth.json', { openai: f.credential, antigravity: f.credential });
-  const result = await f.manager.accountStatus({ provider: 'openai' });
-  assert.equal(result.accounts[0].primary.remainingPercent, 75);
-  assert.equal(result.gemini.quotas[0].remainingPercent, 50); assert.equal(result.gemini.isActive, false);
-});
 test('quota HTTP failures do not await a hanging response cleanup', { timeout: 2000 }, async t => {
   const f = fixture(t, { response: () => new Response(new ReadableStream({
     cancel() { return new Promise(() => {}); },
   }), { status: 503 }) });
-  f.write('auth.json', { openai: f.credential, antigravity: f.credential });
+  f.write('auth.json', { openai: f.credential });
   const result = await f.manager.accountStatus({ provider: 'openai' });
   assert.match(result.accounts[0].error, /额度查询失败/);
-  assert.equal(result.gemini.kind, 'failed');
-  assert.equal(result.gemini.capturedAt, undefined);
 });
 
 test('failed refreshes retain last successful windows and sample time, then recover', async t => {
@@ -322,20 +234,20 @@ test('old quota cannot transfer to a replacement identity, hidden or removed acc
   assert.deepEqual((await f.manager.accountStatus({ provider: 'openai', force: true })).accounts, []);
 });
 
-test('Gemini failures keep the original sample but never cross grants', async t => {
-  let fail = false;
-  const f = fixture(t, { response: () => fail ? new Response('', { status: 503 })
-    : new Response(JSON.stringify({ models: { gemini: { quotaInfo: { remainingFraction: 0.5 } } } })) });
-  f.write('auth.json', { antigravity: f.credential });
-  const first = await f.manager.accountStatus({ provider: 'antigravity' });
-  fail = true; f.advance();
-  const stale = await f.manager.accountStatus({ provider: 'antigravity', force: true });
-  assert.deepEqual(stale.gemini.quotas, first.gemini.quotas);
-  assert.equal(stale.gemini.capturedAt, first.gemini.capturedAt);
-  assert.equal(stale.gemini.kind, 'failed');
-  f.write('auth.json', { antigravity: { ...f.credential, access: 'secret-access', projectId: 'new-project' } });
-  const replaced = await f.manager.accountStatus({ provider: 'antigravity', force: true });
-  assert.deepEqual(replaced.gemini.quotas, []);
+
+test('Antigravity credentials are untouched and never queried by host quotas', async t => {
+  const f = fixture(t, { response: url => {
+    assert.equal(new URL(url).origin, 'https://chatgpt.com');
+  } });
+  f.write('auth.json', { openai: f.credential, antigravity: f.credential });
+  const before = fs.readFileSync(path.join(f.dir, 'auth.json'), 'utf8');
+  const result = await f.manager.accountStatus({ provider: 'openai' });
+  assert.equal(result.accounts[0].primary.remainingPercent, 75);
+  assert.equal('gemini' in result, false);
+  const calls = f.calls();
+  await assert.rejects(f.manager.accountStatus({ provider: 'antigravity' }), /Unsupported account provider/);
+  assert.equal(f.calls(), calls);
+  assert.equal(fs.readFileSync(path.join(f.dir, 'auth.json'), 'utf8'), before);
 });
 
 test('unsupported providers and closed managers reject without network', async t => {

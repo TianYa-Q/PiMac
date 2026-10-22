@@ -62,31 +62,33 @@ test('Pi scanner still flags malformed JSON and retains valid records after it',
   assert.equal(sources[0].status, 'partial');
   assert.equal(sources[0].files[0].records.length, 1);
 });
-test('Pi limits converts remaining to used and seconds/ms resets without exposing credentials', async () => {
+test('Pi limits converts remaining to used and second-based resets without exposing credentials', async () => {
   const secret = 'private-token';
-  const sources = await readPiLimitSources({ accountStatus: async ({ provider }) => provider === 'antigravity'
-    ? { gemini: { kind: 'loaded', quotas: [{ remainingPercent: 60, resetAt: 1767225600000, window: 'weekly' }] } }
-    : { accounts: provider === 'openai' ? [] : [{ name: 'work', access: secret,
+  const queried = [];
+  const sources = await readPiLimitSources({ accountStatus: async ({ provider }) => {
+    queried.push(provider);
+    return { accounts: provider === 'openai' ? [] : [{ name: 'work', access: secret,
       primary: { remainingPercent: 75, resetAt: 1767225600, windowSeconds: 18000 },
-      secondary: { remainingPercent: 40, windowSeconds: 604800 } }, { name: 'hidden', hidden: true }] },
-  }, () => 1767225600000);
+      secondary: { remainingPercent: 40, windowSeconds: 604800 } }, { name: 'hidden', hidden: true }] };
+  } }, () => 1767225600000);
+  assert.deepEqual(queried, ['openai', 'openai-codex']);
   const rows = sources[0].accounts;
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 1);
   assert.equal(rows[0].usageLimits.windows[0].usedPercent, 25);
   assert.equal(rows[0].usageLimits.windows[0].kind, 'session');
   assert.equal(rows[0].usageLimits.windows[1].kind, 'weekly');
-  assert.equal(rows[1].usageLimits.windows[0].resetsAt, rows[0].usageLimits.windows[0].resetsAt);
+  assert.equal(rows[0].usageLimits.windows[0].resetsAt, '2026-01-01T00:00:00.000Z');
   assert.equal(JSON.stringify(sources).includes(secret), false);
 });
 test('banked resets reach mobile for both ChatGPT providers with only display metadata', async () => {
   const sources = await readPiLimitSources({ accountStatus: async ({ provider }) =>
-    provider === 'antigravity' ? { gemini: { kind: 'unconfigured' } } : { accounts: [
+    ({ accounts: [
       { name: provider, resetCredits: { availableCount: 2, nextCreditId: 'private-id',
         credits: [{ expiresAt: 1767398400, title: 'private-title' }, { expiresAt: 1767312000 },
           { expiresAt: '1767225600' }, { expiresAt: true }, { expiresAt: Infinity },
           { expiresAt: -1 }, { expiresAt: 8640000000001 }, null] } },
       { name: 'hidden', hidden: true, resetCredits: { availableCount: 99 } },
-    ] } }, () => 1767225600000);
+    ] }) }, () => 1767225600000);
   assert.deepEqual(sources[0].accounts.map(row => row.usageLimits.resetCredits), [
     { availableCount: 2, nextExpiresAt: '2026-01-02T00:00:00.000Z' },
     { availableCount: 2, nextExpiresAt: '2026-01-02T00:00:00.000Z' },
@@ -103,7 +105,7 @@ test('mobile expiry details retain duplicate credits and use Beijing time across
   const sources = await readPiLimitSources({ accountStatus: async ({ provider }) =>
     provider === 'openai-codex' ? { accounts: [{ name: 'work', resetCredits: {
       availableCount: 3, credits: [{ expiresAt: seconds }, {}, { expiresAt: seconds }],
-    } }] } : { accounts: [], gemini: { kind: 'unconfigured' } } });
+    } }] } : { accounts: [] } });
   const row = sources[0].accounts[0];
   assert.equal(row.usageLimits.resetCredits.nextExpiresAt, '2026-01-01T20:30:45.000Z');
   assert.equal(row.plan, '3 reset credits · 到期（北京时间 UTC+8）：2026-01-02 04:30:45；2026-01-02 04:30:45 (read-only)');
@@ -115,7 +117,7 @@ test('missing, zero and invalid mobile reset counts do not invent credits or hid
   const sources = await readPiLimitSources({ accountStatus: async ({ provider }) =>
     provider === 'openai-codex' ? { accounts: values.map((resetCredits, index) => ({
       name: `account-${index}`, resetCredits, primary: { remainingPercent: 75 },
-    })) } : { accounts: [], gemini: { kind: 'unconfigured' } } });
+    })) } : { accounts: [] } });
   assert.deepEqual(sources[0].accounts.map(row => row.usageLimits.resetCredits), [
     undefined, undefined, { availableCount: 0 }, { availableCount: 3 }, { availableCount: 1 },
     ...Array(7).fill(undefined),
@@ -127,7 +129,7 @@ test('missing, zero and invalid mobile reset counts do not invent credits or hid
   assert(sources[0].accounts.every(row => row.usageLimits.windows[0].usedPercent === 25));
 });
 test('missing or failed Pi quotas stay visible as notices instead of invented bars', async () => {
-  const empty = await readPiLimitSources({ accountStatus: async () => ({ accounts: [], gemini: { kind: 'unconfigured' } }) });
+  const empty = await readPiLimitSources({ accountStatus: async () => ({ accounts: [] }) });
   assert.match(empty[0].error, /No Pi OAuth/);
   const failed = await readPiLimitSources({ accountStatus: async () => { throw new Error('private-secret'); } });
   assert.equal(failed[0].accounts.length, 0);

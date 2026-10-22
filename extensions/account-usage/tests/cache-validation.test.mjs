@@ -5,40 +5,6 @@ import { createJiti } from "jiti";
 const { validAccountUsages } = await createJiti(import.meta.url).import(
   "../cache-validation.ts",
 );
-const { validAntigravityUsageState } = await createJiti(import.meta.url).import(
-  "../antigravity.ts",
-);
-
-await test("Gemini cached state uses the live response parser", () => {
-  assert.equal(validAntigravityUsageState({ kind: "unconfigured" }), true);
-  assert.equal(
-    validAntigravityUsageState({ kind: "failed", error: "offline" }),
-    true,
-  );
-  assert.equal(
-    validAntigravityUsageState({
-      kind: "loaded",
-      usage: { groups: [], models: [] },
-    }),
-    true,
-  );
-  for (const value of [
-    null,
-    {},
-    { kind: "failed" },
-    { kind: "loaded", usage: {} },
-    { kind: "loaded", usage: { groups: [null], models: [] } },
-    {
-      kind: "loaded",
-      usage: {
-        groups: [],
-        models: [{ modelId: "gemini", remainingFraction: 2 }],
-      },
-    },
-  ])
-    assert.equal(validAntigravityUsageState(value), false);
-});
-
 const usage = () => ({
   accountName: "a",
   capturedAt: Date.now(),

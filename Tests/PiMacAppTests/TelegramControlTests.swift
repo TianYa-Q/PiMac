@@ -810,21 +810,16 @@ final class TelegramControlTests: XCTestCase {
   @MainActor
   func testUsageMessageFormatsQuotasAndMissingExtension() {
     XCTAssertTrue(
-      TelegramControl.usageMessage(accounts: [], gemini: nil, updatedAt: nil).contains("暂无账户额度数据"))
+      TelegramControl.usageMessage(accounts: [], updatedAt: nil).contains("暂无账户额度数据"))
     let account = CodexAccountStatus(
       name: "work", isActive: true, isDefault: false, isHidden: false,
       primary: CodexUsageWindow(
         remainingPercent: 72.5, resetAt: Date(timeIntervalSince1970: 1_800_000_000),
         windowSeconds: 18_000),
       secondary: nil, resetCredits: nil, error: nil)
-    let gemini = GeminiUsageStatus(
-      isConfigured: true, isActive: false,
-      quotas: [GeminiQuota(remainingPercent: 25, resetAt: nil, window: "5h")], error: nil)
-    let message = TelegramControl.usageMessage(accounts: [account], gemini: gemini, updatedAt: nil)
+    let message = TelegramControl.usageMessage(accounts: [account], updatedAt: nil)
     XCTAssertTrue(message.contains("● Codex work"))
     XCTAssertTrue(message.contains("  5h  73% → "))
-    XCTAssertTrue(message.contains("○ Gemini"))
-    XCTAssertTrue(message.contains("  5h  25%"))
     XCTAssertFalse(message.contains("重置于"))
   }
 
@@ -848,30 +843,12 @@ final class TelegramControlTests: XCTestCase {
       let account = CodexAccountStatus(
         name: "work", isActive: true, isDefault: false, isHidden: false,
         primary: window, secondary: window, resetCredits: nil, error: nil)
-      let gemini = GeminiUsageStatus(
-        isConfigured: true, isActive: false,
-        quotas: [GeminiQuota(remainingPercent: 100, resetAt: resetAt, window: "7d")], error: nil)
       let message = TelegramControl.usageMessage(
-        accounts: [account], gemini: gemini, updatedAt: now, now: now)
+        accounts: [account], updatedAt: now, now: now)
       XCTAssertTrue(message.contains("5h  87% → \(expected)"), message)
       XCTAssertTrue(message.contains("7d  87% → \(expected)"), message)
-      XCTAssertTrue(message.contains("7d  100% → \(expected)"), message)
       XCTAssertTrue(message.contains("仅本地缓存，不主动刷新额度"))
     }
-  }
-
-  @MainActor
-  func testUsageMessageShortensVerboseGeminiWindows() {
-    let gemini = GeminiUsageStatus(
-      isConfigured: true, isActive: true,
-      quotas: [
-        GeminiQuota(remainingPercent: 100, resetAt: nil, window: "5h Five Hour Limit Remaining"),
-        GeminiQuota(remainingPercent: 80, resetAt: nil, window: "weekly Weekly Limit Remaining"),
-      ], error: nil)
-    let message = TelegramControl.usageMessage(accounts: [], gemini: gemini, updatedAt: nil)
-    XCTAssertTrue(message.contains("  5h  100%"))
-    XCTAssertTrue(message.contains("  7d  80%"))
-    XCTAssertFalse(message.contains("Limit Remaining"))
   }
 
   @MainActor

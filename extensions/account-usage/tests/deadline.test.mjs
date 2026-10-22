@@ -10,12 +10,6 @@ process.env.PI_CODING_AGENT_DIR = root;
 after(() => rm(root, { recursive: true, force: true }));
 const jiti = createJiti(import.meta.url);
 const { withDeadline } = await jiti.import("../deadline.ts");
-const {
-  queryAntigravityUsage,
-  antigravityGUIStatus,
-  formatAntigravityStatus,
-  validAntigravityUsageState,
-} = await jiti.import("../antigravity.ts");
 
 await test("deadline bounds an adapter that never settles", async () => {
   let signal;
@@ -78,46 +72,4 @@ await test("completed work clears timer and invalid deadlines never start work",
     withDeadline(() => assert.fail("must not run"), parent.signal),
     { name: "AbortError" },
   );
-});
-
-await test("Gemini credential lookup cannot hang the refresh; shutdown still cancels", async () => {
-  const ctx = {
-    modelRegistry: { getApiKeyForProvider: () => new Promise(() => {}) },
-  };
-  const parent = new AbortController();
-  const result = await queryAntigravityUsage(ctx, parent.signal, 10);
-  assert.equal(result.kind, "failed");
-  assert.match(result.error, /超时/u);
-  const work = queryAntigravityUsage(ctx, parent.signal);
-  parent.abort();
-  await assert.rejects(work, { name: "AbortError" });
-});
-
-await test("Gemini sample time survives GUI projection and drives TUI warnings", () => {
-  const theme = { fg: (_color, text) => text, bold: (text) => text };
-  const state = {
-    kind: "loaded",
-    capturedAt: 1000,
-    usage: {
-      groups: [],
-      models: [{ modelId: "gemini", remainingFraction: 0.5 }],
-    },
-  };
-  assert.equal(antigravityGUIStatus(state, true).capturedAt, 1000);
-  assert.doesNotMatch(
-    formatAntigravityStatus(state, true, theme, 2000, 10000),
-    /已过期|采样时间未知/u,
-  );
-  assert.match(
-    formatAntigravityStatus(state, false, theme, 11000, 10000),
-    /已过期/u,
-  );
-  assert.match(formatAntigravityStatus(state, false, theme, 999), /时间超前/u);
-  assert.match(
-    formatAntigravityStatus({ ...state, capturedAt: undefined }, false, theme),
-    /时间未知/u,
-  );
-  for (const capturedAt of [true, "1000", NaN, Infinity, -1]) {
-    assert.equal(validAntigravityUsageState({ ...state, capturedAt }), false);
-  }
 });

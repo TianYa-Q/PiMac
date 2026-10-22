@@ -1614,7 +1614,7 @@ final class TelegramControl: ObservableObject {
       let model = remoteModel(in: workspace)
       let usage = workspace.extensionUI.usage(for: model)
       return Self.usageMessage(
-        accounts: usage.accounts, gemini: usage.gemini, updatedAt: usage.updatedAt,
+        accounts: usage.accounts, updatedAt: usage.updatedAt,
         page: parts.count == 2 ? Int(parts[1]) ?? 1 : 1,
         supportsAccountSwitch: model?.supportsAccountSwitch == true)
     }
@@ -2462,10 +2462,10 @@ final class TelegramControl: ObservableObject {
   }
 
   static func usageMessage(
-    accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?, now: Date = .now,
+    accounts: [CodexAccountStatus], updatedAt: Date?, now: Date = .now,
     page requestedPage: Int = 1, supportsAccountSwitch: Bool = false
   ) -> String {
-    guard !accounts.isEmpty || gemini?.isConfigured == true else {
+    guard !accounts.isEmpty else {
       return "暂无账户额度数据\n请在 Mac 点击账户额度刷新。"
     }
     let page = TelegramPresentation.page(
@@ -2487,20 +2487,6 @@ final class TelegramControl: ObservableObject {
       let warning = remaining.isFinite && remaining <= 15 ? " · ⚠️ 额度偏低" : ""
       return
         "  \(label)  \(TelegramPresentation.percent(remaining))\(resetAt.map { " → \(resetCountdown($0))" } ?? "")\(warning)"
-    }
-    func geminiLabel(_ window: String?) -> String {
-      guard let window else { return "额度" }
-      if window.localizedCaseInsensitiveContains("5h")
-        || window.localizedCaseInsensitiveContains("five hour")
-      {
-        return "5h"
-      }
-      if window.localizedCaseInsensitiveContains("7d")
-        || window.localizedCaseInsensitiveContains("week")
-      {
-        return "7d"
-      }
-      return "额度"
     }
     var lines = [
       "剩余额度 · \(page.number)/\(page.count) 页",
@@ -2542,19 +2528,6 @@ final class TelegramControl: ObservableObject {
         lines.append("  重置机会 ×\(credits.availableCount)")
       }
     }
-    if page.number == 1, let gemini, gemini.isConfigured {
-      lines.append("\n\(gemini.isActive ? "●" : "○") Gemini")
-      if let error = gemini.error {
-        lines.append("  ⚠️ \(TelegramPresentation.compactLabel(error, limit: 80))")
-      } else if gemini.quotas.isEmpty {
-        lines.append("  暂无额度数据")
-      } else {
-        for quota in gemini.quotas {
-          lines.append(quotaLine(geminiLabel(quota.window), quota.remainingPercent, quota.resetAt))
-        }
-      }
-    }
-    if page.number > 1, gemini?.isConfigured == true { lines.append("\nGemini 额度在第 1 页") }
     lines.append(
       supportsAccountSwitch
         ? "\n● 当前账户 · 空闲时可切换\n仅本地缓存，不主动刷新额度。"

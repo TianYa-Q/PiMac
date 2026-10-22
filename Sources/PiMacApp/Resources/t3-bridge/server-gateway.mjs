@@ -69,7 +69,7 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
         return json(res, 200, await manager.pairing({ label: 'Pi Mac LAN phone' }));
       }
       if (route === 'POST /internal/auth/account-status') {
-        if (!['openai', 'openai-codex', 'antigravity'].includes(body.provider)) throw new Error('Unsupported provider');
+        if (!['openai', 'openai-codex'].includes(body.provider)) throw new Error('Unsupported provider');
         const payload = body.selectionOnly === true
           ? { version: 2, provider: body.provider, source: 'host-query', selectionOnly: true, accounts: [], updatedAt: Date.now() }
           : await piAccounts.accountStatus(body);

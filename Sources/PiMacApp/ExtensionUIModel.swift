@@ -13,7 +13,6 @@ final class ExtensionUIModel: ObservableObject {
   static let maximumPendingDialogs = 64
   @Published private(set) var statuses: [String: String] = [:]
   @Published private(set) var codexAccounts: [CodexAccountStatus] = []
-  @Published private(set) var geminiUsage: GeminiUsageStatus?
   @Published private(set) var codexAccountsUpdatedAt: Date?
 
   private struct PendingDialog {
@@ -23,7 +22,6 @@ final class ExtensionUIModel: ObservableObject {
 
   private struct UsageSnapshot {
     let accounts: [CodexAccountStatus]
-    let gemini: GeminiUsageStatus?
     let updatedAt: Date?
   }
 
@@ -32,7 +30,6 @@ final class ExtensionUIModel: ObservableObject {
     let provider: AccountUsageProvider
     let supportsAccountSwitch: Bool
     let managesSelectedAuth: Bool
-    let geminiIsActive: Bool
     let updatedAt: Date?
   }
 
@@ -258,7 +255,7 @@ final class ExtensionUIModel: ObservableObject {
       version == 2 ? (payload["provider"] as? String ?? "openai-codex") : "openai-codex"
     guard let provider = AccountUsageProvider(rawValue: providerID) else { return }
     let usageSnapshot =
-      usageSnapshots[provider] ?? UsageSnapshot(accounts: [], gemini: nil, updatedAt: nil)
+      usageSnapshots[provider] ?? UsageSnapshot(accounts: [], updatedAt: nil)
     let updatedAt = AccountUsageSnapshot.date(payload["updatedAt"], milliseconds: true)
     // An explicitly malformed timestamp must not bypass out-of-order protection.
     guard payload["updatedAt"] == nil || updatedAt != nil else { return }
@@ -301,33 +298,6 @@ final class ExtensionUIModel: ObservableObject {
       $0.name.localizedStandardCompare($1.name) == .orderedAscending
     }
 
-    let gemini: GeminiUsageStatus?
-    if let rawGemini = payload["gemini"] as? PiRPCClient.JSON {
-      let kind = rawGemini["kind"] as? String
-      var seenQuotaIDs: Set<String> = []
-      let quotas = (rawGemini["quotas"] as? [PiRPCClient.JSON] ?? []).compactMap {
-        raw -> GeminiQuota? in
-        guard let remaining = AccountUsageSnapshot.percent(raw["remainingPercent"]) else {
-          return nil
-        }
-        let quota = GeminiQuota(
-          remainingPercent: remaining,
-          resetAt: AccountUsageSnapshot.date(raw["resetAt"], milliseconds: true),
-          window: raw["window"] as? String
-        )
-        return seenQuotaIDs.insert(quota.id).inserted ? quota : nil
-      }
-      gemini = GeminiUsageStatus(
-        isConfigured: kind != "unconfigured",
-        isActive: rawGemini["isActive"] as? Bool ?? false,
-        quotas: quotas,
-        error: rawGemini["error"] as? String,
-        capturedAt: AccountUsageSnapshot.date(rawGemini["capturedAt"], milliseconds: true)
-      )
-    } else {
-      gemini = nil
-    }
-
     // Only account selection belongs to a session. Ignore an older selection update from the
     // same process, but allow another process to have an independently selected account.
     let previousSelection = sessionAccountSelections[sourceID]
@@ -345,8 +315,6 @@ final class ExtensionUIModel: ObservableObject {
           ? selectionPayload?["supportsAccountSwitch"] as? Bool ?? false : true,
         managesSelectedAuth: version == 2
           ? selectionPayload?["managesSelectedAuth"] as? Bool ?? false : active != nil,
-        geminiIsActive: isHostQuery
-          ? selectionPayload?["geminiIsActive"] as? Bool ?? false : gemini?.isActive ?? false,
         updatedAt: selectionUpdatedAt ?? previousSelection?.updatedAt
       )
     }
@@ -358,7 +326,7 @@ final class ExtensionUIModel: ObservableObject {
     // Subsequent payloads from the process are periodic or user-requested refreshes.
     let mayUpdateUsage =
       isHostQuery
-      || usageSnapshot.accounts.isEmpty && usageSnapshot.gemini == nil
+      || usageSnapshot.accounts.isEmpty
       || (!isInitialStatusFromSource && !isFirstStatusAfterSessionChange)
     let usageIsCurrent =
       updatedAt.map { incoming in
@@ -367,7 +335,6 @@ final class ExtensionUIModel: ObservableObject {
     if payload["selectionOnly"] as? Bool != true && mayUpdateUsage && usageIsCurrent {
       usageSnapshots[provider] = UsageSnapshot(
         accounts: accounts,
-        gemini: gemini,
         updatedAt: updatedAt ?? usageSnapshot.updatedAt
       )
     }
@@ -378,13 +345,13 @@ final class ExtensionUIModel: ObservableObject {
   }
 
   func usage(for source: AppModel?) -> (
-    accounts: [CodexAccountStatus], gemini: GeminiUsageStatus?, updatedAt: Date?
+    accounts: [CodexAccountStatus], updatedAt: Date?
   ) {
     let candidate = source.flatMap { sessionAccountSelections[ObjectIdentifier($0)] }
     let provider = usageProvider(for: source)
     let selection = candidate?.provider == provider ? candidate : nil
     let usageSnapshot =
-      usageSnapshots[provider] ?? UsageSnapshot(accounts: [], gemini: nil, updatedAt: nil)
+      usageSnapshots[provider] ?? UsageSnapshot(accounts: [], updatedAt: nil)
     // The first status event after a project switch can arrive from the process that was just
     // left while the new process is still starting. Keep the account currently shown (or use
     // the payload's account when bootstrapping) until the selected process reports its own
@@ -395,10 +362,6 @@ final class ExtensionUIModel: ObservableObject {
         ?? usageSnapshot.accounts.first(where: \.isActive)?.name)
       : nil
     let activeAccount = selection != nil ? selection?.activeAccount : fallbackActiveAccount
-    let geminiIsActive =
-      selection?.geminiIsActive
-      ?? (source === selectedSource ? geminiUsage?.isActive : nil)
-      ?? (source === selectedSource ? usageSnapshot.gemini?.isActive : nil)
     let accounts = usageSnapshot.accounts.map { account in
       CodexAccountStatus(
         name: account.name,
@@ -415,17 +378,7 @@ final class ExtensionUIModel: ObservableObject {
       if $0.isActive != $1.isActive { return $0.isActive }
       return $0.name.localizedStandardCompare($1.name) == .orderedAscending
     }
-    let gemini = usageSnapshot.gemini.map {
-      GeminiUsageStatus(
-        isConfigured: $0.isConfigured,
-        isActive: geminiIsActive ?? false,
-        quotas: $0.quotas,
-        error: $0.error,
-        capturedAt: $0.capturedAt
-      )
-    }
-
-    return (accounts, gemini, usageSnapshot.updatedAt)
+    return (accounts, usageSnapshot.updatedAt)
   }
 
   func supportsAccountSwitch(for source: AppModel) -> Bool {
@@ -451,7 +404,6 @@ final class ExtensionUIModel: ObservableObject {
     let snapshot = usage(for: selectedSource)
     displayedUsageProvider = usageProvider(for: selectedSource)
     if codexAccounts != snapshot.accounts { codexAccounts = snapshot.accounts }
-    if geminiUsage != snapshot.gemini { geminiUsage = snapshot.gemini }
     if codexAccountsUpdatedAt != snapshot.updatedAt {
       codexAccountsUpdatedAt = snapshot.updatedAt
     }

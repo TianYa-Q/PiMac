@@ -597,7 +597,7 @@ export function createAccountRuntime({
     if (tickFlight) return tickFlight;
     log({ operation: "monitor-tick", reason });
     tickFlight = Promise.allSettled(
-      ["openai", "openai-codex", "antigravity"].map((provider) =>
+      ["openai", "openai-codex"].map((provider) =>
         accountStatus({ provider, force: true }),
       ),
     )

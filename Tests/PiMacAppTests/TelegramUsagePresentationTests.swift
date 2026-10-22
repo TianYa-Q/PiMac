@@ -51,24 +51,21 @@ final class TelegramUsagePresentationTests: XCTestCase {
         primary: CodexUsageWindow(remainingPercent: 10, resetAt: nil, windowSeconds: 18_000),
         secondary: nil, resetCredits: nil, error: nil)
     }
-    let gemini = GeminiUsageStatus(isConfigured: true, isActive: false, quotas: [], error: nil)
     let first = TelegramControl.usageMessage(
-      accounts: accounts, gemini: gemini, updatedAt: now, now: now, page: 1)
+      accounts: accounts, updatedAt: now, now: now, page: 1)
     XCTAssertTrue(first.contains("1/3 页"))
     XCTAssertTrue(first.contains("4. ○ Codex account-4"))
     XCTAssertFalse(first.contains("Codex account-5"))
-    XCTAssertTrue(first.contains("○ Gemini"))
     XCTAssertTrue(first.contains("⚠️ 额度偏低"))
     XCTAssertTrue(first.contains("仅本地缓存"))
 
     let last = TelegramControl.usageMessage(
-      accounts: accounts, gemini: gemini, updatedAt: now.addingTimeInterval(-900),
+      accounts: accounts, updatedAt: now.addingTimeInterval(-900),
       now: now, page: Int.max)
     XCTAssertTrue(last.contains("3/3 页"))
     XCTAssertTrue(last.contains("9. ○ Codex account-9"))
     XCTAssertFalse(last.contains("○ Codex account-8"))
     XCTAssertTrue(last.contains("当前 Codex：account-1"))
-    XCTAssertTrue(last.contains("Gemini 额度在第 1 页"))
     XCTAssertTrue(last.contains("缓存较旧"))
   }
 
@@ -77,14 +74,14 @@ final class TelegramUsagePresentationTests: XCTestCase {
     let account = CodexAccountStatus(
       name: "X", isActive: false, isDefault: false, isHidden: false,
       primary: nil, secondary: nil, resetCredits: nil, error: nil)
-    let message = TelegramControl.usageMessage(accounts: [account], gemini: nil, updatedAt: nil)
+    let message = TelegramControl.usageMessage(accounts: [account], updatedAt: nil)
     XCTAssertTrue(message.contains("当前线程账户：未确认"))
     XCTAssertTrue(message.contains("不支持直接切换线程账户"))
     XCTAssertFalse(message.contains("待同步"))
     XCTAssertFalse(message.contains("空闲时可切换"))
     XCTAssertFalse(message.contains("默认"))
     let switchable = TelegramControl.usageMessage(
-      accounts: [account], gemini: nil, updatedAt: nil, supportsAccountSwitch: true)
+      accounts: [account], updatedAt: nil, supportsAccountSwitch: true)
     XCTAssertTrue(switchable.contains("空闲时可切换"))
   }
 

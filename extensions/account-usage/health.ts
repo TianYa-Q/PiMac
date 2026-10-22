@@ -9,7 +9,6 @@ export type UsageHealthOptions = {
   hiddenNames: readonly string[];
   usages: readonly AccountUsage[];
   maxAgeMs: number;
-  gemini: "unconfigured" | "loaded" | "failed";
   refreshing: boolean;
   now?: number;
 };
@@ -49,12 +48,10 @@ export function buildUsageHealthReport(options: UsageHealthOptions) {
     );
   if (
     !options.refreshing &&
-    (snapshots.stale + snapshots.failed + snapshots.missing > 0 ||
-      options.gemini === "failed")
+    snapshots.stale + snapshots.failed + snapshots.missing > 0
   )
     recommendations.push("refresh_usage");
-  const degraded =
-    auth === "failed" || snapshots.failed > 0 || options.gemini === "failed";
+  const degraded = auth === "failed" || snapshots.failed > 0;
   return {
     version: 2,
     status: degraded
@@ -72,17 +69,11 @@ export function buildUsageHealthReport(options: UsageHealthOptions) {
     },
     snapshots,
     refreshing: options.refreshing,
-    gemini: options.gemini,
   };
 }
 
 export function formatUsageHealth(options: UsageHealthOptions): string {
   const report = buildUsageHealthReport(options);
-  const gemini = {
-    unconfigured: "未配置",
-    loaded: "已加载快照",
-    failed: "查询失败",
-  }[report.gemini];
   const { fresh, stale, failed, missing } = report.snapshots;
   const actions: Record<string, string> = {
     repair_auth: "/accounts 修复登录后再运行任务",
@@ -91,7 +82,7 @@ export function formatUsageHealth(options: UsageHealthOptions): string {
     refresh_usage: "/usage refresh 更新额度快照",
   };
   return [
-    "账户额度健康检查（只读，不请求网络／不预热／不切换账户）",
+    "账户额度健康检查（只读，不请求网络／不预热／不切换账户；不代表实时连通）",
     `状态：${{ healthy: "正常", attention: "需检查", degraded: "异常" }[report.status]}`,
     `建议：${report.recommendations.map((code) => actions[code]).join("；") || (report.refreshing ? "等待当前刷新完成" : "无需操作")}`,
     `Provider：${report.provider}`,
@@ -99,7 +90,6 @@ export function formatUsageHealth(options: UsageHealthOptions): string {
     `账户：${report.accounts.total} · 可见 ${report.accounts.visible} · 隐藏 ${report.accounts.hidden}`,
     `额度：新鲜 ${fresh} · 过期 ${stale} · 失败 ${failed} · 未知 ${missing}`,
     `刷新：${report.refreshing ? "进行中" : "空闲"}`,
-    `Gemini：${gemini}（不代表实时连通）`,
     "恢复：/usage refresh 重新查询；/accounts 管理登录；/usage settings 检查隐藏设置。",
     "诊断日志：agent 目录下 account-usage-errors.jsonl（不包含凭据或响应正文）。",
   ].join("\n");

@@ -21,16 +21,20 @@ struct AccountUsageSnapshotTests {
   @Test func freshnessLabelIsHiddenForSamplesWithinFiveMinutes() {
     let now = Date(timeIntervalSince1970: 1_000)
     for age: TimeInterval in [0, 82, 180, 299, 300] {
-      #expect(!AccountUsageSnapshot.shouldShowFreshness(
-        capturedAt: now.addingTimeInterval(-age), now: now))
+      #expect(
+        !AccountUsageSnapshot.shouldShowFreshness(
+          capturedAt: now.addingTimeInterval(-age), now: now))
     }
-    #expect(AccountUsageSnapshot.shouldShowFreshness(
-      capturedAt: now.addingTimeInterval(-301), now: now))
+    #expect(
+      AccountUsageSnapshot.shouldShowFreshness(
+        capturedAt: now.addingTimeInterval(-301), now: now))
     #expect(AccountUsageSnapshot.shouldShowFreshness(capturedAt: nil, now: now))
-    #expect(AccountUsageSnapshot.shouldShowFreshness(
-      capturedAt: now.addingTimeInterval(6), now: now))
-    #expect(!AccountUsageSnapshot.shouldShowFreshness(
-      capturedAt: now.addingTimeInterval(2), now: now))
+    #expect(
+      AccountUsageSnapshot.shouldShowFreshness(
+        capturedAt: now.addingTimeInterval(6), now: now))
+    #expect(
+      !AccountUsageSnapshot.shouldShowFreshness(
+        capturedAt: now.addingTimeInterval(2), now: now))
   }
 
   @Test func freshnessUsesQueryTimeAndHandlesClockChanges() {
@@ -46,20 +50,12 @@ struct AccountUsageSnapshotTests {
       AccountUsageSnapshot.freshness(capturedAt: now.addingTimeInterval(2), now: now) == .fresh)
   }
 
-  @MainActor @Test func malformedEnvelopeDoesNotReplaceValidQuotaAndGeminiIDsAreUnique() throws {
+  @MainActor @Test func malformedEnvelopeDoesNotReplaceValidQuota() throws {
     let ui = ExtensionUIModel()
     let source = AppModel(restoreLastProjectOnLaunch: false)
     var payload: [String: Any] = [
       "version": 2, "provider": "openai-codex", "updatedAt": 1_000,
       "accounts": [["name": "work", "primary": ["remainingPercent": 50]]],
-      "gemini": [
-        "kind": "loaded", "capturedAt": 500,
-        "quotas": [
-          ["remainingPercent": 50, "window": "5h"],
-          ["remainingPercent": 90, "window": "5h"],
-          ["remainingPercent": -1, "window": "7d"],
-        ],
-      ],
     ]
     func publish() throws {
       let text = String(
@@ -71,10 +67,6 @@ struct AccountUsageSnapshotTests {
         from: source)
     }
     try publish()
-    #expect(ui.geminiUsage?.capturedAt == Date(timeIntervalSince1970: 0.5))
-    #expect(ui.usage(for: source).gemini?.capturedAt == ui.geminiUsage?.capturedAt)
-    #expect(ui.geminiUsage?.quotas.count == 1)
-    #expect(ui.geminiUsage?.quotas.first?.remainingPercent == 50)
     payload["accounts"] = [["name": "replacement"]]
     payload["updatedAt"] = true
     try publish()
