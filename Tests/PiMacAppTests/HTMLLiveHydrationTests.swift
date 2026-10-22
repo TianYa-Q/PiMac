@@ -136,9 +136,13 @@ struct HTMLLiveHydrationTests {
     #expect(downloads == 9)
   }
 
-  @Test func failedDownloadRetainsDetailReferenceForNextPoll() async {
+  @Test(arguments: [false, true])
+  func failedDownloadRetainsDetailReferenceForNextPoll(outputOmitted: Bool) async {
     let client = T3DesktopClient()
-    let native = snapshot([item("live", output: nil)])
+    defer { client.stop() }
+    var omittedItem = item("live", output: nil)
+    omittedItem["outputOmitted"] = outputOmitted
+    let native = snapshot([omittedItem])
     var reads = 0
     let (_, firstComplete) = await client.hydrateToolImages(
       native, threadID: "thread", base: base,
@@ -158,5 +162,17 @@ struct HTMLLiveHydrationTests {
     #expect(complete)
     #expect(reads == 1)
     #expect(rows(hydrated).first?["htmlDocument"] as? String == "<h1>retried</h1>")
+    #expect(rows(hydrated).first?["output"] as? JSON != nil)
+    let (_, cachedComplete) = await client.hydrateToolImages(
+      native, threadID: "thread", base: base,
+      performRPC: { _, _ in
+        Issue.record("Recovered HTML must use its cached detail")
+        return [:]
+      },
+      loadHTML: { _ in
+        Issue.record("Recovered HTML must not download again")
+        return ""
+      })
+    #expect(cachedComplete)
   }
 }

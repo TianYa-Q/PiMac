@@ -74,7 +74,7 @@ final class WorkspaceModel: ObservableObject {
   let extensionUI = ExtensionUIModel()
   let telegram: TelegramControl
   let t3Bridge = T3BridgeService()
-  let server = T3DesktopClient()
+  let server: T3DesktopClient
   let git = GitWorkspaceStore()
 
   var selectedGitDirectory: String? {
@@ -94,7 +94,11 @@ final class WorkspaceModel: ObservableObject {
   @Published private(set) var sessionCatalogRevision = 0
   private var projectImportTask: Task<Void, Never>?
 
-  init(telegram: TelegramControl? = nil, restoreUserState: Bool = true) {
+  init(
+    telegram: TelegramControl? = nil, restoreUserState: Bool = true,
+    server client: T3DesktopClient? = nil
+  ) {
+    self.server = client ?? T3DesktopClient()
     self.telegram = telegram ?? TelegramControl()
     persistsState = restoreUserState
     gitObservation = git.$busy.removeDuplicates().dropFirst().sink { [weak self] _ in
@@ -611,6 +615,7 @@ final class WorkspaceModel: ObservableObject {
   }
   private func selectTab(_ id: UUID) {
     selectedTabID = id
+    selectedModel?.enterSkillWorkspace()
     extensionUI.selectSource(selectedModel)
     acknowledgeSelectedCompletion()
     if persistsState, let project = selectedModel?.projectURL {
@@ -627,6 +632,7 @@ final class WorkspaceModel: ObservableObject {
     draftObservations.removeValue(forKey: id)
     if selectedTabID == id {
       selectedTabID = tabs.first?.id
+      selectedModel?.enterSkillWorkspace()
       if tabs.isEmpty {
         addTab(model: AppModel(restoreLastProjectOnLaunch: false), path: nil, draft: false)
       }

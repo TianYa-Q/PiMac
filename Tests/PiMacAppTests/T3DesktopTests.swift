@@ -404,13 +404,13 @@ struct T3DesktopTests {
     #expect(model.messages.first { $0.kind == .user && $0.text == "tools" }?.id == sent.id)
     let read = try #require(
       model.messages.first { $0.toolName == "read" && $0.toolInput == "fixture.txt" })
-    // Official V2 wire projection deliberately omits arbitrary tool output.
-    #expect(read.text.isEmpty)
+    // Wire snapshots omit output; official detail hydration must restore it for cards.
+    #expect(read.text == "done\nsecond line\nthird line")
     #expect(read.toolInput == "fixture.txt")
     #expect(!read.isRunning)
     let code = try #require(model.messages.first { $0.toolName == "codemode" })
     #expect(code.toolInput == "const value = 1;\ntext(value);")
-    #expect(code.text.isEmpty)
+    #expect(code.text == "Script completed\nOutput:\n1")
     // Stock Pi Adapter projects tools as flat items, including nested Pi events.
     #expect(code.childToolEntries.isEmpty)
     #expect(model.messages.contains { $0.toolInput == "nested.txt" })

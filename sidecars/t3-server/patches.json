@@ -60,11 +60,19 @@
   "packages/provider-pi/src/server/status.ts": [
     {
       "oldText": "import { causeErrorTag } from \"@t3tools/shared/observability\";",
-      "newText": "import { createModelContextSettings } from \"pimac:model-context.mjs\";\nimport { causeErrorTag } from \"@t3tools/shared/observability\";"
+      "newText": "import { createModelContextSettings } from \"pimac:model-context.mjs\";\nimport { loadPiThinkingDefaults, type PiThinkingDefaults } from \"pimac:pi-thinking-defaults.ts\";\nimport { causeErrorTag } from \"@t3tools/shared/observability\";"
     },
     {
       "oldText": "    const discoveredModels = parseDiscoveredModels(modelsData, stateData);",
-      "newText": "    // 在官方模型投影丢弃元数据前保存权威上下文窗口，供桌面设置展示。\n    createModelContextSettings().recordModels(modelsData);\n    const discoveredModels = parseDiscoveredModels(modelsData, stateData);"
+      "newText": "    // 在官方模型投影丢弃元数据前保存权威上下文窗口，供桌面设置展示。\n    createModelContextSettings().recordModels(modelsData);\n    const thinkingDefaults = yield* Effect.tryPromise(() => loadPiThinkingDefaults(environment, cwd));\n    const discoveredModels = parseDiscoveredModels(modelsData, stateData, thinkingDefaults);"
+    },
+    {
+      "oldText": "function parseDiscoveredModels(data: unknown, state: unknown): ReadonlyArray<ServerProviderModel> {",
+      "newText": "function parseDiscoveredModels(data: unknown, state: unknown, defaults: PiThinkingDefaults): ReadonlyArray<ServerProviderModel> {"
+    },
+    {
+      "oldText": "        provider === activeProvider && id === activeModelId\n          ? recordString(state, \"thinkingLevel\")\n          : undefined,",
+      "newText": "        // 当前模型使用 RPC 的实际状态；其他模型遵循 Pi 切换模型时的专属、全局、当前档位优先级。\n        provider === activeProvider && id === activeModelId\n          ? recordString(state, \"thinkingLevel\")\n          : defaults.modelLevels.get(slug) ?? defaults.defaultLevel ?? recordString(state, \"thinkingLevel\"),"
     }
   ],
   "packages/provider-pi/src/server/adapter.ts": [

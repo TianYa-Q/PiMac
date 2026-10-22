@@ -27,10 +27,20 @@ final class T3DesktopClient: ObservableObject {
   private var shellRefreshTask: Task<Void, Error>?
   private var shellRefreshRequested = false
   private var generation = UUID()
+  let skillCache = WorkspaceSkillCache()
+  private var skillInterests: [UUID: WorkspaceSkillContext] = [:]
+  private var hasLiveSkillShell = false
+  private let skillDiscovery:
+    ((WorkspaceSkillCache.Key, Bool) async throws -> WorkspaceSkillCache.Success)?
   private var watches: [UUID: ThreadWatch] = [:]
   private var imageCache: [String: PromptAttachment] = [:]
   private var replyImageCache: [String: [PromptAttachment]] = [:]
   private var toolDetailCache: [String: JSON] = [:]
+  private struct ToolHydrationPosition {
+    let ownerThreadID: String
+    let itemID: String
+  }
+  private var toolHydrationPositions: [String: ToolHydrationPosition] = [:]
   private var imageFailures: [String: Int] = [:]
   private var htmlDocumentCache: [String: String] = [:]
   private var htmlRetryAfter: [String: Date] = [:]
@@ -89,8 +99,13 @@ final class T3DesktopClient: ObservableObject {
   }()
 
   private let defaults: UserDefaults
-  init(defaults: UserDefaults = .standard) {
+  init(
+    defaults: UserDefaults = .standard,
+    skillDiscovery: ((WorkspaceSkillCache.Key, Bool) async throws -> WorkspaceSkillCache.Success)? =
+      nil
+  ) {
     self.defaults = defaults
+    self.skillDiscovery = skillDiscovery
     if let data = defaults.data(forKey: "t3DesktopShellCache"),
       let snapshot = try? JSONSerialization.jsonObject(with: data) as? JSON
     {
@@ -109,6 +124,8 @@ final class T3DesktopClient: ObservableObject {
         do {
           let serverURL = self.service?.serverURL
           if serverURL != self.connectedServerURL {
+            self.skillCache.reset()
+            self.hasLiveSkillShell = false
             self.connectedServerURL = serverURL
             self.token = ""
             self.syncedModelPreferences = nil
@@ -129,7 +146,7 @@ final class T3DesktopClient: ObservableObject {
             if self.providers.isEmpty { try await self.loadConfig() }
             phase = "读取会话状态"
             try await self.refresh()
-            if !self.isConnected { self.isConnected = true }
+            self.didCompletePoll()
             // 额度可在没有任何会话变化时更新，不依赖 shell 的内容去重回调。
             self.onAccountPoll?()
             if self.status != "T3 Server 已连接" { self.status = "T3 Server 已连接" }
@@ -149,6 +166,8 @@ final class T3DesktopClient: ObservableObject {
   }
 
   func stop() {
+    hasLiveSkillShell = false
+    skillCache.reset()
     searchIndex.reset()
     generation = UUID()
     loop?.cancel()
@@ -171,6 +190,7 @@ final class T3DesktopClient: ObservableObject {
     imageCache.removeAll()
     replyImageCache.removeAll()
     toolDetailCache.removeAll()
+    toolHydrationPositions.removeAll()
     htmlDocumentCache.removeAll()
     htmlRetryAfter.removeAll()
     imageFailures.removeAll()
@@ -387,9 +407,11 @@ final class T3DesktopClient: ObservableObject {
   // Do not invalidate the entire desktop or rewrite its cache on identical polls.
   // The first live snapshot must still be delivered when loaded from disk.
   func applyShell(_ next: JSON) {
+    hasLiveSkillShell = true
     guard !hasDeliveredShell || !NSDictionary(dictionary: shell).isEqual(to: next) else { return }
     hasDeliveredShell = true
     shell = next
+    reconcileSkillWorkspaces(now: Date())
     sessionCatalog.update(threads: threads)
     for event in taskStatusTracker.consume(threads) { onTaskStatus?(event) }
     if let data = try? JSONSerialization.data(withJSONObject: next) {
@@ -558,14 +580,98 @@ final class T3DesktopClient: ObservableObject {
         try await service.textGenerationModelSettings(modelID: nil)
       }
     }
-    providers = (result["providers"] as? [JSON] ?? []).map { provider in
+    applyProviderCatalog(result["providers"] as? [JSON] ?? [], modelCatalogs: catalogs)
+  }
+
+  func applyProviderCatalog(_ values: [JSON], modelCatalogs: [String: [JSON]]) {
+    providers = values.map { provider in
       var nativeProvider = provider
-      if let id = provider["instanceId"] as? String, let models = catalogs[id] {
+      if let id = provider["instanceId"] as? String, let models = modelCatalogs[id] {
         nativeProvider["models"] = models
       }
       return nativeProvider
     }
   }
+  func didCompletePoll() {
+    if !isConnected { isConnected = true }
+    reconcileSkillWorkspaces(now: Date())
+  }
+
+  func enterSkillWorkspace(owner: UUID, context: WorkspaceSkillContext) {
+    skillInterests[owner] = context
+    reconcileSkillWorkspaces(now: Date())
+  }
+
+  func leaveSkillWorkspace(owner: UUID) { skillInterests.removeValue(forKey: owner) }
+
+  func skillKey(for context: WorkspaceSkillContext) -> WorkspaceSkillCache.Key? {
+    let cwd: String
+    if let id = context.threadID {
+      // 磁盘 shell 和尚未解析的目标线程不能暂时回退到项目根目录。
+      guard hasLiveSkillShell, let thread = thread(id) else { return nil }
+      let worktree = thread["worktreePath"] as? String ?? ""
+      cwd = worktree.isEmpty ? context.projectCwd : worktree
+    } else {
+      cwd = context.projectCwd
+    }
+    return .init(
+      instanceID: context.instanceID, cwd: URL(fileURLWithPath: cwd).standardizedFileURL.path)
+  }
+
+  private func reconcileSkillWorkspaces(now: Date) {
+    guard isConnected, hasLiveSkillShell else { return }
+    for key in Set(skillInterests.values.compactMap { skillKey(for: $0) }) {
+      preloadWorkspaceSkills(key: key, reload: .ifStale, now: now)
+    }
+  }
+
+  func reloadWorkspaceSkills(key: WorkspaceSkillCache.Key) {
+    guard isConnected, hasLiveSkillShell else { return }
+    preloadWorkspaceSkills(key: key, reload: .force, now: Date())
+  }
+
+  private func preloadWorkspaceSkills(
+    key: WorkspaceSkillCache.Key, reload: WorkspaceSkillCache.Reload, now: Date
+  ) {
+    let fresh = reload == .force || skillCache.state(for: key).success != nil
+    skillCache.preload(key: key, reload: reload, now: now) { [self] in
+      if let skillDiscovery { return try await skillDiscovery(key, fresh) }
+      return try await discoverWorkspaceSkills(key: key, fresh: fresh)
+    }
+  }
+
+  /// 工作区快照是 skills 的唯一来源，不能用机器级目录替代项目级发现结果。
+  func discoverWorkspaceSkills(key: WorkspaceSkillCache.Key, fresh: Bool) async throws
+    -> WorkspaceSkillCache.Success
+  {
+    let instanceID = key.instanceID
+    let cwd = key.cwd
+    struct Provider: Decodable {
+      let instanceId: String
+      let workspaceSnapshots: [SkillWorkspaceSnapshot]?
+    }
+    struct Updated: Decodable { let providers: [Provider] }
+    func snapshot(in values: [JSON]) throws -> SkillWorkspaceSnapshot? {
+      let data = try JSONSerialization.data(withJSONObject: ["providers": values])
+      let decoded = try JSONDecoder().decode(Updated.self, from: data)
+      return decoded.providers.first { $0.instanceId == instanceID }?
+        .workspaceSnapshots?.first { $0.cwd == cwd }
+    }
+    if !fresh, let cached = try snapshot(in: providers), cached.isCurrent(at: Date()),
+      let checkedAt = cached.validationDate
+    {
+      return .init(skills: cached.skills, validatedAt: checkedAt)
+    }
+    let result = try await rpc(
+      "server.refreshProviders",
+      payload: ["instanceId": instanceID, "cwd": cwd, "fresh": fresh], timeoutSeconds: 60)
+    guard let updated = result["providers"] as? [JSON],
+      let scoped = try snapshot(in: updated), scoped.isCurrent(at: Date()),
+      let checkedAt = scoped.validationDate
+    else { throw ClientError.rejected }
+    return .init(skills: scoped.skills, validatedAt: checkedAt)
+  }
+
   func setModelContextWindow(_ tokens: Int?, modelID: String) async throws {
     guard let service else { throw ClientError.unavailable }
     modelContextSettings = try await service.setModelContextWindow(tokens, modelID: modelID)
@@ -723,8 +829,8 @@ final class T3DesktopClient: ObservableObject {
     }
   }
 
-  /// Timeline snapshots deliberately omit output. Use official lazy detail reads,
-  /// then download raster images through signed assets without putting bytes in chat text.
+  /// Timeline snapshots omit tool output. Hydrate text and media through official
+  /// detail reads, keyed by revision so running output does not become stale.
   func hydrateToolImages(
     _ native: JSON, threadID: String, base: URL,
     performRPC: (String, JSON) async throws -> JSON,
@@ -738,15 +844,31 @@ final class T3DesktopClient: ObservableObject {
     var complete = true
     var reads = 0
     var downloads = 0
-    itemLoop: for index in rows.indices {
+    let scope = "\(base.absoluteString)|\(threadID)"
+    // 轮询中的 revision 会持续变化，续读位置必须绑定稳定的条目及其所属会话。
+    let start =
+      toolHydrationPositions[scope].flatMap { position in
+        rows.firstIndex { row in
+          guard let item = row["item"] as? JSON else { return false }
+          return item["id"] as? String == position.itemID
+            && (item["threadId"] as? String ?? threadID) == position.ownerThreadID
+        }
+      }.map { ($0 + 1) % rows.count } ?? 0
+    let indices = Array(rows.indices.dropFirst(start)) + Array(rows.indices.prefix(start))
+    itemLoop: for index in indices {
       guard var item = rows[index]["item"] as? JSON,
-        item["type"] as? String == "dynamic_tool",
-        !T3V2Presentation.active.contains(item["status"] as? String ?? ""),
+        (item["type"] as? String == "dynamic_tool"
+          && (!T3V2Presentation.active.contains(item["status"] as? String ?? "")
+            || item["outputOmitted"] as? Bool == true))
+          || (item["type"] as? String == "command_execution"
+            && item["outputOmitted"] as? Bool == true),
         let id = item["id"] as? String, let revision = item["updatedAt"] as? String
       else { continue }
       let ownerThreadID = item["threadId"] as? String ?? threadID
       let key = "\(base.absoluteString)|\(ownerThreadID)|\(id)|\(revision)"
       if let cached = toolDetailCache[key] {
+        // 同一 revision 的重试沿用完整详情，避免仅保留 HTML 引用而丢失已取回的 output。
+        item = cached
         rows[index]["item"] = cached
         guard let retryAfter = htmlRetryAfter[key] else { continue }
         if retryAfter > Date() {
@@ -759,6 +881,8 @@ final class T3DesktopClient: ObservableObject {
         continue
       }
       reads += 1
+      toolHydrationPositions[scope] = ToolHydrationPosition(
+        ownerThreadID: ownerThreadID, itemID: id)
       var images: [PromptAttachment] = []
       // 即使详情请求失败，也保留快照里的有效引用，让最终失败能显示而非无限留白。
       item["htmlRender"] =
@@ -780,6 +904,13 @@ final class T3DesktopClient: ObservableObject {
           guard let fetched = response["item"] as? JSON else { throw ClientError.rejected }
           detail = fetched
         }
+        // 已标记省略的输出必须从详情取回，不能把读取失败缓存成合法空输出。
+        if item["outputOmitted"] as? Bool == true,
+          detail["output"] == nil || detail["output"] is NSNull
+        {
+          throw ClientError.rejected
+        }
+        item["output"] = detail["output"]
         // 完成快照可能领先于详情持久化；缺失输出不是合法的“没有页面”。
         if isHTML, item["status"] as? String == "completed",
           item["htmlRender"] == nil,
@@ -826,8 +957,8 @@ final class T3DesktopClient: ObservableObject {
         let attempts = (imageFailures[key] ?? 0) + 1
         imageFailures[key] = attempts
         guard generation == current, !Task.isCancelled else { return (native, false) }
-        if isHTML {
-          // HTML 失败不能提交 revision，否则当前打开会话永远不会恢复。
+        if isHTML || item["outputOmitted"] as? Bool == true {
+          // 详情失败不能提交 revision，否则当前打开会话永远不会恢复。
           // 前三次随正常轮询重试，之后降频；每轮读取预算仍限制为八条。
           complete = false
           if item["htmlRender"] is T3HTMLRender, attempts >= 3 {

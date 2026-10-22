@@ -139,7 +139,7 @@ export const plugin = { name: 'pimac-native-backend', setup(builder) {
     const spec = manifest.exports['./' + rest.join('/')];
     return { path: resolve(pkg, typeof spec === 'string' ? spec : spec.import) };
   });
-  builder.onResolve({ filter: /^pimac:/ }, args => ({ path: join(root, args.path.slice(6) + (args.path.endsWith('.mjs') ? '' : '.mjs')) }));
+  builder.onResolve({ filter: /^pimac:/ }, args => ({ path: join(root, args.path.slice(6) + (/\.(?:mjs|ts)$/.test(args.path) ? '' : '.mjs')) }));
   builder.onResolve({ filter: /^[^./]/ }, args => runtimePackages.some(name => args.path === name || args.path.startsWith(name + '/'))
     ? { path: args.path, external: true } : undefined);
   builder.onResolve({ filter: /^@opencode\// }, args => ({ path: fileURLToPath(import.meta.resolve(args.path)) }));

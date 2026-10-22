@@ -96,8 +96,9 @@ test('Pi lifecycle and image projection stay upstream-owned with bounded telemet
     assert(!/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText));
   }
   const discovery = patches['packages/provider-pi/src/server/status.ts'];
-  assert.equal(discovery.length, 2);
-  assert(discovery.every(entry => entry.newText.includes('createModelContextSettings')));
+  assert(discovery.every(entry =>
+    /createModelContextSettings|PiThinkingDefaults|defaults\.modelLevels/.test(entry.newText)),
+    'Pi discovery patches only retain model context and project effective thinking defaults');
   assert(discovery.some(entry => entry.newText.includes('.recordModels(modelsData)')));
   assert(discovery.every(entry => !/\.set\(|connection\.|type: "prompt"/.test(entry.newText)));
   // RPC 补丁只添加诊断，不改变官方 scope 判定或恢复旧版逐 handler 授权。

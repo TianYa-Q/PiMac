@@ -62,6 +62,12 @@ final class AppModel: ObservableObject {
   private weak var server: T3DesktopClient?
   private var serverConnectionObservation: AnyCancellable?
   private let observerID = UUID()
+  private(set) var skillWorkspaceContext: WorkspaceSkillContext?
+
+  func enterSkillWorkspace() {
+    guard let skillWorkspaceContext else { return }
+    server?.enterSkillWorkspace(owner: observerID, context: skillWorkspaceContext)
+  }
   private var connectTask: Task<Void, Never>?
   private var generation = UUID()
   private var submitting = false
@@ -208,6 +214,10 @@ final class AppModel: ObservableObject {
     stats = nil
     let current = generation
     projectURL = project.standardizedFileURL
+    skillWorkspaceContext = WorkspaceSkillContext(
+      instanceID: "pi", projectCwd: project.standardizedFileURL.path,
+      threadID: path.flatMap { Self.threadID(from: $0) })
+    enterSkillWorkspace()
     connectionState = .connecting
     isLoadingConfiguration = true
     statusText = "正在连接 T3 线程…"
@@ -252,6 +262,11 @@ final class AppModel: ObservableObject {
 
   private func observeThread(_ id: String, on server: T3DesktopClient) {
     currentSessionPath = "t3:\(id)"
+    if let projectURL {
+      skillWorkspaceContext = WorkspaceSkillContext(
+        instanceID: "pi", projectCwd: projectURL.path, threadID: id)
+      enterSkillWorkspace()
+    }
     server.watch(
       id, owner: observerID,
       receiveUI: { [weak self] snapshot in self?.applyExtensionUI(snapshot) },
@@ -292,6 +307,8 @@ final class AppModel: ObservableObject {
     connectTask?.cancel()
     connectTask = nil
     server?.unwatch(owner: observerID)
+    server?.leaveSkillWorkspace(owner: observerID)
+    skillWorkspaceContext = nil
     connectionState = .disconnected
     // Detaching a view must not stop a T3 task running for iOS/Telegram.
   }

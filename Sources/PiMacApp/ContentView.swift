@@ -82,6 +82,8 @@ struct ContentView: View {
   @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
   @State private var composerSelection = NSRange(location: 0, length: 0)
+  @State private var skillSelectedIndex = 0
+  @State private var skillDismissedText: String?
   @State private var conversationScrollMode: ConversationScrollMode = .pinnedToBottom
   @State private var autoScrollScheduled = false
   @State private var autoScrollGeneration = 0
@@ -334,6 +336,7 @@ struct ContentView: View {
       isSearchingSessions = false
     }
     .onChange(of: tabID) {
+      skillDismissedText = nil
       app.refreshModelPreferences()
       composerSelection = NSRange(location: 0, length: 0)
       conversationScrollMode = .pinnedToBottom
@@ -1384,6 +1387,48 @@ struct ContentView: View {
     initialSessionScrollPending = false
   }
 
+  private var skillTrigger: SkillCompletion.Trigger? {
+    guard skillDismissedText != app.composerText else { return nil }
+    return SkillCompletion.trigger(text: app.composerText, selection: composerSelection)
+  }
+
+  private var matchingSkills: [ComposerSkill] {
+    guard let trigger = skillTrigger else { return [] }
+    guard let key = skillKey else { return [] }
+    return SkillCompletion.matches(
+      workspace.server.skillCache.state(for: key).skills, query: trigger.query)
+  }
+
+  private var skillKey: WorkspaceSkillCache.Key? {
+    app.skillWorkspaceContext.flatMap { workspace.server.skillKey(for: $0) }
+  }
+
+  private func chooseSkill(_ skill: ComposerSkill) {
+    guard let trigger = skillTrigger else { return }
+    let (text, selection) = SkillCompletion.insert(skill, text: app.composerText, trigger: trigger)
+    app.composerText = text
+    composerSelection = selection
+    composerFocused = true
+  }
+
+  private func handleSkillKey(_ keyCode: UInt16) -> Bool {
+    guard skillTrigger != nil else { return false }
+    if keyCode == 53 {
+      skillDismissedText = app.composerText
+      return true
+    }
+    let skills = matchingSkills
+    guard !skills.isEmpty else { return false }
+    let currentIndex = min(skillSelectedIndex, skills.count - 1)
+    switch keyCode {
+    case 125: skillSelectedIndex = (currentIndex + 1) % skills.count
+    case 126: skillSelectedIndex = (currentIndex + skills.count - 1) % skills.count
+    case 48, 36, 76: chooseSkill(skills[currentIndex])
+    default: return false
+    }
+    return true
+  }
+
   private var composer: some View {
     VStack(spacing: 8) {
       HStack {
@@ -1421,6 +1466,13 @@ struct ContentView: View {
         .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
       }
 
+      if let trigger = skillTrigger, let key = skillKey {
+        CachedSkillCompletionList(
+          cache: workspace.server.skillCache, workspaceKey: key, query: trigger.query,
+          selectedIndex: skillSelectedIndex, onSelect: chooseSkill,
+          onReload: { workspace.server.reloadWorkspaceSkills(key: key) })
+      }
+
       ZStack(alignment: .topLeading) {
         ComposerTextView(
           text: $app.composerText,
@@ -1429,8 +1481,12 @@ struct ContentView: View {
           onSubmit: { sendPromptFollowingOutput(delivery: .steer) },
           onFollowUp: { sendPromptFollowingOutput(delivery: .followUp) },
           onPasteFiles: registerAttachments,
-          onPasteImage: registerPastedImage
+          onPasteImage: registerPastedImage,
+          onCompletionKey: handleSkillKey
         )
+        .onChange(of: skillKey) { _, _ in skillSelectedIndex = 0 }
+        .onChange(of: skillTrigger?.query) { _, _ in skillSelectedIndex = 0 }
+        .onChange(of: app.composerText) { _, _ in skillDismissedText = nil }
         .frame(minHeight: 72, maxHeight: 150)
         .clipped()
         if app.composerText.isEmpty {
@@ -1973,6 +2029,7 @@ private struct ComposerTextView: NSViewRepresentable {
   let onFollowUp: () -> Void
   let onPasteFiles: ([URL]) -> [String]
   let onPasteImage: (Data, String) -> [String]
+  let onCompletionKey: (UInt16) -> Bool
 
   func makeCoordinator() -> Coordinator {
     Coordinator(text: $text, selection: $selection, isFocused: $isFocused, initialText: text)
@@ -2005,6 +2062,7 @@ private struct ComposerTextView: NSViewRepresentable {
     textView.onFollowUp = onFollowUp
     textView.onPasteFiles = onPasteFiles
     textView.onPasteImage = onPasteImage
+    textView.onCompletionKey = onCompletionKey
     textView.string = text
     textView.isRichText = false
     textView.importsGraphics = false
@@ -2045,6 +2103,7 @@ private struct ComposerTextView: NSViewRepresentable {
     textView.onFollowUp = onFollowUp
     textView.onPasteFiles = onPasteFiles
     textView.onPasteImage = onPasteImage
+    textView.onCompletionKey = onCompletionKey
     // AppModel 的流式事件会频繁触发 SwiftUI 更新。只有 Binding 确实发生了外部
     // 变化（例如发送后清空）才回写 NSTextView，避免旧的 View 快照覆盖刚输入的字符。
     if text != context.coordinator.lastBindingText {
@@ -2138,6 +2197,7 @@ private struct ComposerTextView: NSViewRepresentable {
     var onFollowUp: (() -> Void)?
     var onPasteFiles: (([URL]) -> [String])?
     var onPasteImage: ((Data, String) -> [String])?
+    var onCompletionKey: ((UInt16) -> Bool)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
       // AppKit may ask every view to handle a key equivalent. Only intercept paste when
@@ -2201,6 +2261,13 @@ private struct ComposerTextView: NSViewRepresentable {
     }
 
     override func keyDown(with event: NSEvent) {
+      // 输入法选词和带修饰键的编辑操作优先，不让候选列表吞掉它们。
+      let completionModifiers = event.modifierFlags.intersection([
+        .command, .option, .control, .shift,
+      ])
+      if !hasMarkedText(), completionModifiers.isEmpty, onCompletionKey?(event.keyCode) == true {
+        return
+      }
       let isReturn = event.keyCode == 36 || event.keyCode == 76
       guard isReturn else {
         super.keyDown(with: event)
@@ -2524,7 +2591,8 @@ private struct ActivityEntryView: View {
           if expanded && hasVisibleDetails {
             if hasExpandableInput, let input = entry.toolInput {
               ToolDetailView(
-                title: entry.toolName == "codemode" ? "脚本 · JavaScript" : "调用参数",
+                title: entry.toolName == "codemode"
+                  ? "脚本 · JavaScript" : entry.toolName == "bash" ? "命令" : "调用参数",
                 text: input
               )
               .padding(.leading, 31)
@@ -2660,9 +2728,9 @@ private struct ActivityEntryView: View {
   }
 
   private var hasExpandableInput: Bool {
-    // 命令和文件路径已完整展示；通用参数的三行预览必须能展开，输出为空时也不例外。
+    // 命令与通用参数都有三行预览，必须允许展开全文，输出尚未到达时也不例外。
     entry.kind == .tool && entry.toolInput?.isEmpty == false
-      && !["bash", "read", "edit", "write"].contains(entry.toolName ?? "")
+      && !["read", "edit", "write"].contains(entry.toolName ?? "")
   }
 
   private var hasVisibleDetails: Bool {
@@ -2691,6 +2759,10 @@ private struct ActivityEntryView: View {
         title: entry.isError ? "错误输出" : (entry.toolName == "read" ? "文件内容" : "输出"),
         text: entry.text
       )
+    } else if entry.kind == .tool, entry.toolName == "bash" {
+      Text(entry.isRunning ? "等待命令输出…" : "暂无可显示的输出")
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
   }
 
@@ -3005,7 +3077,7 @@ struct ImageAttachmentPreview: View {
   }
 }
 
-private struct SettingsView: View {
+struct SettingsView: View {
   @Environment(\.dismiss) private var dismiss
   @State private var path: String
   private let originalPath: String
@@ -3017,6 +3089,7 @@ private struct SettingsView: View {
 
   private enum SettingsTab: String, CaseIterable {
     case runtime = "运行环境"
+    case resources = "技能与指令"
     case mobile = "手机连接"
     case ps5 = "PS5 网关"
     case telegram = "Telegram"
@@ -3025,6 +3098,7 @@ private struct SettingsView: View {
     var icon: String {
       switch self {
       case .runtime: return "desktopcomputer"
+      case .resources: return "doc.text"
       case .mobile: return "iphone"
       case .ps5: return "gamecontroller"
       case .telegram: return "paperplane"
@@ -3084,6 +3158,12 @@ private struct SettingsView: View {
 
             }
 
+            if selectedTab == .resources {
+              PiResourcesSettingsView(
+                store: PiResourceStore(
+                  agentDirectory: PiResourceStore.defaultAgentDirectory, projectURL: projectURL,
+                  homeDirectory: FileManager.default.homeDirectoryForCurrentUser))
+            }
             if selectedTab == .mobile {
               T3SettingsView(service: workspace.t3Bridge, workspace: workspace)
             }
@@ -3234,7 +3314,9 @@ private struct SettingsView: View {
       }
     }
     .frame(width: 760, height: 580)
-    .onAppear { versions.refresh() }
+    .task(id: selectedTab) {
+      if selectedTab == .updates { versions.refresh() }
+    }
     .alert(
       "删除扩展包？",
       isPresented: Binding(
