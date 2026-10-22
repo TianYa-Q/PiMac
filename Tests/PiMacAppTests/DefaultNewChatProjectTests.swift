@@ -1,10 +1,11 @@
 import Foundation
 import Testing
+
 @testable import PiMacApp
 
 @MainActor
 struct DefaultNewChatProjectTests {
-  @Test func newChatUsesLastSelectedProjectWithoutPrompt() {
+  @Test func newChatRestoresLastProjectDraftWithoutPrompt() {
     let workspace = WorkspaceModel(restoreUserState: false)
     defer { workspace.disconnectAll() }
     let first = URL(fileURLWithPath: "/tmp/default-chat-first")
@@ -17,7 +18,7 @@ struct DefaultNewChatProjectTests {
     workspace.newSessionInLastProject()
 
     #expect(workspace.selectedModel?.projectURL == last)
-    #expect(workspace.selectedModel !== previous)
+    #expect(workspace.selectedModel === previous)
     #expect(previous?.composerText == "Keep this draft")
     let newTab = workspace.selectedTabID
     workspace.newSessionInLastProject()
@@ -70,7 +71,8 @@ struct DefaultNewChatProjectTests {
     let previous = workspace.selectedModel
     previous?.composerText = "Unsent message"
     previous?.isLoadingConfiguration = false
-    let attachment = PromptAttachment(url: URL(fileURLWithPath: "/tmp/example.png"), mimeType: "image/png")
+    let attachment = PromptAttachment(
+      url: URL(fileURLWithPath: "/tmp/example.png"), mimeType: "image/png")
     previous?.attachments = [attachment]
     let next = WorkspaceProject(url: URL(fileURLWithPath: "/tmp/switch-chat-next"))
 

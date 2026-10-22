@@ -57,7 +57,8 @@ struct EmptyNewChatTests {
     #expect(model.threadID == nil)
     model.composerText = "Unsent draft"
     workspace.newSession(in: root)
-    let remoteDraft = try #require(workspace.selectedModel)
+    #expect(workspace.selectedModel === model)
+    let remoteDraft = workspace.taskModel(in: root, sessionPath: nil)
     #expect(remoteDraft !== model)
     for _ in 0..<200 where remoteDraft.isLoadingConfiguration {
       try await Task.sleep(for: .milliseconds(25))
@@ -144,7 +145,8 @@ struct EmptyNewChatTests {
     let previous = workspace.selectedModel
     previous?.composerText = "unsent text"
     workspace.newSession(in: project)
-    #expect(workspace.tabs.count == 3)
+    #expect(workspace.tabs.count == 2)
+    #expect(workspace.selectedModel === previous)
     #expect(previous?.composerText == "unsent text")
   }
 }

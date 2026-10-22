@@ -55,6 +55,7 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
   var modelProvider: String? = nil
   var modelID: String? = nil
   var timestamp: Date? = .now
+  var runID: String? = nil
 
   /// Only explicit parent links determine ownership; concurrent top-level tools stay separate.
   static func groupingToolEntries(_ entries: [ChatEntry]) -> [ChatEntry] {
@@ -114,8 +115,8 @@ struct QueuedPrompt: Identifiable, Sendable {
   var remoteMessageDate: Date? = nil
 }
 
-struct PromptAttachment: Identifiable, Hashable, Sendable {
-  let id = UUID()
+struct PromptAttachment: Identifiable, Hashable, Codable, Sendable {
+  var id = UUID()
   let url: URL
   let mimeType: String?
   var replyImagePath: String? = nil

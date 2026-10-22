@@ -89,6 +89,7 @@ final class WorkspaceModel: ObservableObject {
   private var draftObservations: [UUID: AnyCancellable] = [:]
   private var remoteSubmissionHolds: Set<ObjectIdentifier> = []
   private let persistsState: Bool
+  private let draftDefaults: UserDefaults?
   private var shellLoaded = false
   private var pendingCompletionVisits: Set<String> = []
   @Published private(set) var sessionCatalogRevision = 0
@@ -96,11 +97,12 @@ final class WorkspaceModel: ObservableObject {
 
   init(
     telegram: TelegramControl? = nil, restoreUserState: Bool = true,
-    server client: T3DesktopClient? = nil
+    server client: T3DesktopClient? = nil, draftDefaults: UserDefaults? = nil
   ) {
     self.server = client ?? T3DesktopClient()
     self.telegram = telegram ?? TelegramControl()
     persistsState = restoreUserState
+    self.draftDefaults = draftDefaults ?? (restoreUserState ? .standard : nil)
     gitObservation = git.$busy.removeDuplicates().dropFirst().sink { [weak self] _ in
       self?.objectWillChange.send()
     }
@@ -304,17 +306,18 @@ final class WorkspaceModel: ObservableObject {
       Self.latestEmptySessionPath(threads: server.threads, projectID: $0)
     }
     if let tab = tabs.last(where: {
-      $0.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL
-    }), tab.isDraft,
-      tab.model.currentSessionPath.isEmpty || tab.model.currentSessionPath == reusablePath
-        || tab.model.threadID.map({ server.thread($0) == nil }) == true,
-      !tab.model.hasUserMessage, !tab.model.hasUnsubmittedInput, !tab.model.isBusy,
-      tab.model.queuedPrompts.isEmpty
-    {
+      $0.isDraft && $0.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL
+        && ($0.model.currentSessionPath.isEmpty || $0.model.currentSessionPath == reusablePath
+          || $0.model.threadID.map({ server.thread($0) == nil }) == true)
+        && !$0.model.hasUserMessage && !$0.model.isBusy && $0.model.queuedPrompts.isEmpty
+    }) {
       selectTab(tab.id)
       return
     }
-    if let path = reusablePath,
+    let savedProjectDraft = Self.draftKey(sessionPath: nil, projectURL: projectURL).flatMap {
+      draftDefaults?.object(forKey: $0)
+    }
+    if let path = reusablePath, savedProjectDraft == nil,
       model(forSessionPath: path).map({
         !$0.hasUserMessage && !$0.hasUnsubmittedInput && !$0.isBusy && $0.queuedPrompts.isEmpty
       }) ?? true
@@ -574,7 +577,9 @@ final class WorkspaceModel: ObservableObject {
     let model = AppModel(
       startupProjectURL: projectURL, startupSessionPath: sessionPath,
       restoreLastProjectOnLaunch: false)
-    addTab(model: model, path: sessionPath, draft: sessionPath == nil, select: false)
+    addTab(
+      model: model, path: sessionPath, draft: sessionPath == nil, select: false,
+      persistsDraft: sessionPath != nil)
     return model
   }
   func discardMobileDraft(_ model: AppModel) {
@@ -591,7 +596,9 @@ final class WorkspaceModel: ObservableObject {
     server.stop()
     t3Bridge.stop()
   }
-  private func addTab(model: AppModel, path: String?, draft: Bool, select: Bool = true) {
+  private func addTab(
+    model: AppModel, path: String?, draft: Bool, select: Bool = true, persistsDraft: Bool = true
+  ) {
     model.extensionUI = extensionUI
     let tab = Tab(
       id: UUID(), model: model, requestedSessionPath: path, createdAt: .now, isDraft: draft)
@@ -601,18 +608,54 @@ final class WorkspaceModel: ObservableObject {
       // Published 回调先于属性落地；延后读取，覆盖异步绑定到会话的情况。
       Task { @MainActor [weak self] in self?.acknowledgeSelectedCompletion() }
     }
-    if persistsState {
-      if let path, let text = UserDefaults.standard.string(forKey: "t3Draft.\(path)") {
-        model.composerText = text
-      }
-      draftObservations[tab.id] = model.$composerText.dropFirst().sink { [weak model] text in
-        guard let path = model?.currentSessionPath, !path.isEmpty else { return }
-        UserDefaults.standard.set(text, forKey: "t3Draft.\(path)")
-      }
-    }
     model.attach(to: server)
+    if persistsDraft, let draftDefaults {
+      let sessionPath = path ?? (model.currentSessionPath.isEmpty ? nil : model.currentSessionPath)
+      if let key = Self.draftKey(sessionPath: sessionPath, projectURL: model.projectURL) {
+        do {
+          if let stored = draftDefaults.object(forKey: key) {
+            guard let data = stored as? Data else { throw CocoaError(.coderReadCorrupt) }
+            let draft = try PropertyListDecoder().decode(ComposerDraft.self, from: data)
+            model.composerText = draft.text
+            model.attachments = draft.attachments
+          } else if let sessionPath,
+            let text = draftDefaults.string(forKey: "t3Draft.\(sessionPath)")
+          {
+            model.composerText = text
+          }
+        } catch {
+          model.statusText = "草稿记录损坏，无法恢复；原记录仍保留。"
+        }
+      }
+      // 使用 Published 传出的新值，避免 willSet 时读到旧文字或旧附件。
+      draftObservations[tab.id] = model.$composerText.combineLatest(model.$attachments)
+        .dropFirst().sink { [weak model] text, attachments in
+          guard let model else { return }
+          let sessionPath = model.currentSessionPath.isEmpty ? path : model.currentSessionPath
+          guard let key = Self.draftKey(sessionPath: sessionPath, projectURL: model.projectURL)
+          else { return }
+          do {
+            let draft = ComposerDraft(text: text, attachments: attachments)
+            if draft.isEmpty {
+              draftDefaults.removeObject(forKey: key)
+            } else {
+              draftDefaults.set(try PropertyListEncoder().encode(draft), forKey: key)
+            }
+            if let sessionPath {
+              draftDefaults.removeObject(forKey: "t3Draft.\(sessionPath)")
+            }
+          } catch {
+            model.statusText = "草稿保存失败，请保留输入内容后重试。"
+          }
+        }
+    }
     if select { selectTab(tab.id) }
   }
+  private static func draftKey(sessionPath: String?, projectURL: URL?) -> String? {
+    if let sessionPath { return "t3ComposerDraft.session.\(sessionPath)" }
+    return projectURL.map { "t3ComposerDraft.project.\($0.standardizedFileURL.path)" }
+  }
+
   private func selectTab(_ id: UUID) {
     selectedTabID = id
     selectedModel?.enterSkillWorkspace()

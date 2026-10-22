@@ -640,7 +640,8 @@ final class AppModel: ObservableObject {
         htmlRender: message["htmlRender"] as? T3HTMLRender,
         htmlDocument: message["htmlDocument"] as? String,
         htmlRenderError: message["htmlRenderError"] as? String,
-        timestamp: T3DesktopClient.date(message["createdAt"]))
+        timestamp: T3DesktopClient.date(message["createdAt"]),
+        runID: message["runId"] as? String)
     }
     var toolEntries: [String: ChatEntry] = [:]
     var completedTools: Set<String> = []
@@ -676,7 +677,8 @@ final class AppModel: ObservableObject {
         nestedCallsComplete: (data["nestedCalls"] as? [String: Any])?["complete"] as? Bool ?? true,
         diff: data["diff"] as? String,
         attachments: data["localImages"] as? [PromptAttachment] ?? [],
-        timestamp: T3DesktopClient.date(activity["createdAt"]))
+        timestamp: T3DesktopClient.date(activity["createdAt"]),
+        runID: activity["turnId"] as? String)
       if kind.hasPrefix("tool.") {
         entry.toolInput = entry.toolInput ?? toolEntries[entryID]?.toolInput
         entry.parentToolEntryID = entry.parentToolEntryID ?? toolEntries[entryID]?.parentToolEntryID
@@ -1016,11 +1018,14 @@ final class AppModel: ObservableObject {
     return added
   }
   func addPastedImage(_ data: Data, mimeType: String) -> [PromptAttachment] {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent(
+    let directory = URL.applicationSupportDirectory.appendingPathComponent("PiMac/Attachments")
+    let url = directory.appendingPathComponent(
       "pi-clipboard-\(UUID().uuidString).\(UTType(mimeType: mimeType)?.preferredFilenameExtension ?? "png")"
     )
     do {
-      try data.write(to: url)
+      // 粘贴图片随草稿跨重启恢复，不能依赖系统可随时清理的临时目录。
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try data.write(to: url, options: .atomic)
       return addAttachments([url])
     } catch {
       statusText = "无法保存粘贴图片"

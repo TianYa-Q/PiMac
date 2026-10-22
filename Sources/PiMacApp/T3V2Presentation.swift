@@ -97,6 +97,7 @@ enum T3V2Presentation {
           "role": type == "user_message" ? "user" : type == "reasoning" ? "reasoning" : "assistant",
           "text": item["text"] ?? "", "streaming": item["streaming"] ?? false,
           "attachments": item["attachments"] ?? [], "createdAt": date,
+          "runId": item["runId"] ?? NSNull(),
         ])
       case "compaction":
         let before = item["beforeTokenCount"] as? Int
@@ -110,6 +111,7 @@ enum T3V2Presentation {
           "id": item["id"] ?? "", "role": "compaction",
           "title": "上下文已压缩" + counts,
           "text": item["summary"] ?? "", "createdAt": date,
+          "runId": item["runId"] ?? NSNull(),
         ])
       case "command_execution", "dynamic_tool", "file_change", "file_search", "web_search", "error",
         "system_notice":
@@ -137,6 +139,7 @@ enum T3V2Presentation {
             "text": "", "streaming": false, "htmlRender": page, "createdAt": date,
             "htmlDocument": item["htmlDocument"] ?? NSNull(),
             "htmlRenderError": item["htmlRenderError"] ?? NSNull(),
+            "runId": item["runId"] ?? NSNull(),
           ])
         }
         if let images = item["localImages"] as? [PromptAttachment], !images.isEmpty {
@@ -144,6 +147,7 @@ enum T3V2Presentation {
           messages.append([
             "id": "\(item["id"] as? String ?? "")-images", "role": "assistant",
             "text": "", "streaming": false, "localImages": images, "createdAt": date,
+            "runId": item["runId"] ?? NSNull(),
           ])
         }
         if let parent = item["parentItemId"] as? String {

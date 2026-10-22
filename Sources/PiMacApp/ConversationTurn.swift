@@ -27,6 +27,14 @@ struct ConversationTurn: Identifiable, Equatable {
     var turns: [ConversationTurn] = []
     var current: [ChatEntry] = []
     for entry in messages {
+      // 后台唤醒可以开启没有用户消息的新运行；不能把上次运行的正式答复降为过程消息。
+      if let runID = entry.runID,
+        let previousRunID = current.last(where: { $0.runID != nil })?.runID,
+        runID != previousRunID
+      {
+        turns.append(ConversationTurn(entries: current))
+        current = []
+      }
       // 这些已知命令只控制账户、额度或压缩，不是发给模型的任务；原始历史不变。
       // 不按斜杠前缀一概隐藏，附带文件或多行任务说明的输入也保留。
       if entry.kind == .user, entry.attachments.isEmpty {
