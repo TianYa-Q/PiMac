@@ -1,0 +1,13 @@
+{"type":"goal_created","goalId":"mvju8h53-x63ja7","objective":"=== Goal ===\nObjective: 为 Pi 会话增加原生 Goal 按钮，点击后弹出目标输入框，默认先讨论并确认目标，同时提供明确的“直接开始”选项，无需用户输入命令。\nSuccess criteria: 无现有目标时也能找到 Goal 按钮；输入非空目标后可选择默认的“讨论并确认”或显式的“直接开始”；前者进入扩展原有确认流程，后者跳过确认直接开始；取消不发送任何内容；现有未发送的输入文字与附件不被覆盖；已有目标的状态展示与控制不退化。\nBoundaries: 本次新增入口面向 Pi Provider，复用已安装 pi-goal-x 的命令与执行机制；不改写扩展的调度、持久化、审核及自动续跑逻辑，不新增模型或 Provider 限制，不重做其他 Provider 的 Goal 流程。\nConstraints: 使用原生界面；忙碌或不可提交时阻止重复启动并给出清晰提示；不重启运行中的应用或会话；遵循开发编辑批次与安全更新流程；不使用子代理，除非另行获得授权。\nIf blocked: 涉及扩展交互能力不足、需要重启当前会话或无法满足验收条件时，停止并询问用户，不静默改用另一种启动行为。","sisyphus":false,"autoContinue":true,"at":"2026-10-22T17:51:43.815Z"}
+{"type":"task_list_set","goalId":"mvju8h53-x63ja7","taskCount":3,"blockCompletion":false,"at":"2026-10-22T17:51:43.815Z"}
+{"type":"task_started","goalId":"mvju8h53-x63ja7","taskId":"entry-design","at":"2026-10-22T17:52:49.764Z"}
+{"goalId":"mvju8h53-x63ja7","taskId":"entry-design","at":"2026-10-22T17:56:01.781Z","type":"task_complete","evidence":"已核对原生提交路径：独立构造无附件命令，不改写 composer；完成真实 composer 项目栏片段的离线 SwiftUI 修改前截图 before.png，并读图确认有效。"}
+{"goalId":"mvju8h53-x63ja7","taskId":"native-goal-entry","at":"2026-10-22T17:56:01.781Z","type":"task_started"}
+{"goalId":"mvju8h53-x63ja7","taskId":"native-goal-entry","at":"2026-10-22T18:05:00.410Z","type":"task_complete","evidence":"已新增原生 Goal 按钮与目标输入弹窗，默认讨论确认，另有直接开始；共享动作测试覆盖取消/拒绝/空白/忙碌；隔离 Server 协议测试证明两种命令精确提交且保留草稿附件、阻止重复启动。"}
+{"goalId":"mvju8h53-x63ja7","taskId":"verify-deliver","at":"2026-10-22T18:05:00.410Z","type":"task_started"}
+{"type":"task_complete","goalId":"mvju8h53-x63ja7","taskId":"verify-deliver","evidence":"27 项 Swift 测试通过（含真实隔离 Server 的精确命令/去重/草稿附件测试）；改动 Swift 文件 lint 与编译/typecheck、diff-check 通过。读图检查前后、360窄宽、空白/就绪/忙碌弹窗，并已 HTML 交付同条件原生对比，明确不是运行中应用验收。","at":"2026-10-22T18:09:26.571Z"}
+{"type":"completion_requested","goalId":"mvju8h53-x63ja7","at":"2026-10-22T18:09:39.607Z"}
+{"type":"audit_started","goalId":"mvju8h53-x63ja7","at":"2026-10-22T18:09:39.608Z"}
+{"type":"audit_result","goalId":"mvju8h53-x63ja7","verdict":"approved","report":"已核对原生界面、两种命令与已安装扩展的对应流程、取消及空输入拦截、忙碌去重、草稿与附件隔离，以及已有目标展示和控制。\n\n相关测试日志显示 27 项通过；本次只读复查 lint 与 diff 检查通过。同条件原生组件截图有效，且明确标注为离线截图。真实模型自动续跑未验证，但本次未改动该机制。\n\n<approved/>","at":"2026-10-22T18:10:37.824Z"}
+{"type":"goal_completed","goalId":"mvju8h53-x63ja7","archivePath":".pi/goals/archived/goal_2026102302103783_mvju8h53-x63ja7.md","at":"2026-10-22T18:10:37.838Z"}
+{"type":"goal_archived","goalId":"mvju8h53-x63ja7","archivePath":".pi/goals/archived/goal_2026102302103783_mvju8h53-x63ja7.md","at":"2026-10-22T18:10:37.838Z"}

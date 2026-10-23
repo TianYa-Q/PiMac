@@ -22,8 +22,8 @@ final class T3DesktopClient: ObservableObject {
   private var token = ""
   private var connectedServerURL: URL?
   private var loop: Task<Void, Never>?
-  private var refreshTask: Task<Void, Error>?
-  private var refreshRequested = false
+  private let threadRefreshes = ThreadRefreshScheduler()
+  private let assetRefreshes = ThreadRefreshScheduler()
   private var shellRefreshTask: Task<Void, Error>?
   private var shellRefreshRequested = false
   private var generation = UUID()
@@ -54,6 +54,7 @@ final class T3DesktopClient: ObservableObject {
     let receive: (JSON) -> Void
     let receiveUI: (JSON) -> Void
     private(set) var deliveredSnapshot: Data?
+    private(set) var latestSnapshot: Data?
 
     init(threadID: String, receive: @escaping (JSON) -> Void, receiveUI: @escaping (JSON) -> Void) {
       self.threadID = threadID
@@ -64,13 +65,22 @@ final class T3DesktopClient: ObservableObject {
     func deliver(_ detail: JSON, fingerprint: Data, complete: Bool) {
       // 先记账再回调；回调可能重新订阅或使附件缓存失效，不能在返回后覆盖其结果。
       deliveredSnapshot = complete ? fingerprint : nil
+      latestSnapshot = fingerprint
       receive(detail)
     }
 
-    func invalidate() { deliveredSnapshot = nil }
+    func deliverAssets(_ detail: JSON, fingerprint: Data, complete: Bool) {
+      guard latestSnapshot == fingerprint else { return }
+      deliver(detail, fingerprint: fingerprint, complete: complete)
+    }
+
+    func invalidate() {
+      deliveredSnapshot = nil
+      latestSnapshot = nil
+    }
   }
 
-  static func snapshotFingerprint(_ snapshot: JSON) throws -> Data {
+  nonisolated static func snapshotFingerprint(_ snapshot: JSON) throws -> Data {
     // JSON 字典顺序无语义，规范化后只保存摘要，避免为每个页面保留完整转录副本。
     let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
     return Data(SHA256.hash(data: data))
@@ -94,13 +104,19 @@ final class T3DesktopClient: ObservableObject {
     sessionCatalog.sessions(projectID: projectID, settled: settled)
   }
   private var syncedModelPreferences: Data?
-  private let session: URLSession = {
+  // 分开连接池：即使下载占满连接，列表、凭据和命令仍有独立的网络通道。
+  private let session = T3DesktopClient.makeSession(maxConnections: 4)
+  private let threadSession = T3DesktopClient.makeSession(maxConnections: 4)
+  private let assetSession = T3DesktopClient.makeSession(maxConnections: 4)
+
+  private static func makeSession(maxConnections: Int) -> URLSession {
     let config = URLSessionConfiguration.ephemeral
     config.httpShouldSetCookies = false
     config.connectionProxyDictionary = [:]
     config.timeoutIntervalForRequest = 15
+    config.httpMaximumConnectionsPerHost = maxConnections
     return URLSession(configuration: config)
-  }()
+  }
 
   private let defaults: UserDefaults
   init(
@@ -149,7 +165,8 @@ final class T3DesktopClient: ObservableObject {
             try await self.syncModelPreferences()
             if self.providers.isEmpty { try await self.loadConfig() }
             phase = "读取会话状态"
-            try await self.refresh()
+            try await self.refreshShell()
+            self.requestThreadRefreshes()
             self.didCompletePoll()
             // 额度可在没有任何会话变化时更新，不依赖 shell 的内容去重回调。
             self.onAccountPoll?()
@@ -176,9 +193,8 @@ final class T3DesktopClient: ObservableObject {
     generation = UUID()
     loop?.cancel()
     loop = nil
-    refreshTask?.cancel()
-    refreshTask = nil
-    refreshRequested = false
+    threadRefreshes.cancelAll()
+    assetRefreshes.cancelAll()
     shellRefreshTask?.cancel()
     shellRefreshTask = nil
     shellRefreshRequested = false
@@ -248,8 +264,10 @@ final class T3DesktopClient: ObservableObject {
     request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("2", forHTTPHeaderField: "x-t3-orchestration-protocol")
-    if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body) }
-    let (data, response) = try await session.data(for: request)
+    if let body { request.httpBody = try await ImmutableJSONSnapshot(value: body).encode() }
+    guard generation == current, !Task.isCancelled else { throw CancellationError() }
+    let transport = path.hasPrefix("/api/orchestration/threads/") ? threadSession : session
+    let (data, response) = try await transport.data(for: request)
     guard generation == current else { throw CancellationError() }
     guard let status = (response as? HTTPURLResponse)?.statusCode else {
       throw ClientError.unavailable
@@ -259,7 +277,9 @@ final class T3DesktopClient: ObservableObject {
       throw ClientError.unauthorized
     }
     guard status == 200, data.count <= 32 * 1024 * 1024 else { throw ClientError.rejected }
-    return try JSONSerialization.jsonObject(with: data) as? JSON ?? [:]
+    let snapshot = try await ImmutableJSONSnapshot.decode(data)
+    guard generation == current else { throw CancellationError() }
+    return snapshot.value
   }
 
   @discardableResult
@@ -320,27 +340,18 @@ final class T3DesktopClient: ObservableObject {
   }
 
   func refresh() async throws {
-    // 刷新途中可能刚提交 Settle；当前快照不一定包含该写入，必须保留一次后续读取。
-    // 并发请求合并到同一任务，调用方等待完整刷新，而不是将“正在刷新”当作成功。
-    refreshRequested = true
-    if let refreshTask {
-      try await refreshTask.value
-      return
+    try await refreshShell()
+    let tasks = requestThreadRefreshes()
+    // 显式刷新仍等待本次会话读取；日常轮询和命令回执只等待列表，不等图片。
+    for task in tasks { try await task.value }
+    try await assetRefreshes.waitForCurrent()
+  }
+
+  @discardableResult
+  private func requestThreadRefreshes() -> [Task<Void, Error>] {
+    Set(watches.values.map { $0.threadID }).filter { thread($0) != nil }.map { id in
+      threadRefreshes.request(id) { try await self.refreshThread(id) }
     }
-    let current = generation
-    let task = Task {
-      // 在任务返回前清除句柄，避免新请求误加入已完成、但调用方尚未清理的任务。
-      defer {
-        if self.generation == current { self.refreshTask = nil }
-      }
-      while self.generation == current, self.refreshRequested {
-        try Task.checkCancellation()
-        self.refreshRequested = false
-        try await self.refreshSnapshot()
-      }
-    }
-    refreshTask = task
-    try await task.value
   }
 
   /// 生命周期确认只依赖列表，不应等待所有打开会话的转录、工具详情和图片下载。
@@ -367,45 +378,68 @@ final class T3DesktopClient: ObservableObject {
     try await task.value
   }
 
-  private func refreshSnapshot() async throws {
+  private func refreshThread(_ id: String) async throws {
     let current = generation
-    try await refreshShell()
-    for id in Set(watches.values.map { $0.threadID }) {
-      guard thread(id) != nil else { continue }
-      let escaped = id.addingPercentEncoding(
-        withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
-      let nativeDetail = try await request("/api/orchestration/threads/\(escaped)")
-      guard generation == current else { return }
-      // 快照含继承历史等跨线程派生数据，当前线程的事件序号不能完整代表内容。
-      // 按实际载荷去重，且每个观察者独立确认，避免新订阅被旧订阅的缓存跳过。
-      let fingerprint = try Self.snapshotFingerprint(nativeDetail)
-      let observers = watches.filter {
-        $0.value.threadID == id && $0.value.deliveredSnapshot != fingerprint
-      }
-      if observers.isEmpty { continue }
-      if let stats = T3V2Presentation.stats(nativeDetail),
-        let data = try? JSONEncoder().encode(stats)
-      {
-        defaults.set(data, forKey: "t3DesktopV2Metrics.\(id)")
-      }
-      guard let base = service?.serverURL else { return }
-      let (richNative, toolsComplete) = await hydrateToolImages(
-        nativeDetail, threadID: id, base: base,
-        performRPC: { try await self.rpc($0, payload: $1) },
-        loadHTML: { try await self.htmlRenderDocument($0) })
-      let detail = T3V2Presentation.detail(richNative)
-      let ui = T3V2Presentation.requests(nativeDetail)
-      for (owner, observer) in observers where watches[owner] === observer {
-        observer.receiveUI(ui)
-      }
-      let (withReplies, repliesComplete) = await hydrateReplyImages(detail, threadID: id)
-      let (hydrated, complete) = await hydrateImages(withReplies)
-      guard generation == current else { return }
-      for (owner, observer) in observers where watches[owner] === observer {
-        observer.deliver(
-          hydrated, fingerprint: fingerprint,
-          complete: complete && repliesComplete && toolsComplete)
-      }
+    guard watches.values.contains(where: { $0.threadID == id }) else { return }
+    let escaped = id.addingPercentEncoding(
+      withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
+    let nativeDetail = try await request("/api/orchestration/threads/\(escaped)")
+    guard generation == current else { return }
+    // 快照含继承历史等跨线程派生数据，当前线程的事件序号不能完整代表内容。
+    // 按实际载荷去重，且每个观察者独立确认，避免新订阅被旧订阅的缓存跳过。
+    let fingerprint = try await ImmutableJSONSnapshot(value: nativeDetail).fingerprint()
+    guard generation == current else { return }
+    let observers = watches.filter {
+      $0.value.threadID == id && $0.value.deliveredSnapshot != fingerprint
+    }
+    if observers.isEmpty { return }
+    if let stats = T3V2Presentation.stats(nativeDetail),
+      let data = try? JSONEncoder().encode(stats)
+    {
+      defaults.set(data, forKey: "t3DesktopV2Metrics.\(id)")
+    }
+    guard let base = service?.serverURL else { return }
+    // 先用现有缓存发布正文、队列和交互状态；首次下载不得阻塞这些轻量更新。
+    // 缓存路径复用完整水合逻辑，避免新快照使已显示的图片和工具输出闪回占位。
+    let (cachedNative, cachedToolsComplete) = await hydrateToolImages(
+      nativeDetail, threadID: id, base: base,
+      performRPC: { try await self.rpc($0, payload: $1) },
+      loadHTML: { try await self.htmlRenderDocument($0) }, cachedOnly: true)
+    let cachedDetail = T3V2Presentation.detail(cachedNative)
+    let (cachedReplies, cachedRepliesComplete) = await hydrateReplyImages(
+      cachedDetail, threadID: id, cachedOnly: true)
+    let (immediate, cachedImagesComplete) = await hydrateImages(cachedReplies, cachedOnly: true)
+    let cachedComplete = cachedToolsComplete && cachedRepliesComplete && cachedImagesComplete
+    let ui = T3V2Presentation.requests(nativeDetail)
+    for (owner, observer) in observers where watches[owner] === observer {
+      observer.receiveUI(ui)
+      observer.deliver(immediate, fingerprint: fingerprint, complete: cachedComplete)
+    }
+    if cachedComplete { return }
+    assetRefreshes.request(id) {
+      await self.refreshAssets(
+        nativeDetail, threadID: id, base: base, fingerprint: fingerprint, observers: observers)
+    }
+  }
+
+  private func refreshAssets(
+    _ nativeDetail: JSON, threadID id: String, base: URL, fingerprint: Data,
+    observers: [UUID: ThreadWatch]
+  ) async {
+    let current = generation
+    let (richNative, toolsComplete) = await hydrateToolImages(
+      nativeDetail, threadID: id, base: base,
+      performRPC: { try await self.rpc($0, payload: $1) },
+      loadHTML: { try await self.htmlRenderDocument($0) })
+    let detail = T3V2Presentation.detail(richNative)
+    let (withReplies, repliesComplete) = await hydrateReplyImages(detail, threadID: id)
+    let (hydrated, complete) = await hydrateImages(withReplies)
+    guard generation == current else { return }
+    // 下载途中可能已经发布更新的正文；旧资源只能进入缓存，不能覆盖新快照。
+    for (owner, observer) in observers where watches[owner] === observer {
+      observer.deliverAssets(
+        hydrated, fingerprint: fingerprint,
+        complete: complete && repliesComplete && toolsComplete)
     }
   }
   // Do not invalidate the entire desktop or rewrite its cache on identical polls.
@@ -539,13 +573,19 @@ final class T3DesktopClient: ObservableObject {
     return try await service.accountControl(input)
   }
 
-  func requestRefresh() {
-    if refreshTask != nil {
-      refreshRequested = true
-      return
-    }
+  func requestRefresh(includeThreads: Bool = true) {
+    let current = generation
     Task { [weak self] in
-      try? await self?.refresh()
+      guard let self, self.generation == current else { return }
+      do {
+        // 新建/Settle 的列表确认有独立通道，不排在任何会话的附件下载后面。
+        try await self.refreshShell()
+        if includeThreads { self.requestThreadRefreshes() }
+      } catch {
+        // 后台读取失败由下一次轮询恢复，不重试任何写入命令。
+        guard self.generation == current, !Task.isCancelled else { return }
+        self.status = Self.connectionFailureStatus(error, phase: "读取会话列表")
+      }
     }
   }
 
@@ -791,12 +831,11 @@ final class T3DesktopClient: ObservableObject {
       socket.cancel(with: .normalClosure, reason: nil)
     }
     let id = UUID().uuidString
-    try await socket.send(
-      .string(
-        String(
-          decoding: try JSONSerialization.data(withJSONObject: [
-            "_tag": "Request", "id": id, "tag": method, "payload": payload, "headers": [],
-          ]), as: UTF8.self)))
+    let encoded = try await ImmutableJSONSnapshot(value: [
+      "_tag": "Request", "id": id, "tag": method, "payload": payload, "headers": [],
+    ]).encode()
+    guard generation == current, !Task.isCancelled else { throw CancellationError() }
+    try await socket.send(.string(String(decoding: encoded, as: UTF8.self)))
     while true {
       let frame = try await withTaskCancellationHandler {
         try await socket.receive()
@@ -810,8 +849,10 @@ final class T3DesktopClient: ObservableObject {
       case .string(let value): data = Data(value.utf8)
       @unknown default: throw ClientError.rejected
       }
-      let parsed = try JSONSerialization.jsonObject(with: data)
-      for response in (parsed as? [JSON] ?? (parsed as? JSON).map { [$0] } ?? []) {
+      let frames = try await ImmutableJSONSnapshot.frames(data)
+      guard generation == current, !Task.isCancelled else { throw CancellationError() }
+      for frame in frames {
+        let response = frame.value
         if response["_tag"] as? String == "Ping" {
           try await socket.send(.string(#"{"_tag":"Pong"}"#))
           continue
@@ -838,7 +879,8 @@ final class T3DesktopClient: ObservableObject {
   func hydrateToolImages(
     _ native: JSON, threadID: String, base: URL,
     performRPC: (String, JSON) async throws -> JSON,
-    loadHTML: (T3HTMLRender) async throws -> String
+    loadHTML: (T3HTMLRender) async throws -> String,
+    cachedOnly: Bool = false
   ) async -> (JSON, Bool) {
     var native = native
     guard var projection = native["projection"] as? JSON,
@@ -880,7 +922,7 @@ final class T3DesktopClient: ObservableObject {
           continue
         }
       }
-      guard reads < 8 else {
+      guard !cachedOnly, reads < 8 else {
         complete = false
         continue
       }
@@ -990,7 +1032,9 @@ final class T3DesktopClient: ObservableObject {
   }
 
   /// Reply file links use the same official media assets as the iOS client.
-  private func hydrateReplyImages(_ detail: JSON, threadID: String) async -> (JSON, Bool) {
+  private func hydrateReplyImages(
+    _ detail: JSON, threadID: String, cachedOnly: Bool = false
+  ) async -> (JSON, Bool) {
     var detail = detail
     guard var thread = detail["thread"] as? JSON,
       var messages = thread["messages"] as? [JSON], let base = service?.serverURL
@@ -1020,7 +1064,7 @@ final class T3DesktopClient: ObservableObject {
           images.append(cached)
           continue
         }
-        guard downloads < 8 else {
+        guard !cachedOnly, downloads < 8 else {
           messageComplete = false
           break
         }
@@ -1075,16 +1119,8 @@ final class T3DesktopClient: ObservableObject {
       let url = URL(string: base.absoluteString + relative), url.host == base.host,
       url.port == base.port, url.scheme == base.scheme
     else { throw ClientError.rejected }
-    let (bytes, response) = try await session.bytes(from: url)
-    let limit = 8 * 1024 * 1024
-    guard let response = response as? HTTPURLResponse, response.statusCode == 200,
-      response.mimeType == "text/html", response.expectedContentLength <= limit
-    else { throw ClientError.rejected }
-    var data = Data()
-    for try await byte in bytes {
-      guard data.count < limit else { throw ClientError.rejected }
-      data.append(byte)
-    }
+    let data = try await BoundedAssetDownload.data(
+      from: url, session: assetSession, limit: 8 * 1024 * 1024, mimeType: "text/html")
     guard generation == current, !Task.isCancelled else { throw CancellationError() }
     guard let html = String(data: data, encoding: .utf8), !html.isEmpty
     else { throw ClientError.rejected }
@@ -1153,21 +1189,17 @@ final class T3DesktopClient: ObservableObject {
       url.port == base.port, url.scheme == base.scheme
     else { throw ClientError.rejected }
     let current = generation
-    let (bytes, response) = try await session.bytes(from: url)
-    guard let response = response as? HTTPURLResponse, response.statusCode == 200,
-      response.expectedContentLength <= T3ToolImageCache.maxBytes,
-      response.mimeType?.lowercased() == mime
-    else { throw ClientError.rejected }
-    var data = Data()
-    for try await byte in bytes {
-      guard data.count < T3ToolImageCache.maxBytes else { throw ClientError.rejected }
-      data.append(byte)
-    }
+    let data = try await BoundedAssetDownload.data(
+      from: url, session: assetSession, limit: T3ToolImageCache.maxBytes, mimeType: mime)
     guard generation == current else { throw CancellationError() }
-    return try T3ToolImageCache.store(data, key: key, mimeType: mime)
+    let attachment = try await Task.detached(priority: .utility) {
+      try T3ToolImageCache.store(data, key: key, mimeType: mime)
+    }.value
+    guard generation == current else { throw CancellationError() }
+    return attachment
   }
 
-  private func hydrateImages(_ detail: JSON) async -> (JSON, Bool) {
+  private func hydrateImages(_ detail: JSON, cachedOnly: Bool = false) async -> (JSON, Bool) {
     var detail = detail
     guard var thread = detail["thread"] as? JSON else { return (detail, true) }
     var complete = true
@@ -1181,7 +1213,7 @@ final class T3DesktopClient: ObservableObject {
           result.append(cached)
           continue
         }
-        guard downloads < 8 else {
+        guard !cachedOnly, downloads < 8 else {
           complete = false
           continue
         }
@@ -1235,7 +1267,12 @@ final class T3DesktopClient: ObservableObject {
       T3ToolImageCache.fileExtension(mime) != nil
     else { throw ClientError.rejected }
     let cacheKey = id
-    if let cached = T3ToolImageCache.cached(key: cacheKey, mimeType: mime, size: size) {
+    if let cached = await Task.detached(
+      priority: .utility,
+      operation: {
+        T3ToolImageCache.cached(key: cacheKey, mimeType: mime, size: size)
+      }
+    ).value {
       return cached
     }
     let signed = try await rpc(
@@ -1245,15 +1282,14 @@ final class T3DesktopClient: ObservableObject {
       url.port == base.port
     else { throw ClientError.rejected }
     let current = generation
-    let (bytes, response) = try await session.bytes(from: url)
-    guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ClientError.rejected }
-    var data = Data()
-    for try await byte in bytes {
-      guard data.count < size else { throw ClientError.rejected }
-      data.append(byte)
-    }
+    let data = try await BoundedAssetDownload.data(
+      from: url, session: assetSession, limit: size, mimeType: nil)
     guard generation == current, data.count == size else { throw ClientError.rejected }
-    return try T3ToolImageCache.store(data, key: cacheKey, mimeType: mime)
+    let attachment = try await Task.detached(priority: .utility) {
+      try T3ToolImageCache.store(data, key: cacheKey, mimeType: mime)
+    }.value
+    guard generation == current else { throw CancellationError() }
+    return attachment
   }
 
   // MainActor isolation keeps these reusable formatters serialized.

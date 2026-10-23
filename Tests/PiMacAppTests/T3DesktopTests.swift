@@ -402,6 +402,17 @@ struct T3DesktopTests {
     }
     #expect(model.messages.filter { $0.kind == .user && $0.text == "tools" }.count == 1)
     #expect(model.messages.first { $0.kind == .user && $0.text == "tools" }?.id == sent.id)
+    // 终态正文先于按需工具详情到达，等待完整输出而不是依赖旧的串行交付。
+    for _ in 0..<200
+    where !model.messages.contains(where: {
+      $0.toolName == "codemode" && $0.text == "Script completed\nOutput:\n1"
+    })
+      || !model.messages.contains(where: {
+        $0.toolInput == "fixture.txt" && $0.text == "done\nsecond line\nthird line"
+      })
+    {
+      try await Task.sleep(for: .milliseconds(10))
+    }
     let read = try #require(
       model.messages.first { $0.toolName == "read" && $0.toolInput == "fixture.txt" })
     // Wire snapshots omit output; official detail hydration must restore it for cards.

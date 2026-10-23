@@ -27,7 +27,7 @@ struct LidSleepControllerTests {
     try process.run()
     process.waitUntilExit()
     #expect(process.terminationStatus == 0)
-    #expect(script.contains("[ \"$original\" != 0 ]"))
+    #expect(script.contains("[ \"$original\" = 0 ] || [ \"$original\" = 1 ]"))
     #expect(script.contains("Now drawing from 'AC Power'"))
     #expect(script.contains("desired=0"))
     #expect(!script.contains("heartbeat"))
@@ -76,14 +76,16 @@ struct LidSleepControllerTests {
     let suite = "LidSleepControllerTests.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
-    let controller = LidSleepController(defaults: defaults)
+    let controller = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer { controller.stop() }
     #expect(!controller.enableOnLaunch)
     controller.restoreAtLaunch()  // No permission request when disabled.
     #expect(!controller.busy)
     defaults.set(true, forKey: LidSleepController.launchPreferenceKey)
     controller.stop()  // The same cleanup used on quit and errors.
     #expect(controller.enableOnLaunch)
-    let reopened = LidSleepController(defaults: defaults)
+    let reopened = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer { reopened.stop() }
     #expect(reopened.enableOnLaunch)
     reopened.setEnabled(false)  // An explicit user action clears the preference.
     #expect(!reopened.enableOnLaunch)
@@ -95,7 +97,8 @@ struct LidSleepControllerTests {
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(true, forKey: LidSleepController.launchPreferenceKey)
-    let controller = LidSleepController(defaults: defaults)
+    let controller = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer { controller.stop() }
     controller.restoreAtLaunch()
     controller.restoreAtLaunch()  // Must not schedule a second activation.
     controller.stop()
@@ -110,12 +113,14 @@ struct LidSleepControllerTests {
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(true, forKey: LidSleepController.requestedPreferenceKey)
-    let controller = LidSleepController(defaults: defaults)
+    let controller = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer { controller.stop() }
     #expect(controller.requested)
     #expect(!controller.enabled)
     controller.stop()  // Failure/quit cleanup must not revoke user permission.
     #expect(controller.requested)
-    let reopened = LidSleepController(defaults: defaults)
+    let reopened = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer { reopened.stop() }
     #expect(reopened.requested)
     reopened.setEnabled(false)
     #expect(!reopened.requested)
@@ -128,12 +133,15 @@ struct LidSleepControllerTests {
     let suite = "LidSleepControllerTests.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
-    let controller = LidSleepController(defaults: defaults)
+    let controller = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer { controller.stop() }
     controller.setEnabled(true)
     #expect(controller.busy)
     controller.setEnabled(false)
     await Task.yield()
     #expect(!controller.requested)
+    #expect(controller.busy)  // 恢复完成前不允许启动第二个会话。
+    controller.stop()
     #expect(!controller.busy)
     #expect(!controller.enabled)
     #expect(!controller.enableOnLaunch)
@@ -144,7 +152,8 @@ struct LidSleepControllerTests {
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
     defaults.set(true, forKey: LidSleepController.launchPreferenceKey)
-    let controller = LidSleepController(defaults: defaults)
+    let controller = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer { controller.stop() }
     #expect(controller.requested)
     controller.stop()
     #expect(controller.requested)
@@ -201,6 +210,23 @@ struct LidSleepControllerTests {
     process.waitUntilExit()
     #expect(process.terminationStatus == 0)
     #expect(String(data: data, encoding: .utf8) == expected)
+  }
+
+  @Test @MainActor func explicitDisableSurfacesRestoreFailureAndBlocksOverlappingActivation()
+    async throws
+  {
+    let suite = "LidSleepControllerTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = LidSleepController(defaults: defaults, restoreSleep: { "测试恢复失败" })
+    defer { controller.stop() }
+    controller.setEnabled(false)
+    #expect(controller.busy)
+    controller.setEnabled(true)
+    #expect(!controller.requested)
+    try await Task.sleep(for: .milliseconds(3300))
+    #expect(!controller.busy)
+    #expect(controller.status == "恢复休眠失败：测试恢复失败")
   }
 
   @Test func appleScriptQuotingEscapesNestedSource() {

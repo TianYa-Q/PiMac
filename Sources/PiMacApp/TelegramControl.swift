@@ -2080,7 +2080,7 @@ final class TelegramControl: ObservableObject {
     var updates: [AnyPublisher<Void, Never>] = [
       model.$isStreaming.map { _ in () }.eraseToAnyPublisher(),
       model.$isCompacting.map { _ in () }.eraseToAnyPublisher(),
-      model.$queuedPrompts.map { _ in () }.eraseToAnyPublisher(),
+      model.queuedPromptUpdates,
       model.$connectionState.map { _ in () }.eraseToAnyPublisher(),
       model.$isLoadingConfiguration.map { _ in () }.eraseToAnyPublisher(),
     ]

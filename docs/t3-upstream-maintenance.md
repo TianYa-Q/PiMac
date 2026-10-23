@@ -60,9 +60,16 @@ redemption credentials or implement unsupported account operations.
   managed installs do not reappear as enabled status rows. All drivers, runtime APIs
   and scopes remain intact; later official settings can enable any provider.
 - Pi response telemetry, account-selection status and Fast option integration.
+- Optional pinned `pi-goal-x` presentation bridge: validate RPC status reports and
+  mirror them into official `providerThread.goal`; extension scheduling/storage
+  and upstream Pi lifecycle remain unchanged. See [Pi Goal](pi-goal.md).
   Pi transport, cancellation, retry and compaction remain official.
 - Optional `piMetrics` wire projection and scalar latest-message timestamps for
   desktop presentation; no message bodies are added to the shell projection.
+- Enter's `deliveryIntent: steer` queues durably while a native `/compact` run
+  is active, resolved under the official thread dispatch lock. Explicit
+  `steer_active`/`restart_active` still use upstream validation; Provider compaction
+  execution and queue draining remain upstream-owned.
 - Atomic parent/descendant settlement and bounded subtree identity lookup,
   retaining validation, cycle handling and archived/deleted-node exclusion.
 - Mobile first-message title compatibility for native drafts without titleSeed.

@@ -6,8 +6,8 @@
     "fetch": "node fetch-upstream.mjs",
     "build": "node build.mjs",
     "check": "node build.mjs --check",
-    "pretest": "node build-client.mjs",
-    "test": "node --import tsx --test tests/*.test.mjs tests/*.test.ts"
+    "pretest": "GOMAXPROCS=2 node build-client.mjs",
+    "test": "GOMAXPROCS=2 node --import tsx --test --test-concurrency=1 tests/*.test.mjs tests/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.276",

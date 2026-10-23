@@ -20,7 +20,7 @@ if (args.includes('--fork')) {
 const file = directory && path.join(directory, sessionId + '.jsonl');
 let model = { provider: 'test', id: 'model', name: 'Test Model', reasoning: true,
   thinkingLevelMap: { xhigh: 'xhigh', max: 'max' }, contextWindow: 10000 }, running = false, completion;
-let thinkingLevel = 'off', pendingDialog = false;
+let thinkingLevel = 'off', pendingDialog = false, compacting = false;
 const send = value => process.stdout.write(JSON.stringify(value) + '\r\n');
 const decoder = new StringDecoder('utf8'); let buffer = '';
 process.stdin.on('data', chunk => {
@@ -31,7 +31,7 @@ process.stdin.on('data', chunk => {
       imageCount: command.images?.length ?? 0, secretInherited: !!process.env.PIMAC_T3_BRIDGE_TOKEN }) + '\n', { mode: 0o600 });
     const response = data => send({ id: command.id, type: 'response', command: command.type, success: true, ...(data ? { data } : {}) });
     switch (command.type) {
-      case 'get_state': response({ sessionId, sessionFile, isStreaming: running, isCompacting: false, model, thinkingLevel }); break;
+      case 'get_state': response({ sessionId, sessionFile, isStreaming: running, isCompacting: compacting, model, thinkingLevel }); break;
       case 'get_entries': response({ entries: [] }); break;
       case 'get_messages': response({ messages: [] }); break;
       case 'new_session': sessionId = 'fixture-' + process.pid; sessionFile = path.join(process.cwd(), sessionId + '.jsonl');
@@ -42,7 +42,18 @@ process.stdin.on('data', chunk => {
         cost: 0.012, contextUsage: { tokens: 200, contextWindow: 10000, percent: 2 } }); break;
       case 'compact': {
         const result = { summary: 'Fixture summary', tokensBefore: 200, estimatedTokensAfter: 100 };
-        send({ type: 'compaction_start' }); send({ type: 'compaction_end', result }); response(result); break;
+        compacting = true;
+        send({ type: 'compaction_start' });
+        // 文件屏障让测试精确覆盖压缩中发送，而不是依赖机器速度或固定延迟。
+        const finish = () => {
+          if (fs.existsSync(path.join(process.cwd(), 'fixture-hold-compaction'))) {
+            completion = setTimeout(finish, 20);
+            return;
+          }
+          compacting = false;
+          send({ type: 'compaction_end', result }); response(result);
+        };
+        finish(); break;
       }
       case 'get_commands': response({ commands: [{ name: 'pimac-fast', source: 'extension' }, { name: 'accounts', source: 'extension' }] }); break;
       case 'get_available_models': response({ models: [model, ...(process.env.PIMAC_FIXTURE_EXTRA_MODEL === '1'

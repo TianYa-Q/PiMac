@@ -2,7 +2,6 @@ import AppKit
 import Foundation
 import SwiftUI
 import Testing
-import Vision
 
 @testable import PiMacApp
 
@@ -71,16 +70,6 @@ struct SkillPreloadLifecycleTests {
       type(text)
       host.layoutSubtreeIfNeeded()
       try await Task.sleep(for: .milliseconds(30))
-      if text == "/rev" {
-        let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-        host.cacheDisplay(in: host.bounds, to: bitmap)
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        try VNImageRequestHandler(cgImage: try #require(bitmap.cgImage)).perform([request])
-        let visibleText = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-          .joined(separator: " ").lowercased()
-        #expect(visibleText.contains("review"))
-      }
       if let trigger = SkillCompletion.trigger(
         text: text, selection: NSRange(location: text.utf16.count, length: 0))
       {

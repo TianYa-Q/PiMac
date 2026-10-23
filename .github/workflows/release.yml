@@ -49,7 +49,7 @@ jobs:
 
       # 原生窗口测试及多个真实 Server fixture 不在 CI 上争抢同一宿主资源。
       - name: Test
-        run: swift test --no-parallel
+        run: swift test --jobs 2 --no-parallel
 
       - name: Build app
         env:

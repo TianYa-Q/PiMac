@@ -81,17 +81,23 @@ test('Pi lifecycle and image projection stay upstream-owned with bounded telemet
   }
   assert(!patches[adapter].some(entry => entry.newText.includes('toolOutputImages')),
     'Structured tool output and image preservation are now official upstream behavior');
-  const fastPatches = patches[adapter].filter(entry => entry.newText.includes("fastStatus"));
+  const fastPatches = patches[adapter].filter(entry => entry.newText.includes('"pimac-fast"'));
+  const goalPatches = patches[adapter].filter(entry => !fastPatches.includes(entry) &&
+    /parsePiGoalStatus|piGoal/.test(entry.newText));
   assert.equal(fastPatches.length, 2);
   assert(fastPatches.some(entry => entry.newText.includes('Fast mode not confirmed')));
-  assert.equal(patches[adapter].length - fastPatches.length, 7);
+  assert.equal(goalPatches.length, 6);
+  assert(goalPatches.some(entry => entry.newText.includes('updateProviderThread(threadState, { goal: piGoal })')));
+  assert(goalPatches.every(entry => !/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText)),
+    'Goal patches only mirror native state; scheduling, stop and continuation stay upstream-owned');
+  assert.equal(patches[adapter].length - fastPatches.length - goalPatches.length, 7);
   const selection = patches[adapter].filter(entry => entry.newText.includes('accountSelections.record'));
   assert.equal(selection.length, 1);
   assert(selection[0].newText.includes('state?.providerThread.appThreadId ?? input.threadId'));
   assert.equal(patches[contract].length, 3);
   assert.equal(patches[contract].filter(entry => entry.newText.includes("latestMessageAt: Schema.optional")).length, 2);
   assert(patches[contract].some(entry => entry.newText.includes('piMetrics: Schema.optional')));
-  for (const entry of patches[adapter].filter(entry => !fastPatches.includes(entry))) {
+  for (const entry of patches[adapter].filter(entry => !fastPatches.includes(entry) && !goalPatches.includes(entry))) {
     assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage|accountSelections\.record/.test(entry.newText));
     assert(!/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText));
   }

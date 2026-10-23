@@ -54,6 +54,7 @@ final class AppModel: ObservableObject {
   @Published var isStreaming = false
   @Published var isCompacting = false
   @Published var isLoadingConfiguration = false
+  @Published private(set) var goalState: ThreadGoal.State = .none
   @Published var sessionName = ""
   @Published var sessions: [SessionItem] = []
   /// Compatibility name for UI/TG metadata; contains t3:<thread-id>, NEVER a file path.
@@ -61,8 +62,22 @@ final class AppModel: ObservableObject {
   @Published var stats: SessionStats?
   @Published var composerText = ""
   @Published var attachments: [PromptAttachment] = []
-  /// Read-only presentation of the Server-owned queue.
-  @Published private(set) var queuedPrompts: [ServerQueuedPrompt] = []
+  /// Server 队列与尚未确认的本地提交分开保存；确认后按消息 ID 原位交接。
+  @Published private var serverQueuedPrompts: [ServerQueuedPrompt] = []
+  @Published private var pendingQueuedMessages: [ChatEntry] = []
+  var queuedPromptUpdates: AnyPublisher<Void, Never> {
+    Publishers.Merge(
+      $serverQueuedPrompts.map { _ in () }, $pendingQueuedMessages.map { _ in () }
+    ).eraseToAnyPublisher()
+  }
+  var queuedPrompts: [ServerQueuedPrompt] {
+    serverQueuedPrompts
+      + pendingQueuedMessages.map {
+        ServerQueuedPrompt(
+          id: "pending:\($0.id)", text: $0.text, attachments: $0.attachments,
+          submissionState: $0.isError ? .unconfirmed : .submitting)
+      }
+  }
   @Published private(set) var queueHeld = false
   @Published var statusText = "" {
     didSet {
@@ -86,7 +101,8 @@ final class AppModel: ObservableObject {
   }
   private var connectTask: Task<Void, Never>?
   private var generation = UUID()
-  private var submitting = false
+  @Published private var submitting = false
+  private var submissionTask: Task<Void, Never>?
   /// 仅补齐尚未出现在 Server 快照中的本地消息，不写入持久化历史。
   private var pendingSentMessages: [ChatEntry] = []
   private var pendingSelection: [String: Any]?
@@ -152,6 +168,13 @@ final class AppModel: ObservableObject {
       && pendingSelection == nil
       && !isManagingAccounts
       && extensionUI?.hasPendingDialog(for: self) != true
+  }
+  var goalCreationUnavailableReason: String? {
+    if isBusy { return "会话正在执行或等待交互，请空闲后创建目标" }
+    guard canSubmitPrompt else { return "会话尚未就绪，请连接后再创建目标" }
+    guard projectURL != nil else { return "请先选择项目" }
+    guard !selectedModelId.isEmpty else { return "请先选择模型" }
+    return nil
   }
   var canReuseProcessForNewSession: Bool { false }  // A tab is a view, not a process pool slot.
   var hasUserMessage: Bool { messages.contains { $0.kind == .user } }
@@ -219,8 +242,11 @@ final class AppModel: ObservableObject {
     extensionUISerial = 0
     answeredDialogIDs.removeAll()
     isManagingSessionAccounts = false
-    queuedPrompts.removeAll()
+    serverQueuedPrompts.removeAll()
+    pendingQueuedMessages.removeAll()
+    goalState = .none
     pendingSentMessages.removeAll()
+    submissionTask = nil
     submitting = false
     awaitingAgentStart = false
     connectTask?.cancel()
@@ -318,7 +344,9 @@ final class AppModel: ObservableObject {
     browserPreview.stop()
     extensionUI?.removeRequests(from: self)
     isManagingSessionAccounts = false
-    queuedPrompts.removeAll()
+    serverQueuedPrompts.removeAll()
+    pendingQueuedMessages.removeAll()
+    goalState = .none
     generation = UUID()
     connectTask?.cancel()
     connectTask = nil
@@ -354,6 +382,26 @@ final class AppModel: ObservableObject {
     attachments.removeAll { ids.contains($0.id) }
     submit(prompt) { _ in }
   }
+  /// 新目标不要求已有 Goal 快照；复用扩展原有入口，保持 composer 草稿完全独立。
+  @discardableResult
+  func startGoal(objective: String, mode: GoalStartMode) -> Bool {
+    guard goalCreationUnavailableReason == nil,
+      let command = mode.command(objective: objective),
+      let prompt = Self.makePrompt(command, attachments: [], delivery: .followUp)
+    else { return false }
+    submit(prompt) { _ in }
+    return true
+  }
+
+  /// 原生命令独立提交，不读取或清空正在编辑的正文和附件，也不在忙碌时排队控制命令。
+  func sendGoalCommand(_ command: String) {
+    guard canSubmitPrompt, !isBusy,
+      case .available(_, driver: "pi") = goalState,
+      let prompt = Self.makePrompt(command, attachments: [], delivery: .followUp)
+    else { return }
+    submit(prompt) { _ in }
+  }
+
   func sendRemotePrompt(
     _ text: String, attachments: [PromptAttachment] = [], messageID: String? = nil,
     completion: @escaping (Bool) -> Void
@@ -385,22 +433,27 @@ final class AppModel: ObservableObject {
     let entry = ChatEntry(
       id: submittedMessageID, kind: .user, title: "你", text: prompt.rpcText,
       attachments: prompt.attachments.filter(\.isImage))
-    pendingSentMessages.append(entry)
-    messages.append(entry)
-    Task { [weak self] in
+    if isQueueing {
+      pendingQueuedMessages.append(entry)
+    } else {
+      pendingSentMessages.append(entry)
+      messages.append(entry)
+    }
+    submissionTask = Task { [weak self] in
       guard let self else { return }
-      defer { if self.generation == current { self.submitting = false } }
-      do {
-        let images: [[String: Any]] = try prompt.attachments.filter(\.isImage).map { attachment in
-          let data = try Data(contentsOf: attachment.url)
-          guard data.count <= 8 * 1024 * 1024, let mime = attachment.mimeType else {
-            throw T3DesktopClient.ClientError.rejected
-          }
-          return [
-            "type": "image", "name": attachment.url.lastPathComponent, "mimeType": mime,
-            "sizeBytes": data.count, "dataUrl": "data:\(mime);base64,\(data.base64EncodedString())",
-          ]
+      defer {
+        if self.generation == current {
+          self.submitting = false
+          self.submissionTask = nil
         }
+      }
+      do {
+        let encoded = try await PromptImagePayload.encode(prompt.attachments)
+        guard self.generation == current, !Task.isCancelled else {
+          completion(false)
+          return
+        }
+        let images = encoded.map(\.json)
         let id: String
         if let existingThreadID {
           id = existingThreadID
@@ -451,6 +504,10 @@ final class AppModel: ObservableObject {
         self.awaitingAgentStart = false
         // 网络失败可能发生在 Server 接收之后：保留原消息 ID，不自动重发。
         // 后续权威快照若包含该 ID，会自然替换这条未确认消息。
+        for index in self.pendingQueuedMessages.indices
+        where self.pendingQueuedMessages[index].id == submittedMessageID {
+          self.pendingQueuedMessages[index].isError = true
+        }
         for index in self.pendingSentMessages.indices
         where self.pendingSentMessages[index].id == submittedMessageID {
           self.pendingSentMessages[index].title = "你 · 提交未确认"
@@ -468,7 +525,12 @@ final class AppModel: ObservableObject {
   func abort() {
     guard let id = threadID, let runID = lastTurnID, let server else { return }
     let current = generation
+    let pendingSubmission = submissionTask
     Task {
+      // 同一会话的排队提交必须先于 holdQueue，避免晚到的提交重新唤醒刚停止的队列。
+      // 只串行化这两个有因果关系的写入，不阻塞界面、列表或其他会话。
+      await pendingSubmission?.value
+      guard generation == current else { return }
       do {
         try await server.interrupt(threadID: id, runID: runID)
       } catch {
@@ -578,8 +640,9 @@ final class AppModel: ObservableObject {
     else { return }
     connectionState = .connected
     sessionName = thread["title"] as? String ?? ""
+    goalState = ThreadGoal.State.read(thread["goal"], driver: thread["goalDriver"] as? String)
     queueHeld = thread["queueHeld"] as? Bool ?? false
-    queuedPrompts = (thread["queuedMessages"] as? [[String: Any]] ?? []).compactMap {
+    serverQueuedPrompts = (thread["queuedMessages"] as? [[String: Any]] ?? []).compactMap {
       guard let id = $0["runId"] as? String else { return nil }
       return ServerQueuedPrompt(
         id: id, text: $0["text"] as? String ?? "",
@@ -721,6 +784,7 @@ final class AppModel: ObservableObject {
         $0["messageId"] as? String ?? $0["id"] as? String
       })
     pendingSentMessages.removeAll { confirmedIDs.contains($0.id) }
+    pendingQueuedMessages.removeAll { confirmedIDs.contains($0.id) }
     entries.append(contentsOf: pendingSentMessages)
     entries.append(contentsOf: ChatEntry.groupingToolEntries(Array(toolEntries.values)))
     entries.sort { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
@@ -950,10 +1014,11 @@ final class AppModel: ObservableObject {
   }
   func resumeQueue() { queueCommand(["type": "queue.resume"]) }
   func removeQueuedPrompt(id: String) {
+    guard serverQueuedPrompts.contains(where: { $0.id == id }) else { return }
     queueCommand(["type": "queued-run.cancel", "runId": id])
   }
   func editQueuedPrompt(id: String) {
-    guard let prompt = queuedPrompts.first(where: { $0.id == id }),
+    guard let prompt = serverQueuedPrompts.first(where: { $0.id == id }),
       let threadID, let server
     else { return }
     guard !hasUnsubmittedInput else {
@@ -980,19 +1045,20 @@ final class AppModel: ObservableObject {
   }
   func queuedPromptMoveTarget(id: String, direction: Int) -> String? {
     guard direction == -1 || direction == 1,
-      let index = queuedPrompts.firstIndex(where: { $0.id == id }),
-      queuedPrompts.indices.contains(index + direction)
+      let index = serverQueuedPrompts.firstIndex(where: { $0.id == id }),
+      serverQueuedPrompts.indices.contains(index + direction)
     else { return nil }
-    return queuedPrompts[index + direction].id
+    return serverQueuedPrompts[index + direction].id
   }
   func moveQueuedPrompt(id: String, direction: Int) {
     guard let target = queuedPromptMoveTarget(id: id, direction: direction),
-      let to = queuedPrompts.firstIndex(where: { $0.id == target })
+      let to = serverQueuedPrompts.firstIndex(where: { $0.id == target })
     else { return }
     let before: Any =
       direction == -1
       ? target
-      : (queuedPrompts.indices.contains(to + 1) ? queuedPrompts[to + 1].id as Any : NSNull())
+      : (serverQueuedPrompts.indices.contains(to + 1)
+        ? serverQueuedPrompts[to + 1].id as Any : NSNull())
     queueCommand(["type": "queued-run.reorder", "runId": id, "beforeRunId": before])
   }
   func editMessage(_ text: String) { composerText = text }

@@ -83,6 +83,15 @@ enum T3V2Presentation {
       runs.last(where: { active.contains($0["status"] as? String ?? "") })
       ?? runs.last(where: { $0["status"] as? String != "queued" })
     var result = thread(appThread, run: currentRun)
+    // 不回退到其他 provider thread：切换 Provider 后旧目标不属于当前会话执行者。
+    let providerThreads = projection["providerThreads"] as? [JSON] ?? []
+    let activeProviderID = appThread["activeProviderThreadId"] as? String
+    let provider = providerThreads.first {
+      guard let activeProviderID else { return false }
+      return $0["id"] as? String == activeProviderID
+    }
+    result["goal"] = provider?["goal"] ?? NSNull()
+    result["goalDriver"] = provider?["driver"] ?? NSNull()
     let rows = projection["visibleTurnItems"] as? [JSON] ?? []
     let items = rows.compactMap { $0["item"] as? JSON }
     var messages: [JSON] = []

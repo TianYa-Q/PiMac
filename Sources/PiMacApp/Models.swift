@@ -102,6 +102,19 @@ struct ServerQueuedPrompt: Identifiable, Sendable {
   let id: String
   let text: String
   let attachments: [PromptAttachment]
+  var submissionState: SubmissionState = .confirmed
+
+  enum SubmissionState: Sendable {
+    case submitting, unconfirmed, confirmed
+
+    var label: String {
+      switch self {
+      case .submitting: "正在提交"
+      case .unconfirmed: "提交未确认"
+      case .confirmed: "Server 队列"
+      }
+    }
+  }
 }
 
 struct QueuedPrompt: Identifiable, Sendable {

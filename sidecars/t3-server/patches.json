@@ -111,6 +111,30 @@
     {
       "oldText": "        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&",
       "newText": "        // 每次选项应用都明确同步开/关，防止切模型或恢复会话沿用旧进程状态。\n        const fast = getModelSelectionStringOptionValue(modelSelection, \"fastMode\") ?? \"off\";\n        if (fast !== \"on\" && fast !== \"off\") return yield* protocolError(\"Invalid Fast mode\");\n        if (fast === \"on\" || fastStatus === \"on\") {\n          const commands = recordField(yield* request({ type: \"get_commands\" }), \"commands\");\n          if (!Array.isArray(commands) || !commands.some(command =>\n            recordString(command, \"name\") === \"pimac-fast\" &&\n            recordString(command, \"source\") === \"extension\")) {\n            return yield* protocolError(\"Fast extension unavailable; no prompt was sent\");\n          }\n          if (fast === \"on\") {\n            const current = recordField(yield* request({ type: \"get_state\" }), \"model\");\n            if (![\"openai\", \"openai-codex\"].includes(recordString(current, \"provider\") ?? \"\") ||\n                ![\"openai-responses\", \"openai-codex-responses\"].includes(recordString(current, \"api\") ?? \"\")) {\n              return yield* protocolError(\"Model does not support Fast mode\");\n            }\n          }\n          fastStatus = undefined;\n          const result = yield* request({ type: \"prompt\", message: \"/pimac-fast \" + fast });\n          // UI 事件由另一条 fiber 消费；只接受有明确状态确认的命令，不把 handled 当作成功。\n          for (let attempt = 0; attempt < 50 && fastStatus !== fast; attempt++) {\n            yield* Effect.sleep(\"20 millis\");\n          }\n          if (recordString(result, \"disposition\") !== \"handled\" || fastStatus !== fast) {\n            return yield* protocolError(\"Fast mode not confirmed; extension unavailable or command failed\");\n          }\n        }\n        if (\n          thinking !== undefined &&\n          thinking !== appliedThinking &&"
+    },
+    {
+      "oldText": "import * as HostProcess from \"@t3tools/shared/HostProcess\";",
+      "newText": "import { parsePiGoalStatus, type PiGoalStatus } from \"pimac:pi-goal-status.ts\";\nimport * as HostProcess from \"@t3tools/shared/HostProcess\";"
+    },
+    {
+      "oldText": "      let fastStatus: string | undefined;",
+      "newText": "      let piGoal: PiGoalStatus | null | undefined;\n      let fastStatus: string | undefined;"
+    },
+    {
+      "oldText": "        const method = recordString(event, \"method\");",
+      "newText": "        const method = recordString(event, \"method\");\n        if (method === \"setStatus\" && recordString(event, \"statusKey\") === \"pimac-goal\") {\n          try { piGoal = parsePiGoalStatus(event[\"statusText\"]); }\n          catch {\n            yield* emitExtensionError({\n              extensionPath: \"pi-goal-x\", event: \"pimac-goal status\",\n              error: \"Invalid Goal status payload; previous goal retained. Verify scripts/install-pi-goal.ts --check.\",\n            });\n            return;\n          }\n          if (threadState !== null) yield* updateProviderThread(threadState, { goal: piGoal });\n          return;\n        }"
+    },
+    {
+      "oldText": "        threadState = { providerThread, activeTurn: null };",
+      "newText": "        // 启动事件可能早于线程注册；缓存仅属于当前 Pi 原生会话，不创建第二份目标存储。\n        if (piGoal !== undefined) Object.assign(providerThread, { goal: piGoal });\n        threadState = { providerThread, activeTurn: null };"
+    },
+    {
+      "oldText": "              state.providerThread = turnInput.providerThread;",
+      "newText": "              state.providerThread = {\n                ...turnInput.providerThread,\n                ...(piGoal === undefined ? {} : { goal: piGoal }),\n              };"
+    },
+    {
+      "oldText": "          threadState = null;\n          appliedModel = null;",
+      "newText": "          threadState = null;\n          piGoal = undefined;\n          appliedModel = null;"
     }
   ],
   "packages/provider-pi/src/server/textGeneration.ts": [
@@ -139,6 +163,10 @@
   }
 ],
   "apps/server/src/orchestration-v2/Orchestrator.ts": [
+    {
+      "oldText": "        const target = projection.runs.find((run) => run.id === targetRunId);\n        const turn = latestProviderTurnForAttempt(",
+      "newText": "        const target = projection.runs.find((run) => run.id === targetRunId);\n        // Enter 表达优先插入的意图，而非强制 steering；原生压缩不接收插入消息。\n        // 在线程锁内改为持久队列，避免客户端快照滞后导致拒绝或提前执行。\n        // 显式 steer_active/restart_active 仍保留上游校验和错误语义。\n        if (command.deliveryIntent === \"steer\" && target !== undefined &&\n          projection.messages.some((message) => message.id === target.userMessageId &&\n            isNativeMaintenanceCommand(message) && message.text.trim().toLowerCase() === \"/compact\")) {\n          dispatchMode = { type: \"queue_after_active\" };\n        }\n        const turn = latestProviderTurnForAttempt("
+    },
     {
       "oldText": "((command.titleSeed !== undefined &&\n          (yield* projectionStore",
       "newText": "(((command.titleSeed !== undefined ||\n          (command.createdBy === \"user\" &&\n            [\"\", \"新任务\", \"New thread\"].includes(projection.thread.title.trim()))) &&\n          (yield* projectionStore"

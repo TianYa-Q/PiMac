@@ -69,11 +69,15 @@ struct LidSleepSessionTests {
     ("pidReused", "set:1\nset:0\n", "app_exited:ok", 0),
     ("powerFailed", "set:1\nset:0\n", "power_failed:ok", 1),
     ("restoreFailed", "set:1\nset:0\n", "app_exited:failed", 0),
+    ("restoreIgnored", "set:1\nset:0\n", "app_exited:failed", 0),
     ("queryFailed", "", "power_query_failed:unowned", 1),
     ("queryCommandFailed", "", "power_query_failed:unowned", 1),
     ("runtimeQueryFailed", "set:1\nset:0\n", "power_query_failed:ok", 1),
     ("powerSourceFailed", "set:0\n", "power_query_failed:ok", 1),
-    ("conflict", "", "conflict:unowned", 1),
+    ("inheritedDisabledAC", "set:0\n", "app_exited:ok", 0),
+    ("inheritedDisabledBattery", "set:0\nset:0\n", "app_exited:ok", 0),
+    ("externalDisableOnBattery", "set:0\nset:0\n", "app_exited:ok", 0),
+    ("writeIgnored", "set:1\nset:0\n", "power_failed:ok", 1),
   ])
   func watchdogExecutesLifecycleWithoutRealPowerChanges(
     testCase: (String, String, String, Int32)
@@ -103,18 +107,21 @@ struct LidSleepSessionTests {
       testCommands=\(LidSleepController.shellQuote(commands.path))
       loops=0
       systemPower=0
-      [ "$scenario" != conflict ] || systemPower=1
+      case "$scenario" in inheritedDisabled*) systemPower=1 ;; esac
       [ "$scenario" != queryFailed ] || systemPower=bad
+      testSetting="$testCommands-setting"
+      printf '%s\\n' "$systemPower" > "$testSetting"
       mock_pmset() {
         if [ "$1" = -g ]; then
           if [ "$2" = batt ]; then
             [ "$scenario" != powerSourceFailed ] || return 1
-            if [ "$scenario" = battery ] && [ "$loops" -ge 2 ]; then
+            if [ "$scenario" = inheritedDisabledBattery ] || [ "$scenario" = externalDisableOnBattery ] || { [ "$scenario" = battery ] && [ "$loops" -ge 2 ]; }; then
               echo "Now drawing from 'Battery Power'"
             else
               echo "Now drawing from 'AC Power'"
             fi
           else
+            IFS= read -r systemPower < "$testSetting"
             echo "SleepDisabled $systemPower"
             [ "$scenario" != queryCommandFailed ] || return 1
           fi
@@ -122,7 +129,10 @@ struct LidSleepSessionTests {
           printf 'set:%s\\n' "$3" >> "$testCommands"
           [ "$scenario:$3" != powerFailed:1 ] || return 1
           [ "$scenario:$3" != restoreFailed:0 ] || return 1
-          systemPower=$3
+          case "$scenario:$3" in
+            writeIgnored:1|restoreIgnored:0) : ;;
+            *) printf '%s\\n' "$3" > "$testSetting" ;;
+          esac
         fi
       }
       mock_ioreg() { echo '\"AppleClamshellState\" = No'; }
@@ -137,7 +147,12 @@ struct LidSleepSessionTests {
       mock_sleep() {
         if [ "$loops" = 1 ]; then
           [ "$scenario" != externalReset ] || systemPower=0
+          [ "$scenario" != externalDisableOnBattery ] || systemPower=1
           [ "$scenario" != runtimeQueryFailed ] || systemPower=bad
+          case "$scenario" in
+            externalReset|externalDisableOnBattery|runtimeQueryFailed)
+              printf '%s\\n' "$systemPower" > "$testSetting" ;;
+          esac
           if [ "$scenario" = leaseRemoved ]; then
             /bin/mv "$dir/lease" "$dir/released"
           fi

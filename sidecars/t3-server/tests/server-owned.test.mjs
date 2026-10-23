@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm, readFile, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile, chmod, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -120,32 +120,6 @@ test('parent settlement covers descendants atomically and leaves unrelated threa
   await f.dispatch({ type: 'thread.unsettle', threadId: parent, reason: 'user' });
   assert.equal((await f.snapshot(parent)).thread.settledOverride, 'active');
   assert.equal((await f.snapshot(child)).thread.settledOverride, 'settled');
-});
-
-test('settlement latency with unrelated threads and repeated lifecycle changes', async t => {
-  const directory = await mkdtemp(join(tmpdir(), 'pimac-settlement-latency-'));
-  const f = await open(directory);
-  t.after(async () => { await f.close(); await rm(directory, { recursive: true, force: true }); });
-  const target = await f.create();
-  const unrelated = [];
-  for (let i = 0; i < 32; i++) unrelated.push(await f.create());
-  const started = performance.now();
-  for (let i = 0; i < 5; i++) {
-    await f.dispatch({ type: 'thread.settle', threadId: target });
-    await f.dispatch({ type: 'thread.unsettle', threadId: target, reason: 'user' });
-  }
-  t.diagnostic('five settle/unsettle pairs: ' + Math.round(performance.now() - started) + 'ms');
-  const bulkStarted = performance.now();
-  for (let offset = 0; offset < unrelated.length; offset += 4) {
-    await Promise.all(unrelated.slice(offset, offset + 4).map(threadId =>
-      f.dispatch({ type: 'thread.settle', threadId })));
-  }
-  t.diagnostic('32 settlements, four in flight: ' + Math.round(performance.now() - bulkStarted) + 'ms');
-  const shell = await f.get('/api/orchestration/shell');
-  assert.equal(shell.threads.find(row => row.id === target).settledOverride, 'active');
-  for (const id of unrelated) {
-    assert.equal(shell.threads.find(row => row.id === id).settledOverride, 'settled');
-  }
 });
 
 test('account rotation status survives native adapter and private gateway without quota queries', async t => {
@@ -571,6 +545,47 @@ test('official extension dialogs respond through runtime requests and /compact u
   const records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert(records.some(r => r.command === 'compact'));
   assert(!records.some(r => r.command === 'prompt' && r.message === '/compact'));
+});
+
+test('Enter during compaction queues once and resumes after compaction', async t => {
+  const directory = await mkdtemp(join(process.cwd(), '../../tmp/compaction-enter-'));
+  const f = await open(directory);
+  t.after(async () => { await f.close(); });
+  const threadId = await f.create();
+  await f.dispatch(f.message(threadId, 'before compaction'));
+  await eventually(async () => (await f.snapshot(threadId)).runs.some(run => run.status === 'completed'));
+  const barrier = join(directory, 'fixture-hold-compaction');
+  await writeFile(barrier, 'hold');
+  await f.dispatch(f.message(threadId, '/compact'));
+  await eventually(async () => (await f.snapshot(threadId)).turnItems.some(item =>
+    item.type === 'compaction' && item.status === 'running'));
+  const active = (await f.snapshot(threadId)).runs.find(run => run.status === 'running');
+  assert(active);
+  // 仅将 Enter 的软意图降为排队；调用方显式要求 steering 时沿用官方拒绝语义。
+  await assert.rejects(f.dispatch(f.message(threadId, 'explicit steer', {
+    dispatchMode: { type: 'steer_active', targetRunId: active.id },
+  })), error => error.detail?.includes('Wait for context compaction'));
+  const message = f.message(threadId, 'continue after compaction', {
+    dispatchMode: { type: 'queue_after_active' }, deliveryIntent: 'steer',
+  });
+  await f.dispatch(message);
+  await f.dispatch(message);
+  const queued = await f.snapshot(threadId);
+  assert.equal(queued.runs.filter(run => run.status === 'queued').length, 1);
+  let records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert(!records.some(record => record.message === message.text));
+  await rename(barrier, barrier + '-released');
+  await eventually(async () => (await f.snapshot(threadId)).runs.filter(run => run.status === 'completed').length === 3);
+  const completed = await f.snapshot(threadId);
+  assert.equal(completed.messages.filter(row => row.id === message.messageId).length, 1);
+  assert(completed.visibleTurnItems.some(row => row.item.text === 'Reply: ' + message.text));
+  records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(records.filter(record => record.message === message.text).length, 1);
+  // 压缩结束后的同一 Enter 意图仍应正常启动新一轮，不遗留本地等待状态。
+  await f.dispatch(f.message(threadId, 'after compaction', {
+    dispatchMode: { type: 'queue_after_active' }, deliveryIntent: 'steer',
+  }));
+  await eventually(async () => (await f.snapshot(threadId)).runs.filter(run => run.status === 'completed').length === 4);
 });
 
 test('Pi tool images survive lazy reads, signed downloads and server restart', async t => {

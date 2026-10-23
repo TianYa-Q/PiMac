@@ -91,10 +91,12 @@ Validation entry points:
 
 ```sh
 ./scripts/lint.sh
-swift test
+swift test --jobs 2 --no-parallel
 npm --prefix sidecars/t3-server run check
 npm --prefix sidecars/t3-server test
 ```
+
+Tests run serially, with at most two Swift compilation jobs and two esbuild workers for Server test bundling. Prefer `swift test --jobs 2 --no-parallel --filter SuiteName` for affected suites; do not launch multiple test commands concurrently. Use `./scripts/check.sh` when full validation is needed: it prepares the Server again and is unnecessary for every small edit.
 
 Package locally with `APP_VERSION=0.1.0 BUILD_NUMBER=1 ./scripts/package-app.sh`. Tagged releases (`vX.Y.Z`) use the [release workflow](.github/workflows/release.yml). Apple notarization requires your own Developer ID setup.
 

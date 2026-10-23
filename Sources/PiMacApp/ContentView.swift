@@ -1429,6 +1429,9 @@ struct ContentView: View {
 
   private var composer: some View {
     VStack(spacing: 8) {
+      ThreadGoalView(
+        state: app.goalState, canControl: app.canSubmitPrompt && !app.isBusy,
+        onCommand: app.sendGoalCommand)
       HStack {
         if !app.hasUserMessage, !app.isBusy, !app.isLoadingConfiguration,
           app.queuedPrompts.isEmpty
@@ -1449,6 +1452,13 @@ struct ContentView: View {
             .frame(height: ProjectSwitcher.triggerHeight)
         }
         Spacer()
+        GoalCreationButton(
+          unavailableReason: app.goalCreationUnavailableReason, onStart: app.startGoal
+        )
+        // 切换项目、会话或标签页时销毁弹窗，避免把尚未确认的目标发给另一个执行上下文。
+        .id(app.projectURL)
+        .id(app.currentSessionPath)
+        .id(ObjectIdentifier(app))
       }
       .frame(height: ProjectSwitcher.triggerHeight)
       if !app.queuedPrompts.isEmpty {
@@ -1643,7 +1653,7 @@ struct ContentView: View {
 
   private func queuedPromptRow(_ prompt: ServerQueuedPrompt) -> some View {
     HStack(spacing: 7) {
-      Text("Server 队列").foregroundStyle(.blue)
+      Text(prompt.submissionState.label).foregroundStyle(.blue)
         .font(.caption2.weight(.medium))
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
@@ -1694,6 +1704,7 @@ struct ContentView: View {
       .foregroundStyle(.secondary)
       .help("删除这条尚未发送的消息")
     }
+    .disabled(prompt.submissionState != .confirmed)
   }
 
   @ViewBuilder

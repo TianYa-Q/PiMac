@@ -91,10 +91,12 @@ Watcher 构建独立的开发应用，仅在活动与编辑批次安全门通过
 
 ```sh
 ./scripts/lint.sh
-swift test
+swift test --jobs 2 --no-parallel
 npm --prefix sidecars/t3-server run check
 npm --prefix sidecars/t3-server test
 ```
+
+测试默认串行运行，Swift 编译最多 2 个任务，Server 测试打包的 esbuild 工作线程也限制为 2。日常优先用 `swift test --jobs 2 --no-parallel --filter SuiteName` 验证受影响套件；不要同时启动多个测试命令。`./scripts/check.sh` 用于需要全量验证时，会重新准备 Server，不必每次小改动都执行。
 
 本地打包使用 `APP_VERSION=0.1.0 BUILD_NUMBER=1 ./scripts/package-app.sh`。推送 `vX.Y.Z` 标签后由 [Release 工作流](.github/workflows/release.yml)发布。Apple 公证需要自行配置 Developer ID。
 

@@ -236,7 +236,7 @@ final class WorkspaceModel: ObservableObject {
     Task {
       do {
         _ = try await server.ensureProject(projectURL)
-        try await server.refresh()
+        try await server.refreshShell()
         selectProject(WorkspaceProject(url: projectURL))
       } catch { selectedModel?.statusText = "添加项目未确认，请刷新 Server 列表。" }
     }
@@ -264,7 +264,7 @@ final class WorkspaceModel: ObservableObject {
     Task {
       do {
         try await server.dispatch(["type": "project.update", "projectId": id, "title": title])
-        try await server.refresh()
+        try await server.refreshShell()
       } catch { selectedModel?.statusText = "项目重命名未确认，请刷新 Server 状态。" }
     }
   }
@@ -280,7 +280,7 @@ final class WorkspaceModel: ObservableObject {
       do {
         try await server.dispatch(["type": "project.delete", "projectId": id, "force": true])
         removeTabs(project: project.url)
-        try await server.refresh()
+        try await server.refreshShell()
       } catch { selectedModel?.statusText = "移除项目未确认，请刷新 Server 状态。" }
     }
   }
@@ -458,6 +458,8 @@ final class WorkspaceModel: ObservableObject {
       let (completed, unconfirmed) = await performSettlement(paths: paths) { id in
         try await self.server.dispatch(
           ["type": "thread.settle", "threadId": id], refreshAfter: false)
+        // 已确认的会话及时移出列表，不等最慢的会话完成整批操作，也不刷新所有转录。
+        self.server.requestRefresh(includeThreads: false)
       }
       do {
         try await server.refreshShell()

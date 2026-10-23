@@ -16,6 +16,12 @@ final class LidSleepController: ObservableObject {
   @Published private(set) var status = "未启用" {
     didSet { if status != oldValue { LidSleepDiagnostics.record(status) } }
   }
+  @Published private(set) var systemState = LidSleepSystemState.checking
+
+  func refreshSystemState() async {
+    systemState = await Task.detached { LidSleepSystemState.read() }.value
+  }
+
   @Published private(set) var passwordlessConfigured = false
   @Published private(set) var passwordlessAvailable = false
   private var sessionPasswordless = false
@@ -26,6 +32,7 @@ final class LidSleepController: ObservableObject {
   private var recoveryTask: Task<Void, Never>?
   private var recoveryPolicy = LidSleepRecoveryPolicy()
   private let defaults: UserDefaults
+  private let restoreSleep: @Sendable () -> String?
   private var launchRestoreTask: Task<Void, Never>?
   private var didRestoreAtLaunch = false
   static let launchPreferenceKey = "PiMac.lidSleep.enableOnLaunch"
@@ -33,8 +40,12 @@ final class LidSleepController: ObservableObject {
 
   var enableOnLaunch: Bool { defaults.bool(forKey: Self.launchPreferenceKey) }
 
-  init(defaults: UserDefaults = .standard) {
+  init(
+    defaults: UserDefaults = .standard,
+    restoreSleep: @escaping @Sendable () -> String? = LidSleepController.restoreSystemSleep
+  ) {
     self.defaults = defaults
+    self.restoreSleep = restoreSleep
     requested =
       defaults.object(forKey: Self.requestedPreferenceKey) as? Bool
       ?? defaults.bool(forKey: Self.launchPreferenceKey)
@@ -111,6 +122,20 @@ final class LidSleepController: ObservableObject {
     if !value {
       defaults.set(false, forKey: Self.launchPreferenceKey)
       stop()
+      let generation = sessionGeneration
+      phase = .recovering
+      status = "正在恢复正常休眠…"
+      let restore = restoreSleep
+      // 等旧 helper 撤销租约后完成退出，再恢复遗留开关，避免与旧会话交错写入。
+      recoveryTask = Task {
+        do { try await Task.sleep(for: .seconds(3)) } catch { return }
+        guard sessionGeneration == generation, !Task.isCancelled else { return }
+        let error = await Task.detached { restore() }.value
+        guard sessionGeneration == generation, !Task.isCancelled else { return }
+        phase = .inactive
+        status = error.map { "恢复休眠失败：\($0)" } ?? "已关闭，已恢复系统休眠开关"
+        await refreshSystemState()
+      }
       return
     }
     guard !enabled else { return }
@@ -196,12 +221,9 @@ final class LidSleepController: ObservableObject {
           phase = .active
           defaults.set(true, forKey: Self.launchPreferenceKey)
           updateStatus(power)
-        case .ended(let reason, _):
+        case .ended:
           stop()
-          status =
-            reason == .conflict
-            ? "系统已由其他工具禁用休眠，请先恢复后再启用。"
-            : "守护进程启动失败，请查看诊断日志。"
+          status = "守护进程启动失败，请查看诊断日志。"
         case .invalid(let error):
           LidSleepDiagnostics.record(error)
           stop()
@@ -363,6 +385,21 @@ final class LidSleepController: ObservableObject {
     run(executable: "/usr/bin/osascript", arguments: ["-e", source])
   }
 
+  nonisolated static func restoreSystemSleep() -> String? {
+    if let error = run(
+      executable: "/usr/bin/sudo",
+      arguments: ["-n", "/usr/bin/pmset", "-a", "disablesleep", "0"])
+    {
+      return error
+    }
+    switch LidSleepSystemState.read() {
+    case .available(_, false): return nil
+    case .available(_, true): return "系统休眠开关仍被禁用"
+    case .failed(let error): return error
+    case .checking: return "未能确认系统休眠开关"
+    }
+  }
+
   nonisolated private static func run(executable: String, arguments: [String]) -> String? {
     let process = Process()
     let errors = Pipe()
@@ -441,7 +478,13 @@ final class LidSleepController: ObservableObject {
         if [ "$owned" = 1 ]; then
           # 租约目录可能已被 stop() 删除；恢复系统设置绝不能依赖日志文件能否打开。
           if restoreError=$(\(powerCommand) -a disablesleep 0 2>&1); then
-            result=ok
+            restored=$(readSetting)
+            if [ "$restored" = 0 ]; then
+              result=ok
+            else
+              result=failed
+              restoreError='恢复命令完成，但未能确认系统休眠开关已恢复'
+            fi
           else
             result=failed
           fi
@@ -462,17 +505,13 @@ final class LidSleepController: ObservableObject {
       appStart=$(/bin/ps -p "$appPID" -o lstart=)
       [ -f "$dir/lease" ] && [ -n "$appStart" ] || exit 1
       original=$(readSetting) || { reason=power_query_failed; publish error; exit 1; }
-      if [ "$original" != 0 ]; then
-        if [ "$original" = 1 ]; then
-          reason=conflict
-          publish conflict
-        else
-          reason=power_query_failed
-          publish error
-        fi
+      # 用户已授权由 PiMac 接管；遗留的禁用状态也纳入当前会话，不猜测设置来源。
+      [ "$original" = 0 ] || [ "$original" = 1 ] || {
+        reason=power_query_failed
+        publish error
         exit 1
-      fi
-      # 先记录所有权，才能在 SIGKILL 后安全识别本会话是否可能修改了全局开关。
+      }
+      # 先记录所有权，才能在 SIGKILL 后恢复全局开关。
       : > "$stateDir/owned" || exit 1
       owned=1
       reason=app_exited
@@ -498,97 +537,13 @@ final class LidSleepController: ObservableObject {
             exit 1
           fi
         fi
+        # 命令成功不等于设置生效；必须读回确认后才能发布健康状态。
+        actual=$(readSetting) || { reason=power_query_failed; publish error; exit 1; }
+        [ "$actual" = "$desired" ] || { reason=power_failed; publish error; exit 1; }
         \(displaySleepScript)
         publish "$state" || { reason=state_write_failed; exit 1; }
         /bin/sleep 2
       done
       """
-  }
-}
-
-struct LidSleepSettingsView: View {
-  @ObservedObject private var controller = LidSleepController.shared
-  @State private var confirming = false
-  @State private var confirmingAccess = false
-  @State private var installingAccess = true
-  @AppStorage(LidSleepController.launchPreferenceKey) private var enableOnLaunch = false
-
-  var body: some View {
-    GroupBox("插电合盖运行") {
-      VStack(alignment: .leading, spacing: 10) {
-        Toggle(
-          "合盖不休眠",
-          isOn: Binding(
-            get: { controller.requested },
-            set: { value in
-              if value { confirming = true } else { controller.setEnabled(false) }
-            })
-        )
-        .disabled(controller.busy)
-        Toggle("启动时开启", isOn: $enableOnLaunch)
-          .disabled(controller.busy)
-        HStack {
-          Text(
-            controller.passwordlessConfigured
-              ? "免密码已配置"
-              : (controller.passwordlessAvailable ? "已有免密码权限" : "未配置免密码")
-          )
-          .font(.caption).foregroundStyle(.secondary)
-          Spacer()
-          Button(controller.passwordlessConfigured ? "移除权限" : "配置免密码") {
-            installingAccess = !controller.passwordlessConfigured
-            confirmingAccess = true
-          }
-          .disabled(
-            controller.busy
-              || (!controller.passwordlessConfigured
-                && (controller.enabled || controller.passwordlessAvailable))
-          )
-          .help("配置前请先关闭合盖运行；移除权限需要管理员授权。")
-        }
-        if controller.requested && !controller.enabled && !controller.busy {
-          Text("已允许合盖不休眠，但当前未生效。")
-            .font(.caption).foregroundStyle(.orange)
-          Button("重试开启") { controller.setEnabled(true) }
-        }
-        Text(controller.status).font(.caption).foregroundStyle(.secondary)
-        Text("保持通风，勿放入包中。")
-          .font(.caption).foregroundStyle(.orange)
-        DisclosureGroup("说明") {
-          VStack(alignment: .leading, spacing: 8) {
-            Text("仅插电生效，无需外接显示器；拔电或退出后约 10 秒内恢复休眠。")
-            Text("勾选表示允许合盖不休眠；运行失败不会取消勾选，是否生效请查看状态。成功开启后，下次启动自动尝试开启；手动关闭后取消。")
-            Text("拔电休眠后保留开关，系统唤醒且重新插电时恢复生效；仅插电不保证能唤醒合盖的 Mac。")
-            Text("合盖约 2 秒后关闭所有屏幕，开盖后用键盘或触控板唤醒。")
-            Text("修改全局休眠开关，也会阻止手动休眠；勿与其他防休眠工具同时使用。")
-          }
-          .foregroundStyle(.secondary).padding(.top, 6)
-        }
-        .font(.caption)
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding(.vertical, 4)
-    }
-    .confirmationDialog("允许插电合盖运行？", isPresented: $confirming, titleVisibility: .visible) {
-      Button(controller.passwordlessAvailable || controller.passwordlessConfigured ? "开启" : "授权并开启")
-      { controller.setEnabled(true) }
-      Button("取消", role: .cancel) {}
-    } message: {
-      Text("将修改系统休眠开关。未配置免密码权限时需要管理员授权。成功开启后，下次启动软件也会自动尝试开启；手动关闭即可取消。请确保散热，并避免同时运行其他防休眠工具。")
-    }
-    .confirmationDialog(
-      installingAccess ? "配置一次授权免密码开启？" : "移除免密码权限？",
-      isPresented: $confirmingAccess, titleVisibility: .visible
-    ) {
-      Button(installingAccess ? "授权、配置并开启" : "授权并移除") {
-        controller.configurePasswordlessAccess(install: installingAccess)
-      }
-      Button("取消", role: .cancel) {}
-    } message: {
-      Text(
-        installingAccess
-          ? "将为当前账户安装一条 sudoers 规则，仅允许免密码执行 pmset -a disablesleep 0 和 1。其他以此账户运行的程序也能切换此开关，但不能借此执行任意管理员命令。不保存密码，不安装系统服务。"
-          : "将关闭合盖运行及自动开启，并删除 Pi Mac 为当前账户安装的规则。移除需要管理员授权。")
-    }
   }
 }
