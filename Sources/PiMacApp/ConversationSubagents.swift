@@ -85,7 +85,8 @@ struct ConversationSubagent: Identifiable, Equatable {
       let start = T3DesktopClient.date(thread["latestRunStartedAt"])
       let end = T3DesktopClient.date(thread["latestRunCompletedAt"])
       let ownRunActive = T3V2Presentation.active.contains(thread["status"] as? String ?? "")
-      return Self(id: id, title: title.isEmpty ? "子代理任务" : title,
+      return Self(
+        id: id, title: title.isEmpty ? "子代理任务" : title,
         model: model, createdAt: date == .distantPast ? nil : date, status: status,
         startedAt: start == .distantPast ? nil : start,
         completedAt: ownRunActive || end == .distantPast ? nil : end)
@@ -111,11 +112,26 @@ enum ConversationTimelineRow: Identifiable {
   /// 在消息边界插入委派事件，避免整轮折叠把卡片挪到最终回复之后。
   /// 同一个边界的并行任务合并；缺失时间的历史任务放末尾，不猜测其发生顺序。
   static func build(messages: [ChatEntry], children: [ConversationSubagent]) -> [Self] {
+    guard !children.isEmpty else { return ConversationTurn.group(messages).map { .turn($0) } }
+    // 只保留前缀最大时间的跃迁点。即使历史时间乱序或缺失，二分仍返回原数组中首个严格晚于任务的消息。
+    var boundaries: [(date: Date, index: Int)] = []
+    for (index, entry) in messages.enumerated() {
+      if let date = entry.timestamp, boundaries.last.map({ date > $0.date }) ?? true {
+        boundaries.append((date, index))
+      }
+    }
     var groups: [Int: [ConversationSubagent]] = [:]
     for child in children {
-      let boundary = child.createdAt.flatMap { date in
-        messages.firstIndex { entry in entry.timestamp.map { $0 > date } ?? false }
-      } ?? messages.count
+      var boundary = messages.count
+      if let date = child.createdAt {
+        var low = 0
+        var high = boundaries.count
+        while low < high {
+          let middle = low + (high - low) / 2
+          if boundaries[middle].date > date { high = middle } else { low = middle + 1 }
+        }
+        if low < boundaries.count { boundary = boundaries[low].index }
+      }
       groups[boundary, default: []].append(child)
     }
     var result: [Self] = []
@@ -169,7 +185,9 @@ struct ConversationSubagentsView: View {
       if expanded {
         VStack(spacing: 0) {
           ForEach(tasks) { task in
-            Button { onOpen(task.id) } label: {
+            Button {
+              onOpen(task.id)
+            } label: {
               HStack(alignment: .top, spacing: 9) {
                 Circle().fill(task.status.color).frame(width: 7, height: 7).padding(.top, 5)
                 VStack(alignment: .leading, spacing: 4) {

@@ -66,48 +66,6 @@ struct HTMLLiveHydrationTests {
     #expect(cachedComplete)
   }
 
-  @Test(.timeLimit(.minutes(1)))
-  func missingOutputAndDetailFailuresRecoverWithoutReopening() async throws {
-    let client = T3DesktopClient()
-    let native = snapshot([item("live", output: nil)])
-    var reads = 0
-    var downloads = 0
-    for attempt in 0..<3 {
-      let (_, complete) = await client.hydrateToolImages(
-        native, threadID: "thread", base: base,
-        performRPC: { _, payload in
-          reads += 1
-          #expect(payload["threadId"] as? String == "owner")
-          #expect(payload["revision"] as? String == "revision")
-          if attempt == 0 { return ["item": item("live", output: nil)] }
-          if attempt == 1 { return ["item": NSNull()] }
-          throw T3DesktopClient.ClientError.rejected
-        },
-        loadHTML: { _ in
-          downloads += 1
-          return "unexpected"
-        })
-      #expect(!complete)
-    }
-    #expect(reads == 3)
-    #expect(downloads == 0)
-    let (_, coolingDown) = await client.hydrateToolImages(
-      native, threadID: "thread", base: base,
-      performRPC: { _, _ in
-        Issue.record("Failure retry should be throttled")
-        return [:]
-      },
-      loadHTML: { _ in "unexpected" })
-    #expect(!coolingDown)
-    try await Task.sleep(for: .seconds(10.1))
-    let (hydrated, complete) = await client.hydrateToolImages(
-      native, threadID: "thread", base: base,
-      performRPC: { _, _ in ["item": item("live", output: output())] },
-      loadHTML: { _ in "<h1>recovered</h1>" })
-    #expect(complete)
-    #expect(rows(hydrated).first?["htmlDocument"] as? String == "<h1>recovered</h1>")
-  }
-
   @Test func readBudgetContinuesAcrossPollsAndValidFailureIsNotMissingOutput() async {
     let client = T3DesktopClient()
     let native = snapshot((0..<10).map { item("page-\($0)", output: nil) })

@@ -67,10 +67,21 @@ enum TelegramMarkdown {
     }.joined(separator: "\n\n")
   }
 
+  private static let inlineMarkers: Set<Character> = ["\\", "[", "*", "_", "~", "`"]
+
   private static func inline(_ content: Substring) -> String {
     var result = ""
     var cursor = content.startIndex
     while cursor < content.endIndex {
+      // 连续普通正文整段转义，避免每个字符都做六种标记匹配及四次 Foundation 字符串替换。
+      if !inlineMarkers.contains(content[cursor]) {
+        let start = cursor
+        repeat {
+          cursor = content.index(after: cursor)
+        } while cursor < content.endIndex && !inlineMarkers.contains(content[cursor])
+        result += escape(String(content[start..<cursor]))
+        continue
+      }
       let tail = content[cursor...]
       if tail.hasPrefix("\\"),
         let next = content.index(cursor, offsetBy: 1, limitedBy: content.endIndex),

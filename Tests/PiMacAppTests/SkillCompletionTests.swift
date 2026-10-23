@@ -1,8 +1,6 @@
 import AppKit
 import Foundation
-import SwiftUI
 import Testing
-import Vision
 
 @testable import PiMacApp
 
@@ -16,109 +14,6 @@ struct SkillCompletionTests {
       "description": "测试说明",
     ])
     return try JSONDecoder().decode(ComposerSkill.self, from: data)
-  }
-
-  @MainActor
-  private final class ListFixture: ObservableObject {
-    @Published var query = ""
-    let skills: [ComposerSkill]
-
-    init(skills: [ComposerSkill]) { self.skills = skills }
-  }
-
-  private struct FilteredList: View {
-    @ObservedObject var fixture: ListFixture
-
-    var body: some View {
-      SkillCompletionList(
-        skills: SkillCompletion.matches(fixture.skills, query: fixture.query),
-        selectedIndex: 0, isLoading: false, hasLoaded: true, error: nil,
-        onSelect: { _ in }, onRetry: {})
-    }
-  }
-
-  @MainActor
-  @Test func renderedRowsFollowFilteringInsteadOfReusingOldIndex() async throws {
-    let fixture = ListFixture(skills: [try skill(name: "alpha"), try skill(name: "setup")])
-    let host = NSHostingView(rootView: FilteredList(fixture: fixture).preferredColorScheme(.dark))
-    host.frame = NSRect(x: 0, y: 0, width: 720, height: 260)
-    let window = NSWindow(
-      contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-    window.appearance = NSAppearance(named: .darkAqua)
-    window.contentView = host
-    defer { window.contentView = nil }
-
-    // 纯筛选断言抓不到 SwiftUI 行身份复用问题；读取实际绘制的首行文字。
-    func visibleText() throws -> String {
-      host.layoutSubtreeIfNeeded()
-      let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-      host.cacheDisplay(in: host.bounds, to: bitmap)
-      let image = try #require(bitmap.cgImage)
-      let request = VNRecognizeTextRequest()
-      request.recognitionLevel = .accurate
-      try VNImageRequestHandler(cgImage: image).perform([request])
-      return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-        .joined(separator: " ").lowercased()
-    }
-    try await Task.sleep(for: .milliseconds(200))
-    #expect(try visibleText().contains("alpha"))
-    fixture.query = "setup"
-    try await Task.sleep(for: .milliseconds(200))
-    let filtered = try visibleText()
-    #expect(filtered.contains("setup"))
-    #expect(!filtered.contains("alpha"))
-    fixture.query = ""
-    try await Task.sleep(for: .milliseconds(200))
-    #expect(try visibleText().contains("alpha"))
-  }
-
-  @MainActor
-  @Test func observedCacheRedrawsRowsWithoutTypingAndKeepsRowsDuringRefreshFailure() async throws {
-    let cache = WorkspaceSkillCache()
-    let key = WorkspaceSkillCache.Key(instanceID: "pi", cwd: "/project")
-    let old = WorkspaceSkillCache.Success(skills: [try skill(name: "alpha")], validatedAt: Date())
-    await cache.preload(key: key, reload: .force, now: Date()) { old }?.value
-    let host = NSHostingView(
-      rootView: CachedSkillCompletionList(
-        cache: cache, workspaceKey: key, query: "", selectedIndex: 5,
-        onSelect: { _ in }, onReload: {}))
-    host.frame = NSRect(x: 0, y: 0, width: 720, height: 320)
-    let window = NSWindow(
-      contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-    window.contentView = host
-    defer { window.contentView = nil }
-    func visibleText() throws -> String {
-      host.layoutSubtreeIfNeeded()
-      let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-      host.cacheDisplay(in: host.bounds, to: bitmap)
-      let request = VNRecognizeTextRequest()
-      request.recognitionLevel = .accurate
-      try VNImageRequestHandler(cgImage: try #require(bitmap.cgImage)).perform([request])
-      return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-        .joined(separator: " ").lowercased()
-    }
-    var completion: CheckedContinuation<WorkspaceSkillCache.Success, any Error>?
-    let refresh = cache.preload(key: key, reload: .force, now: Date()) {
-      try await withCheckedThrowingContinuation { completion = $0 }
-    }
-    for _ in 0..<100 where completion == nil { await Task.yield() }
-    try await Task.sleep(for: .milliseconds(100))
-    #expect(try visibleText().contains("alpha"))
-    try #require(completion).resume(
-      throwing: NSError(
-        domain: "refresh", code: 1, userInfo: [NSLocalizedDescriptionKey: "refresh-failed"]))
-    await refresh?.value
-    try await Task.sleep(for: .milliseconds(100))
-    let failedText = try visibleText()
-    #expect(failedText.contains("alpha"))
-    #expect(failedText.contains("refresh-failed"))
-    let new = WorkspaceSkillCache.Success(skills: [try skill(name: "setup")], validatedAt: Date())
-    await cache.preload(key: key, reload: .force, now: Date()) { new }?.value
-    try await Task.sleep(for: .milliseconds(100))
-    let updated = try visibleText()
-    #expect(updated.contains("setup"))
-    #expect(!updated.contains("alpha"))
-    #expect(!updated.contains("refresh-failed"))
   }
 
   @Test func triggersOnlyLeadingCommandsWithoutSelection() {

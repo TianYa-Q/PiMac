@@ -210,17 +210,31 @@ enum T3V2Presentation {
     result["queueHeld"] = runs.contains {
       $0["status"] as? String == "queued" && $0["queueHeld"] as? Bool == true
     }
-    result["queuedMessages"] = runs.filter { $0["status"] as? String == "queued" }
+    let queuedRuns = runs.filter { $0["status"] as? String == "queued" }
+    // 队列与历史消息按身份连接，而非逐个扫描；重复 ID 和缺失 ID 均保持原先第一个匹配项的语义。
+    var messagesByID: [String: JSON] = [:]
+    var messageWithoutID: JSON?
+    if !queuedRuns.isEmpty {
+      for message in sourceMessages {
+        if let id = message["id"] as? String {
+          if messagesByID[id] == nil { messagesByID[id] = message }
+        } else if messageWithoutID == nil {
+          messageWithoutID = message
+        }
+      }
+    }
+    result["queuedMessages"] =
+      queuedRuns
       .sorted {
         let left = $0["queuePosition"] as? Int ?? $0["ordinal"] as? Int ?? 0
         let right = $1["queuePosition"] as? Int ?? $1["ordinal"] as? Int ?? 0
         return left == right
           ? ($0["ordinal"] as? Int ?? 0) < ($1["ordinal"] as? Int ?? 0) : left < right
       }.compactMap { run -> JSON? in
+        let messageID = run["userMessageId"] as? String
         guard
-          let message = sourceMessages.first(where: {
-            $0["id"] as? String == run["userMessageId"] as? String
-          })
+          let message = messageID.flatMap({ messagesByID[$0] })
+            ?? (messageID == nil ? messageWithoutID : nil)
         else { return nil }
         var queued = message
         queued["runId"] = run["id"]
@@ -237,11 +251,16 @@ enum T3V2Presentation {
     return detail
   }
 
-  private static func contextTimestamp(_ value: Any?) -> Date? {
-    guard let text = value as? String else { return nil }
+  private static let contextSecondsFormatter = ISO8601DateFormatter()
+  private static let contextFractionalFormatter: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    return formatter.date(from: text) ?? ISO8601DateFormatter().date(from: text)
+    return formatter
+  }()
+
+  private static func contextTimestamp(_ value: Any?) -> Date? {
+    guard let text = value as? String else { return nil }
+    return contextFractionalFormatter.date(from: text) ?? contextSecondsFormatter.date(from: text)
   }
 
   /// Compaction is an official context observation too. Older Pi versions only
@@ -258,23 +277,23 @@ enum T3V2Presentation {
       ?? contextTimestamp(usageTurn?["startedAt"])
     let turnIDs = Set(turns.compactMap { $0["id"] as? String })
     // Deliberately exclude inherited visible history and child tool/subagent items.
-    let compaction = (projection["turnItems"] as? [JSON] ?? []).filter { item in
+    // 在 MainActor 内复用 formatter；每条候选只解析一次日期，单遍取最大值，平手仍保留第一条。
+    var compaction: (date: Date, after: Int)?
+    for item in projection["turnItems"] as? [JSON] ?? [] {
       guard item["type"] as? String == "compaction",
         item["status"] as? String == "completed",
         item["parentItemId"] == nil || item["parentItemId"] is NSNull,
         let turnID = item["providerTurnId"] as? String, turnIDs.contains(turnID),
         let after = item["afterTokenCount"] as? Int, after >= 0,
         let date = contextTimestamp(item["completedAt"] ?? item["updatedAt"])
-      else { return false }
+      else { continue }
       // Without a timestamp on existing usage, prefer it rather than risk
       // replacing a newer measurement with an old estimate.
-      return usage == nil || usageDate.map { date > $0 } == true
-    }.max {
-      (contextTimestamp($0["completedAt"] ?? $0["updatedAt"]) ?? .distantPast)
-        < (contextTimestamp($1["completedAt"] ?? $1["updatedAt"]) ?? .distantPast)
+      guard usage == nil || usageDate.map({ date > $0 }) == true else { continue }
+      if compaction.map({ date > $0.date }) ?? true { compaction = (date, after) }
     }
-    if let compaction, let after = compaction["afterTokenCount"] as? Int {
-      return (after, usage?["maxTokens"] as? Int ?? 0, true)
+    if let compaction {
+      return (compaction.after, usage?["maxTokens"] as? Int ?? 0, true)
     }
     guard let usage else { return nil }
     return (usage["usedTokens"] as? Int ?? 0, usage["maxTokens"] as? Int ?? 0, false)

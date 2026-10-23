@@ -65,18 +65,34 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
         $0.parentToolEntryID != nil && ids.contains($0.parentToolEntryID!)
           && $0.parentToolEntryID != $0.id
       }, by: { $0.parentToolEntryID! })
-    func grouped(_ entry: ChatEntry, ancestors: Set<String>) -> ChatEntry {
+    // 深链只维护当前 DFS 路径，避免每一层复制整个祖先集合；退出分支时恢复，兄弟节点互不影响。
+    // 唯一 ID 下每个节点只有一个父节点，从根可达的部分不可能有环；只有重复 ID 才需逐层防环。
+    let needsCycleCheck = ids.count != entries.count
+    var ancestors: Set<String> = []
+    func grouped(_ entry: ChatEntry) -> ChatEntry {
       var result = entry
-      result.childToolEntries = (children[entry.id] ?? [])
-        .filter { !ancestors.contains($0.id) }
-        .sorted { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
-        .map { grouped($0, ancestors: ancestors.union([$0.id])) }
+      guard let descendants = children[entry.id] else {
+        result.childToolEntries = []
+        return result
+      }
+      if needsCycleCheck { ancestors.insert(entry.id) }
+      defer { if needsCycleCheck { ancestors.remove(entry.id) } }
+      // 单子节点的常见深链无需排序，也不分配 filter/map 的中间数组。
+      let ordered =
+        descendants.count > 1
+        ? descendants.sorted { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
+        : descendants
+      result.childToolEntries = []
+      result.childToolEntries.reserveCapacity(ordered.count)
+      for child in ordered where !needsCycleCheck || !ancestors.contains(child.id) {
+        result.childToolEntries.append(grouped(child))
+      }
       return result
     }
     return entries.filter {
       guard let parent = $0.parentToolEntryID else { return true }
       return parent == $0.id || !ids.contains(parent)
-    }.map { grouped($0, ancestors: [$0.id]) }
+    }.map { grouped($0) }
   }
 
   var modelLabel: String? {

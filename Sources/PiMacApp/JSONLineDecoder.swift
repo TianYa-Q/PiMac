@@ -21,7 +21,12 @@ final class JSONLineDecoder {
       let bytes = raw.bindMemory(to: UInt8.self)
       guard let base = bytes.baseAddress else { return }
       var recordStart = 0
-      for index in 0..<bytes.count where bytes[index] == 0x0A {
+      // libc 按字节块寻找 LF，避免在多 MiB 的单行工具结果上逐字节执行 Swift 循环。
+      // 只搜索本次新增数据，保留丢弃超限记录直到下一个 LF 的恢复边界。
+      while recordStart < bytes.count,
+        let newline = memchr(base.advanced(by: recordStart), 0x0A, bytes.count - recordStart)
+      {
+        let index = base.distance(to: UnsafePointer(newline.assumingMemoryBound(to: UInt8.self)))
         appendFragment(base.advanced(by: recordStart), count: index - recordStart)
         if !discardingRecord {
           if buffer.last == 0x0D { buffer.removeLast() }

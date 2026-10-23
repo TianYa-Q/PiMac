@@ -3,6 +3,21 @@ import CryptoKit
 import Foundation
 import UniformTypeIdentifiers
 
+// 历史导入可在后台并发运行；复用解析器时必须串行保护，不能用跨线程共享的可变 formatter 裸缓存。
+private enum LegacyTimestampParser {
+  static let lock = NSLock()
+  static let seconds = ISO8601DateFormatter()
+  static let fractional: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
+
+  static func date(_ text: String) -> Date? {
+    lock.withLock { fractional.date(from: text) ?? seconds.date(from: text) }
+  }
+}
+
 extension AppModel {
   nonisolated static func sessionSearchRoot(for projectPath: String, root: URL) -> URL {
     let defaultRoot = FileManager.default.homeDirectoryForCurrentUser
@@ -221,11 +236,7 @@ extension AppModel {
 
   nonisolated private static func recordDate(_ record: PiRPCClient.JSON) -> Date? {
     if let timestamp = record["timestamp"] as? String {
-      let formatter = ISO8601DateFormatter()
-      formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-      if let date = formatter.date(from: timestamp) { return date }
-      formatter.formatOptions = [.withInternetDateTime]
-      if let date = formatter.date(from: timestamp) { return date }
+      if let date = LegacyTimestampParser.date(timestamp) { return date }
     }
     if let message = record["message"] as? PiRPCClient.JSON,
       let milliseconds = message["timestamp"] as? NSNumber

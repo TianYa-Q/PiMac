@@ -214,6 +214,10 @@ enum MarkdownParser {
   }
 
   private static func isDivider(_ line: String) -> Bool {
+    // 绝大多数正文不以分隔线字符开始；先判首个非空白字符，避免为整行创建过滤后的副本。
+    guard let first = line.first(where: { !$0.isWhitespace }), "-*_".contains(first) else {
+      return false
+    }
     let text = line.filter { !$0.isWhitespace }
     guard text.count >= 3, let first = text.first, first == "-" || first == "*" || first == "_"
     else { return false }
@@ -231,7 +235,10 @@ enum MarkdownParser {
     if let first = trimmed.first, "-*+".contains(first), trimmed.dropFirst().first == " " {
       return (false, nil, String(trimmed.dropFirst(2)))
     }
-    guard let punctuation = trimmed.firstIndex(where: { $0 == "." || $0 == ")" }) else {
+    // Int 只接受 ASCII 数字及可选正负号；普通正文不必扫描到句末寻找标点。
+    guard let first = trimmed.utf8.first, (48...57).contains(first) || first == 43 || first == 45,
+      let punctuation = trimmed.firstIndex(where: { $0 == "." || $0 == ")" })
+    else {
       return nil
     }
     let prefix = trimmed[..<punctuation]
@@ -266,6 +273,8 @@ enum MarkdownParser {
   }
 
   private static func tableDelimiter(_ line: String) -> [MarkdownAlignment]? {
+    // 合法分隔行必含三个连续减号（空格可被忽略）；无减号的长正文无需逐字符拆单元格。
+    guard line.contains("-") else { return nil }
     let cells = tableCells(line)
     guard !cells.isEmpty else { return nil }
     var result: [MarkdownAlignment] = []

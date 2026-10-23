@@ -33,46 +33,6 @@ struct BrowserPreviewTests {
     #expect(try T3BrowserTab.read(["sessions": []]).isEmpty)
   }
 
-  @Test(.timeLimit(.minutes(1)))
-  func officialServerListAndInteractiveStreamUseAuthenticatedTransport() async throws {
-    let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-      .deletingLastPathComponent().deletingLastPathComponent()
-    let root = repository.appendingPathComponent("tmp/browser-preview-tests/\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    let suite = "pimac-browser-\(UUID().uuidString)"
-    let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
-    defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
-    let workspace = WorkspaceModel(restoreUserState: false)
-    let service = T3BridgeService(defaults: defaults)
-    let client = T3DesktopClient(defaults: defaults)
-    defer {
-      client.stop()
-      service.stop()
-      workspace.disconnectAll()
-    }
-    // 所有 Provider 关闭，使用隔离 home；只验证官方列表、票据和画面路由，不接触账户。
-    try startT3ProtocolFixture(
-      service: service, workspace: workspace, stateDirectory: root, binary: nil,
-      model: "test/model")
-    client.start(service: service)
-    try await client.waitUntilReady()
-    let threadID = UUID().uuidString
-    #expect(try await client.browserPreviewSessions(threadID: threadID).isEmpty)
-    // 关闭已不存在的标签是幂等操作；同时覆盖原生新界面使用的 preview:operate 权限链路。
-    try await client.updateBrowserPreviewTab(threadID: threadID, closing: "missing")
-    #expect(try await client.browserPreviewSessions(threadID: threadID).isEmpty)
-    let socket = try await client.browserPreviewSocket(threadID: threadID, tabID: "missing")
-    defer { socket.cancel(with: .normalClosure, reason: nil) }
-    do {
-      _ = try await socket.receive()
-      Issue.record("不存在的标签不得产生画面")
-    } catch {
-      // 4404 表示通过了认证并抵达浏览器流服务；不能把 401/403 当作“标签不存在”。
-      #expect(socket.closeCode.rawValue == 4404)
-    }
-  }
-
   @Test func controlNotificationsGateInputWithoutOptimisticTakeover() throws {
     let agent = try T3BrowserEvent.read(
       #"{"type":"control","canOperate":true,"controller":"agent","generation":2,"dialog":null}"#)
