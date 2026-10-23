@@ -1589,25 +1589,25 @@ struct ContentView: View {
             Label("工具后插入", systemImage: "arrow.turn.down.right")
           }.buttonStyle(.borderedProminent)
             .disabled(promptIsEmpty || !app.canSubmitPrompt)
-            .help("当前轮工具调用完成后、下一次模型请求前插入（Enter）")
+            .help(app.promptSubmissionUnavailableReason ?? "当前轮工具调用完成后、下一次模型请求前插入（Enter）")
           Button {
             sendPromptFollowingOutput(delivery: .followUp)
           } label: {
             Label("排队发送", systemImage: "clock")
           }.buttonStyle(.bordered)
             .disabled(promptIsEmpty || !app.canSubmitPrompt)
-            .help("当前任务结束后发送（Option+Enter）")
+            .help(app.promptSubmissionUnavailableReason ?? "当前任务结束后发送（Option+Enter）")
           stopButton
         } else if app.isCompacting {
           Button {
             sendPromptFollowingOutput(delivery: .steer)
           } label: {
-            Label("压缩后", systemImage: "clock")
+            Label("压缩中", systemImage: "clock")
               .font(.caption)
           }
           .buttonStyle(.bordered)
-          .disabled(promptIsEmpty || !app.clientConnected)
-          .help("上下文压缩完成后发送（Return）")
+          .disabled(promptIsEmpty || !app.canSubmitPrompt)
+          .help(app.promptSubmissionUnavailableReason ?? "发送（Enter）")
 
           stopButton
         } else {
@@ -1621,8 +1621,8 @@ struct ContentView: View {
           .buttonStyle(.borderedProminent)
           .clipShape(Circle())
           .keyboardShortcut(.return, modifiers: .command)
-          .disabled(promptIsEmpty || !app.clientConnected)
-          .help("发送（Enter）")
+          .disabled(promptIsEmpty || !app.canSubmitPrompt)
+          .help(app.promptSubmissionUnavailableReason ?? "发送（Enter）")
         }
       }
       .controlSize(.small)
@@ -3489,12 +3489,5 @@ struct SettingsView: View {
     if item.hasUpdate { return "当前 \(current) · 最新 \(item.latestVersion ?? "未知")" }
     if let latest = item.latestVersion { return "当前 \(current) · 已是最新版本（\(latest)）" }
     return "当前 \(current) · 最新版本未知"
-  }
-}
-
-extension AppModel {
-  fileprivate var clientConnected: Bool {
-    if case .connected = connectionState { return true }
-    return false
   }
 }

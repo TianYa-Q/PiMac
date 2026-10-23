@@ -162,13 +162,20 @@ final class AppModel: ObservableObject {
     guard let server else { return }
     await server.updateTextGenerationModel(modelID)
   }
-  var canSubmitPrompt: Bool {
-    server?.isConnected == true && connectionState == .connected && !isLoadingConfiguration
-      && !isCompacting && !codexRotationInFlight && !submitting && !awaitingAgentStart
-      && pendingSelection == nil
-      && !isManagingAccounts
-      && extensionUI?.hasPendingDialog(for: self) != true
+  var promptSubmissionUnavailableReason: String? {
+    guard server?.isConnected == true else { return "正在等待 T3 Server 连接，请稍后发送" }
+    if isLoadingConfiguration { return "正在加载会话配置，请稍后发送" }
+    guard connectionState == .connected else { return "会话尚未就绪，请重新打开聊天" }
+    if isCompacting { return "正在压缩上下文，请完成后发送" }
+    if codexRotationInFlight { return "正在切换账号，请稍后发送" }
+    if submitting { return "正在提交上一条消息，请稍后发送" }
+    if awaitingAgentStart { return "正在等待 Server 确认任务启动，请稍后发送" }
+    if pendingSelection != nil { return "正在保存模型设置，请稍后发送" }
+    if isManagingAccounts { return "请先完成账号管理操作" }
+    if extensionUI?.hasPendingDialog(for: self) == true { return "请先处理会话中的交互请求" }
+    return nil
   }
+  var canSubmitPrompt: Bool { promptSubmissionUnavailableReason == nil }
   var goalCreationUnavailableReason: String? {
     if isBusy { return "会话正在执行或等待交互，请空闲后创建目标" }
     guard canSubmitPrompt else { return "会话尚未就绪，请连接后再创建目标" }
@@ -227,8 +234,18 @@ final class AppModel: ObservableObject {
   func attach(to server: T3DesktopClient) {
     self.server = server
     // 设置页也可在断线/重连时保持打开；不能依赖会话消息变化才刷新可编辑状态。
-    serverConnectionObservation = server.$isConnected.removeDuplicates().sink { [weak self] _ in
+    serverConnectionObservation = server.$isConnected.removeDuplicates().sink { [weak self] ready in
       self?.objectWillChange.send()
+      guard ready else { return }
+      // @Published 的回调早于属性写入；下一轮再检查真实连接，避免读取到旧值。
+      // 仅恢复打开失败的视图，不重置运行中的会话，更不会重放任何提交命令。
+      Task { @MainActor [weak self, weak server] in
+        guard let self, server?.isConnected == true else { return }
+        self.refreshModels()
+        if case .failed = self.connectionState, let project = self.projectURL {
+          self.open(project: project, path: self.pendingThreadPath)
+        }
+      }
     }
     if let projectURL { open(project: projectURL, path: pendingThreadPath) }
   }
@@ -260,6 +277,20 @@ final class AppModel: ObservableObject {
       instanceID: "pi", projectCwd: project.standardizedFileURL.path,
       threadID: path.flatMap { Self.threadID(from: $0) })
     enterSkillWorkspace()
+    pendingThreadPath = path
+    // 已连接时的新聊天只是本地草稿，无须再排队等待一次异步连接流程。
+    // 仍使用实时模型目录校验，不能把磁盘缓存当作发送许可。
+    if path == nil, server?.isConnected == true {
+      refreshModels()
+      if !selectedModelId.isEmpty {
+        currentSessionPath = ""
+        connectionState = .connected
+        isLoadingConfiguration = false
+        statusText = ""
+        completion?(true)
+        return
+      }
+    }
     connectionState = .connecting
     isLoadingConfiguration = true
     statusText = "正在连接 T3 线程…"
@@ -373,8 +404,11 @@ final class AppModel: ObservableObject {
     ]
   }
   func sendPrompt(delivery: QueuedPromptDelivery = .steer) {
-    guard canSubmitPrompt,
-      let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
+    if let reason = promptSubmissionUnavailableReason {
+      statusText = reason
+      return
+    }
+    guard let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
     else { return }
     // 先更新界面，再进行附件上传和网络请求；新输入不会被异步完成回调清空。
     composerText = ""

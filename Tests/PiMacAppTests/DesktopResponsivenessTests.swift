@@ -84,6 +84,80 @@ struct DesktopResponsivenessTests {
     return (model, client)
   }
 
+  @Test func blockedEnterExplainsReasonAndPreservesDraftAndAttachments() {
+    let (model, client) = submissionModel()
+    defer {
+      model.disconnect()
+      client.stop()
+    }
+    model.isStreaming = false
+    model.isLoadingConfiguration = true
+    model.composerText = "keep draft"
+    let image = PromptAttachment(
+      url: URL(fileURLWithPath: "/tmp/not-uploaded.png"), mimeType: "image/png")
+    model.attachments = [image]
+    #expect(!model.canSubmitPrompt)
+    #expect(model.promptSubmissionUnavailableReason != nil)
+    model.sendPrompt()
+    #expect(model.statusText == model.promptSubmissionUnavailableReason)
+    #expect(model.composerText == "keep draft")
+    #expect(model.attachments.map(\.id) == [image.id])
+    #expect(model.messages.isEmpty)
+    model.isLoadingConfiguration = false
+    #expect(model.canSubmitPrompt)
+    #expect(model.promptSubmissionUnavailableReason == nil)
+    model.isCompacting = true
+    model.sendPrompt()
+    #expect(model.statusText == model.promptSubmissionUnavailableReason)
+    #expect(model.composerText == "keep draft")
+  }
+
+  private func draftClient() throws -> T3DesktopClient {
+    // 不从真实桌面缓存读取历史线程，确保断言只针对本次操作。
+    let defaults = try #require(UserDefaults(suiteName: "draft-readiness-\(UUID().uuidString)"))
+    let client = T3DesktopClient(defaults: defaults)
+    client.applyProviderCatalog([
+      ["instanceId": "pi", "models": [["slug": "test/model", "name": "Test"]]]
+    ], modelCatalogs: [:])
+    return client
+  }
+
+  @Test func connectedNewDraftIsReadySynchronouslyWithoutCreatingThread() throws {
+    let client = try draftClient()
+    client.didCompletePoll()
+    let model = AppModel(startupProjectURL: URL(fileURLWithPath: "/tmp/new-draft"))
+    defer {
+      model.disconnect()
+      client.stop()
+    }
+    model.attach(to: client)
+    #expect(model.canSubmitPrompt)
+    #expect(!model.isLoadingConfiguration)
+    #expect(model.connectionState == .connected)
+    #expect(model.selectedModelId == "test/model")
+    #expect(model.threadID == nil)
+    #expect(client.threads.isEmpty)
+  }
+
+  @Test func failedDraftRecoversWhenServerBecomesReadyWithoutLosingInput() async throws {
+    let client = try draftClient()
+    let model = AppModel(restoreLastProjectOnLaunch: false)
+    model.attach(to: client)
+    model.projectURL = URL(fileURLWithPath: "/tmp/recovered-draft")
+    model.connectionState = .failed("connection timed out")
+    model.composerText = "unsent draft"
+    defer {
+      model.disconnect()
+      client.stop()
+    }
+    client.didCompletePoll()
+    for _ in 0..<100 where !model.canSubmitPrompt { await Task.yield() }
+    #expect(model.canSubmitPrompt)
+    #expect(model.composerText == "unsent draft")
+    #expect(model.threadID == nil)
+    #expect(client.threads.isEmpty)
+  }
+
   @Test func queuedSubmissionStaysOutOfTimelineAndHandsOffByMessageIdentity() throws {
     let (model, client) = submissionModel()
     defer {
