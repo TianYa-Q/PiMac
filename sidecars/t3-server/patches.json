@@ -1,4 +1,10 @@
 {
+  "packages/provider-core/src/server/ProviderAdapter.ts": [
+    {
+      "oldText": "  readonly uploadFeedback?: (input: {",
+      "newText": "  /** Native Pi HTML export, restoring a persisted thread without starting a model turn. */\n  readonly exportThreadHtml?: (input: {\n    readonly providerThread: OrchestrationV2ProviderThread;\n  }) => Effect.Effect<string, ProviderAdapterV2Error>;\n  readonly uploadFeedback?: (input: {"
+    }
+  ],
   "packages/provider-pi/src/server/thinkingCapabilities.ts": [
     {
       "oldText": "  if (levels.length === 0) return EMPTY_PI_MODEL_CAPABILITIES;",
@@ -12,7 +18,7 @@
   "packages/provider-pi/src/server/mcpExtensionSource.ts": [
     {
       "oldText": "export default async function t3McpExtension(pi: ExtensionAPI) {",
-      "newText": "export default async function t3McpExtension(pi: ExtensionAPI) {\n  let enabled = process.env.PIMAC_FAST_MODE === \"1\";\n  const publish = (ctx: { ui: { setStatus(key: string, value: string): void } }) =>\n    ctx.ui.setStatus(\"pimac-fast\", enabled ? \"on\" : \"off\");\n\n  pi.on(\"session_start\", (_event, ctx) => publish(ctx));\n  pi.registerCommand(\"pimac-fast\", {\n    description: \"Set Pi Mac OpenAI/Codex Fast mode (on/off)\",\n    handler: async (args, ctx) => {\n      if (!ctx.isIdle()) throw new Error(\"Wait until the current task finishes.\");\n      if (args.trim() !== \"on\" && args.trim() !== \"off\")\n        throw new Error(\"Expected on or off.\");\n      enabled = args.trim() === \"on\";\n      publish(ctx);\n    },\n  });\n  pi.on(\"before_provider_request\", (event, ctx) => {\n    // Only native Responses models support this wire contract. ctx.model is the\n    // selected model, not a virtual router's dispatched model: never alter a\n    // request based on a virtual selection's provider alone.\n    const model = ctx.model;\n    if (!enabled || !model) return;\n    if (model.provider !== \"openai\" && model.provider !== \"openai-codex\") return;\n    if (model.api !== \"openai-responses\" && model.api !== \"openai-codex-responses\") return;\n    if (event.payload && typeof event.payload === \"object\" && !Array.isArray(event.payload))\n      return { ...event.payload, service_tier: \"priority\" };\n  });\n"
+      "newText": "export default async function t3McpExtension(pi: ExtensionAPI) {\n  let enabled = process.env.PIMAC_FAST_MODE === \"1\";\n  const publish = (ctx: { ui: { setStatus(key: string, value: string): void } }) =>\n    ctx.ui.setStatus(\"pimac-fast\", enabled ? \"on\" : \"off\");\n\n  pi.on(\"session_start\", (_event, ctx) => publish(ctx));\n  pi.registerCommand(\"pimac-export-context\", {\n    description: \"Read current system prompt for native HTML export (no model request)\",\n    handler: async (args, ctx) => {\n      if (!ctx.isIdle() || !/^export-[0-9]+$/.test(args.trim())) throw new Error(\"Invalid or busy export\");\n      ctx.ui.setStatus(\"pimac-export-context\", JSON.stringify({ id: args.trim(), systemPrompt: ctx.getSystemPrompt() }));\n    },\n  });\n  pi.registerCommand(\"pimac-fast\", {\n    description: \"Set Pi Mac OpenAI/Codex Fast mode (on/off)\",\n    handler: async (args, ctx) => {\n      if (!ctx.isIdle()) throw new Error(\"Wait until the current task finishes.\");\n      if (args.trim() !== \"on\" && args.trim() !== \"off\")\n        throw new Error(\"Expected on or off.\");\n      enabled = args.trim() === \"on\";\n      publish(ctx);\n    },\n  });\n  pi.on(\"before_provider_request\", (event, ctx) => {\n    // Only native Responses models support this wire contract. ctx.model is the\n    // selected model, not a virtual router's dispatched model: never alter a\n    // request based on a virtual selection's provider alone.\n    const model = ctx.model;\n    if (!enabled || !model) return;\n    if (model.provider !== \"openai\" && model.provider !== \"openai-codex\") return;\n    if (model.api !== \"openai-responses\" && model.api !== \"openai-codex-responses\") return;\n    if (event.payload && typeof event.payload === \"object\" && !Array.isArray(event.payload))\n      return { ...event.payload, service_tier: \"priority\" };\n  });\n"
     }
   ],
   "apps/server/src/orchestration-v2/ProjectionStore.ts": [
@@ -77,12 +83,21 @@
   ],
   "packages/provider-pi/src/server/adapter.ts": [
     {
+      "oldText": "      const pendingPrompts = new Map<string, PendingPiPrompt>();",
+      "newText": "      let exportOrdinal = 0;\n      const exportPrompts = new Map<string, Deferred.Deferred<string>>();\n      const pendingPrompts = new Map<string, PendingPiPrompt>();"
+    },
+    {
+      "oldText": "        getModelContextWindow: (selection) => {",
+      "newText": "        exportThreadHtml: (exportInput) => Effect.gen(function* () {\n          const wanted = exportInput.providerThread;\n          const nativePath = wanted.nativeThreadRef?.nativeId;\n          if (!nativePath) return yield* protocolError(\"Pi session file reference is missing\");\n          // Pi 的 switch_session 会把缺失/空文件当新会话；导出必须拒绝，避免静默丢失历史。\n          const fileInfo = yield* fileSystem.stat(nativePath);\n          if (fileInfo.type !== \"File\" || fileInfo.size === 0n)\n            return yield* protocolError(\"Pi session file is empty or invalid\");\n          if (threadState?.providerThread.nativeThreadRef?.nativeId !== wanted.nativeThreadRef?.nativeId) {\n            yield* registerThread({\n              threadId: wanted.appThreadId ?? input.threadId,\n              modelSelection: input.modelSelection, runtimePolicy: input.runtimePolicy,\n              existingProviderThread: wanted,\n            }, false);\n            yield* applySelection(input.modelSelection);\n          }\n          if (rollbackBarrier !== null || threadState?.activeTurn != null || pendingWake !== null)\n            return yield* protocolError(\"Wait until the Pi session is idle before exporting\");\n          const commands = yield* request({ type: \"get_commands\" });\n          const available = recordField(commands, \"commands\");\n          if (!Array.isArray(available) || !available.some(c => recordString(c, \"name\") === \"pimac-export-context\"))\n            return yield* protocolError(\"Pi export extension is unavailable; reopen the session after updating Server\");\n          const id = `export-${++exportOrdinal}`;\n          const waiting = yield* Deferred.make<string>();\n          exportPrompts.set(id, waiting);\n          const systemPrompt = yield* Effect.gen(function* () {\n            const result = yield* request({ type: \"prompt\", message: `/pimac-export-context ${id}` });\n            if (recordString(result, \"disposition\") !== \"handled\")\n              return yield* protocolError(\"Pi did not handle the export metadata command\");\n            return yield* Deferred.await(waiting).pipe(Effect.timeout(PI_REQUEST_TIMEOUT_MS));\n          }).pipe(Effect.ensuring(Effect.sync(() => { exportPrompts.delete(id); })));\n          return yield* Effect.tryPromise(() => exportPiSessionHtml(command =>\n            Effect.runPromise(request(command, PI_SESSION_TIMEOUT_MS)), systemPrompt\n          ));\n        }).pipe(Effect.mapError(cause => new ProviderAdapter.ProviderAdapterProtocolError({\n          driver: PI_PROVIDER, detail: \"Pi HTML export failed\", cause,\n        }))),\n        getModelContextWindow: (selection) => {"
+    }
+  ,
+    {
       "oldText": "import * as HostProcess from \"@t3tools/shared/HostProcess\";",
-      "newText": "import { getNative } from \"pimac:native.mjs\";\nimport { startPiMessage, recordPiDelta, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport * as HostProcess from \"@t3tools/shared/HostProcess\";"
+      "newText": "import { getNative } from \"pimac:native.mjs\";\nimport { exportPiSessionHtml } from \"pimac:pi-session-html.ts\";\nimport { startPiMessage, recordPiDelta, endPiMessage, piTurnMetrics } from \"pimac:pi-turn-usage.mjs\";\nimport * as HostProcess from \"@t3tools/shared/HostProcess\";"
     },
     {
       "oldText": "          case \"extension_ui_request\":\n            yield* handleExtensionUiRequest(event);",
-      "newText": "          case \"extension_ui_request\":\n            getNative().accountSelections.record(turn?.turnInput.threadId ?? state?.providerThread.appThreadId ?? input.threadId, event);\n            yield* handleExtensionUiRequest(event);"
+      "newText": "          case \"extension_ui_request\":\n            getNative().accountSelections.record(turn?.turnInput.threadId ?? state?.providerThread.appThreadId ?? input.threadId, event);\n            if (recordString(event, \"statusKey\") === \"pimac-export-context\") {\n              try {\n                const payload = JSON.parse(recordString(event, \"statusText\") ?? \"null\");\n                if (payload && typeof payload.id === \"string\" && typeof payload.systemPrompt === \"string\") {\n                  const waiting = exportPrompts.get(payload.id);\n                  if (waiting) yield* Deferred.succeed(waiting, payload.systemPrompt);\n                }\n              } catch { /* 损坏的状态不冒充空提示词；等待方会超时并明确失败。 */ }\n              break;\n            }\n            yield* handleExtensionUiRequest(event);"
     },
     {
       "oldText": "            const delta = event[\"assistantMessageEvent\"];",
@@ -314,7 +329,33 @@
     "newText": "              instances.length === 0 ? Effect.succeed([]) :\n                reader.scan({ instances, settings, windowStartMs, retentionCutoffMs, awaitRefresh }),"
   }
 ],
+  "apps/server/src/orchestration-v2/runtimeLayer.ts": [
+    {
+      "oldText": "export const layer = Layer.mergeAll(",
+      "newText": "export const layerSessionHtmlExportDependencies = Layer.mergeAll(ProjectionStore.layer, layerRuntimePolicyProvided);\n\nexport const layer = Layer.mergeAll("
+    }
+  ],
+  "apps/server/src/http.ts": [
+    {
+      "oldText": "const authenticateRawRouteWithScope = (",
+      "newText": "import { makeSessionHtmlExportRoute } from \"pimac:session-html-route.ts\";\n\nconst authenticateRawRouteWithScope = ("
+    },
+    {
+      "oldText": "export const layerOtlpTracesProxyRoute = HttpRouter.add(",
+      "newText": "export const layerSessionHtmlExportRoute = makeSessionHtmlExportRoute(authenticateRawRouteWithScope(AuthOrchestrationOperateScope));\n\nexport const layerOtlpTracesProxyRoute = HttpRouter.add("
+    }
+  ],
+  "apps/server/src/orchestration-v2/ProviderSessionManager.ts": [
+    {
+      "oldText": "          subscribeEvents,\n          events: Stream.unwrap(",
+      "newText": "          subscribeEvents,\n          ...(runtime.exportThreadHtml === undefined ? {} : {\n            exportThreadHtml: (input: { readonly providerThread: OrchestrationV2ProviderThread }) =>\n              observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(\n                Effect.andThen(runtime.exportThreadHtml!(input)),\n              ),\n          }),\n          events: Stream.unwrap("
+    }
+  ],
   "apps/server/src/server.ts": [
+    {
+      "oldText": "    ServerHttp.layerOtlpTracesProxyRoute,",
+      "newText": "    ServerHttp.layerSessionHtmlExportRoute.pipe(HttpRouter.provideRequest(RuntimeLayer.layerSessionHtmlExportDependencies)),\n    ServerHttp.layerOtlpTracesProxyRoute,"
+    },
 {
   "oldText": "    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(",
   "newText": "    // 先订阅再读快照，避免启用实例的变更丢失。只订阅已启用驱动的安装状态；\n    // 安装服务本身惰性初始化，显式安装/管理 API 仍保留完整官方行为。\n    const subscription = yield* instances.subscribeChanges;\n    yield* Stream.concat(Stream.make(undefined), Stream.fromSubscription(subscription)).pipe(\n      Stream.mapEffect(() => instances.listInstances),\n      Stream.map((entries) => ({\n        antigravity: entries.some((entry) => entry.enabled && entry.driverKind === \"antigravity\"),\n        codex: entries.some((entry) => entry.enabled && entry.driverKind === \"codex\"),\n      })),\n      Stream.changesWith((a, b) => a.antigravity === b.antigravity && a.codex === b.codex),\n      Stream.switchMap((enabled) => Stream.merge(\n        enabled.antigravity ? antigravity.changes.pipe(\n          Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n          Stream.drop(1),\n        ) : Stream.empty,\n        enabled.codex ? codex.changes.pipe(\n          Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n          Stream.drop(1),\n        ) : Stream.empty,\n      )),"

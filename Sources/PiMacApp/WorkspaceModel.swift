@@ -122,10 +122,7 @@ final class WorkspaceModel: ObservableObject {
     // Import known project roots only. Historical JSONL files are never opened
     // by the desktop or silently assigned to another Provider-owned session.
     let defaults = UserDefaults.standard
-    let oldPaths =
-      defaults.stringArray(forKey: "workspaceProjectPaths") ?? defaults.string(
-        forKey: "lastProjectPath"
-      ).map { [$0] } ?? []
+    let oldPaths = Self.legacyProjectPaths(defaults: defaults)
     projectImportTask = Task { [weak self] in
       guard let self else { return }
       do {
@@ -133,10 +130,18 @@ final class WorkspaceModel: ObservableObject {
         for path in oldPaths where FileManager.default.fileExists(atPath: path) {
           _ = try await self.server.ensureProject(URL(fileURLWithPath: path))
         }
+        // 迁移只做一次；保留旧偏好作历史记录，但不能在每次启动时复活已移除的项目。
+        defaults.set(true, forKey: "t3ProjectImportCompleted")
         self.server.requestRefresh()
       } catch { self.selectedModel?.statusText = "项目同步未完成；原项目和历史文件均未修改。" }
     }
     self.telegram.start(workspace: self)
+  }
+
+  static func legacyProjectPaths(defaults: UserDefaults) -> [String] {
+    guard !defaults.bool(forKey: "t3ProjectImportCompleted") else { return [] }
+    return defaults.stringArray(forKey: "workspaceProjectPaths")
+      ?? defaults.string(forKey: "lastProjectPath").map { [$0] } ?? []
   }
 
   var selectedModel: AppModel? { tabs.first { $0.id == selectedTabID }?.model }
@@ -179,7 +184,10 @@ final class WorkspaceModel: ObservableObject {
       return WorkspaceProject(
         url: URL(fileURLWithPath: root), customName: project["title"] as? String)
     }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    let removedProjects = projects.filter { old in !nextProjects.contains { $0.id == old.id } }
     if projects != nextProjects { projects = nextProjects }
+    // 同步其他客户端的删除，也要释放本地标签，避免新聊天重新指向已删除目录。
+    for project in removedProjects { removeTabs(project: project.url) }
     if let path = projectFilterPath, !projects.contains(where: { $0.id == path }) {
       clearProjectFilter()
     }
@@ -232,7 +240,13 @@ final class WorkspaceModel: ObservableObject {
   }
 
   func addProject(_ projectURL: URL) {
-    guard FileManager.default.fileExists(atPath: projectURL.path) else { return }
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: projectURL.path, isDirectory: &isDirectory),
+      isDirectory.boolValue
+    else {
+      selectedModel?.statusText = "添加项目失败：请选择存在的文件夹。"
+      return
+    }
     Task {
       do {
         _ = try await server.ensureProject(projectURL)
@@ -270,18 +284,21 @@ final class WorkspaceModel: ObservableObject {
   }
 
   func removeProject(_ project: WorkspaceProject) {
-    guard let id = server.projectID(for: project.url),
-      !server.threads.contains(where: {
-        $0["projectId"] as? String == id
-          && ($0["latestTurn"] as? [String: Any])?["state"] as? String == "running"
-      })
-    else { return }
+    guard let id = server.projectID(for: project.url) else { return }
+    // 忙碌限制由 Server 原子校验，不能用可能过期的本地快照静默忽略移除操作。
     Task {
       do {
         try await server.dispatch(["type": "project.delete", "projectId": id, "force": true])
         removeTabs(project: project.url)
+        if persistsState {
+          let defaults = UserDefaults.standard
+          defaults.removeObject(forKey: "t3SelectedThread.\(project.id)")
+          if defaults.string(forKey: "t3SelectedProject") == project.id {
+            defaults.removeObject(forKey: "t3SelectedProject")
+          }
+        }
         try await server.refreshShell()
-      } catch { selectedModel?.statusText = "移除项目未确认，请刷新 Server 状态。" }
+      } catch { selectedModel?.statusText = "移除项目未确认；请检查是否有运行中任务，并刷新 Server 状态。" }
     }
   }
   /// 新聊天优先使用侧栏筛选项目；筛选本身不切换或修改当前会话。
@@ -556,16 +573,18 @@ final class WorkspaceModel: ObservableObject {
     }
   }
 
-  func archiveSession(path: String, in projectURL: URL) {
+  func archiveSession(path: String) {
     guard let id = AppModel.threadID(from: path), model(forSessionPath: path)?.isBusy != true else {
       return
     }
     Task {
       do {
-        try await server.dispatch(["type": "thread.archive", "threadId": id])
+        // 归档只依赖线程身份；项目已不在侧栏时仍允许清理残留会话。
+        try await server.dispatch(["type": "thread.archive", "threadId": id], refreshAfter: false)
         if let tab = tabs.first(where: { $0.model.currentSessionPath == path }) {
           removeTab(tab.id)
         }
+        try await server.refreshShell()
       } catch { selectedModel?.statusText = "归档未确认，请刷新 Server 状态。" }
     }
   }
@@ -684,7 +703,9 @@ final class WorkspaceModel: ObservableObject {
     }
   }
   private func removeTabs(project: URL) {
-    for id in tabs.filter({ $0.model.projectURL == project }).map(\.id) { removeTab(id) }
+    for id in tabs.filter({
+      $0.model.projectURL?.standardizedFileURL == project.standardizedFileURL
+    }).map(\.id) { removeTab(id) }
   }
   static func sidebarUpdates(for model: AppModel) -> AnyPublisher<Void, Never> {
     Publishers.MergeMany([

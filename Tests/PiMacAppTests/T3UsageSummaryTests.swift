@@ -17,8 +17,10 @@ struct T3UsageSummaryTests {
     [
       "day": day, "model": model, "records": 3, "sessions": 2,
       "costUsd": 0.5, "unpricedRecords": 1,
-      "totals": ["uncachedInputTokens": 100, "cachedInputTokens": 50,
-        "cacheCreationTokens": 10, "outputTokens": 20, "reasoningTokens": 15],
+      "totals": [
+        "uncachedInputTokens": 100, "cachedInputTokens": 50,
+        "cacheCreationTokens": 10, "outputTokens": 20, "reasoningTokens": 15,
+      ],
     ]
   }
 
@@ -46,15 +48,67 @@ struct T3UsageSummaryTests {
     #expect(result.cacheWriteTokens == 20)
     #expect(result.requests == 6)
     #expect(result.cost == 1)
-    #expect(result.sessions == 2) // Not the sum of bucket session counts.
+    #expect(result.sessions == 2)  // Not the sum of bucket session counts.
     #expect(result.days.count == 7)
     #expect(result.models.map(\.name) == ["other", "test"])
     #expect(result.projects.isEmpty)
     #expect(result.coverageWarnings.count == 1)
   }
 
+  @Test func repeatedDaysStillAggregateEveryModelAndSourceBucket() throws {
+    let buckets = (0..<20).flatMap { index in
+      [
+        bucket(model: "model-\(index)"), bucket(day: "2026-01-02", model: "model-\(index)"),
+        bucket(model: "model-\(index)"),
+      ]
+    }
+    let result = try T3UsageSummary.snapshot(summary(buckets: buckets), period: .all)
+    #expect(result.days.map(\.tokens) == [7200, 3600])
+    #expect(result.days.map(\.cost) == [20, 10])
+    #expect(result.models.count == 20)
+    #expect(result.models.allSatisfy { $0.tokens == 540 && $0.requests == 9 && $0.cost == 1.5 })
+    #expect(result.totalTokens == 10800)
+    #expect(result.requests == 180)
+    #expect(result.sessions == 2)
+    #expect(result.coverageWarnings == ["60 条记录缺少定价；Token 已计入，费用未计入。"])
+  }
+
+  @Test func dateReuseIsScopedToEachResponsesReportingTimeZone() throws {
+    // 覆盖夏令时切换两侧；相同日期字符串不能复用另一个响应的绝对时间。
+    let buckets = [bucket(day: "2026-03-08"), bucket(day: "2026-03-09"), bucket(day: "2026-03-08")]
+    for zoneID in ["UTC", "America/Los_Angeles", "Asia/Shanghai", "UTC"] {
+      var data = summary(buckets: buckets)
+      data["timeZone"] = zoneID
+      let result = try T3UsageSummary.snapshot(data, period: .all)
+      let formatter = DateFormatter()
+      formatter.locale = Locale(identifier: "en_US_POSIX")
+      formatter.calendar = Calendar(identifier: .gregorian)
+      let zone = try #require(TimeZone(identifier: zoneID))
+      formatter.timeZone = zone
+      formatter.dateFormat = "yyyy-MM-dd"
+      #expect(
+        result.days.map(\.date) == [
+          try #require(formatter.date(from: "2026-03-08")),
+          try #require(formatter.date(from: "2026-03-09")),
+        ])
+      #expect(result.days.map(\.tokens) == [360, 180])
+    }
+  }
+
+  @Test func reusedDatesDoNotBypassValidationOfLaterBuckets() throws {
+    for invalid in [
+      bucket(day: "invalid"), ["day": "2026-01-01", "model": "missing totals"],
+      ["day": "2026-01-01", "totals": [:]],
+    ] {
+      let data = summary(buckets: [bucket(), bucket(), invalid])
+      #expect(throws: (any Error).self) { try T3UsageSummary.snapshot(data, period: .all) }
+    }
+    #expect(try T3UsageSummary.snapshot(summary(buckets: []), period: .all).days.isEmpty)
+  }
+
   @Test func partialCoverageAndUnpricedRecordsRemainVisible() throws {
-    let result = try T3UsageSummary.snapshot(summary(buckets: [bucket()], status: "partial"), period: .all)
+    let result = try T3UsageSummary.snapshot(
+      summary(buckets: [bucket()], status: "partial"), period: .all)
     #expect(result.coverageWarnings.count == 2)
     #expect(result.days.count == 1)
     #expect(result.totalTokens == 180)

@@ -7,7 +7,9 @@ const args = process.argv.slice(2);
 if (args.includes('--version')) { console.log('1.0.0'); process.exit(0); }
 const option = name => args[args.indexOf(name) + 1];
 let sessionId = args.includes('--session-id') ? option('--session-id') : 'fixture-session';
-let sessionFile = args.includes('--session') ? option('--session') : '/tmp/pimac-fixture-session.jsonl';
+let sessionFile = args.includes('--session') ? option('--session') : path.join(process.cwd(), 'fixture-session.jsonl');
+if (!fs.existsSync(sessionFile)) fs.writeFileSync(sessionFile, JSON.stringify({ type: 'session', version: 3,
+  id: sessionId, timestamp: new Date().toISOString(), cwd: process.cwd() }) + '\n', { mode: 0o600 });
 const directory = args.includes('--session-dir') ? option('--session-dir') : undefined;
 if (directory) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
 // 模拟 Pi 原生 --fork 的独立会话文件，让父子生命周期测试走真实适配器链路。
@@ -32,6 +34,16 @@ process.stdin.on('data', chunk => {
     const response = data => send({ id: command.id, type: 'response', command: command.type, success: true, ...(data ? { data } : {}) });
     switch (command.type) {
       case 'get_state': response({ sessionId, sessionFile, isStreaming: running, isCompacting: compacting, model, thinkingLevel }); break;
+      case 'export_html': {
+        if (fs.existsSync(path.join(process.cwd(), 'fixture-export-failure'))) {
+          send({ id: command.id, type: 'response', command: command.type, success: false, error: 'Fixture export failure' });
+          break;
+        }
+        fs.writeFileSync(command.outputPath, '<!doctype html><html><script id="session-data" type="application/json">' + Buffer.from(JSON.stringify({
+          systemPrompt: '', tools: [{ name: 'read' }], sessionFile, entries: [],
+        })).toString('base64') + '</script></html>', { mode: 0o600 });
+        response({ path: command.outputPath }); break;
+      }
       case 'get_entries': response({ entries: [] }); break;
       case 'get_messages': response({ messages: [] }); break;
       case 'new_session': sessionId = 'fixture-' + process.pid; sessionFile = path.join(process.cwd(), sessionId + '.jsonl');
@@ -55,7 +67,7 @@ process.stdin.on('data', chunk => {
         };
         finish(); break;
       }
-      case 'get_commands': response({ commands: [{ name: 'pimac-fast', source: 'extension' }, { name: 'accounts', source: 'extension' }] }); break;
+      case 'get_commands': response({ commands: [{ name: 'pimac-export-context', source: 'extension' }, { name: 'pimac-fast', source: 'extension' }, { name: 'accounts', source: 'extension' }] }); break;
       case 'get_available_models': response({ models: [model, ...(process.env.PIMAC_FIXTURE_EXTRA_MODEL === '1'
         ? [{ ...model, id: 'alternate', name: 'Alternate Model' }] : [])] }); break;
       case 'set_model': model = { provider: command.provider, id: command.modelId, name: command.modelId, api: command.provider === 'openai' ? 'openai-responses' : command.provider === 'openai-codex' ? 'openai-codex-responses' : 'test' }; response(model); break;
@@ -73,6 +85,12 @@ process.stdin.on('data', chunk => {
       case 'abort':
         clearTimeout(completion); running = false; send({ type: 'agent_settled' }); response(); break;
       case 'prompt': {
+        if (command.message.startsWith('/pimac-export-context ')) {
+          send({ type: 'extension_ui_request', method: 'setStatus', statusKey: 'pimac-export-context', statusText: JSON.stringify({
+            id: command.message.split(' ')[1], systemPrompt: 'Fixture restored system prompt',
+          }) });
+          response({ disposition: 'handled' }); break;
+        }
         if (command.message.startsWith('/pimac-fast ')) {
           send({ type: 'extension_ui_request', method: 'setStatus', statusKey: 'pimac-fast', statusText: command.message.split(' ')[1] });
           response({ disposition: 'handled' }); break;

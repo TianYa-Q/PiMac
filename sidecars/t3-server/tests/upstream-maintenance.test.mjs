@@ -71,7 +71,7 @@ test('upstream owns Pi structured image output, history parsing and project revi
     !entry.newText.includes('projects.list()')));
 });
 
-test('Pi lifecycle and image projection stay upstream-owned with bounded telemetry, account selection and Fast exceptions', () => {
+test('Pi lifecycle and image projection stay upstream-owned with bounded presentation and native export exceptions', () => {
   const adapter = 'packages/provider-pi/src/server/adapter.ts';
   const contract = 'packages/contracts/src/orchestrationV2.ts';
   for (const file of Object.keys(patches)) {
@@ -90,14 +90,20 @@ test('Pi lifecycle and image projection stay upstream-owned with bounded telemet
   assert(goalPatches.some(entry => entry.newText.includes('updateProviderThread(threadState, { goal: piGoal })')));
   assert(goalPatches.every(entry => !/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText)),
     'Goal patches only mirror native state; scheduling, stop and continuation stay upstream-owned');
-  assert.equal(patches[adapter].length - fastPatches.length - goalPatches.length, 7);
+  const exportPatches = patches[adapter].filter(entry =>
+    entry.oldText === '      const pendingPrompts = new Map<string, PendingPiPrompt>();' ||
+    entry.oldText === '        getModelContextWindow: (selection) => {');
+  assert.equal(exportPatches.length, 2);
+  assert(exportPatches.some(entry => entry.newText.includes('exportPiSessionHtml')));
+  assert(exportPatches.every(entry => !/startTurn\(|message\.dispatch|connection\.terminate/.test(entry.newText)));
+  assert.equal(patches[adapter].length - fastPatches.length - goalPatches.length - exportPatches.length, 7);
   const selection = patches[adapter].filter(entry => entry.newText.includes('accountSelections.record'));
   assert.equal(selection.length, 1);
   assert(selection[0].newText.includes('state?.providerThread.appThreadId ?? input.threadId'));
   assert.equal(patches[contract].length, 3);
   assert.equal(patches[contract].filter(entry => entry.newText.includes("latestMessageAt: Schema.optional")).length, 2);
   assert(patches[contract].some(entry => entry.newText.includes('piMetrics: Schema.optional')));
-  for (const entry of patches[adapter].filter(entry => !fastPatches.includes(entry) && !goalPatches.includes(entry))) {
+  for (const entry of patches[adapter].filter(entry => !fastPatches.includes(entry) && !goalPatches.includes(entry) && !exportPatches.includes(entry))) {
     assert(/pi-turn-usage|startPiMessage|recordPiDelta|endPiMessage|piTurnMetrics|metrics\.turnTokenUsage|accountSelections\.record/.test(entry.newText));
     assert(!/connection\.terminate|state\.activeTurn\s*=|request\(|type: "prompt"/.test(entry.newText));
   }

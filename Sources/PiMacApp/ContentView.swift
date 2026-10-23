@@ -286,7 +286,7 @@ struct ContentView: View {
       if sessionSearchFocused { composerFocused = false }
     }
     .onChange(of: sessionSearchText) {
-      isSearchingSessions = !SessionSearchQuery(sessionSearchText).isEmpty
+      isSearchingSessions = ServerThreadSearchQuery(sessionSearchText).canSearch
       sessionSearchResults = []
       sessionSearchError = nil
     }
@@ -301,8 +301,8 @@ struct ContentView: View {
       }
     }
     .task(id: sessionSearchKey) {
-      let query = sessionSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-      guard !SessionSearchQuery(query).isEmpty else {
+      let query = ServerThreadSearchQuery(sessionSearchText)
+      guard query.canSearch else {
         sessionSearchResults = []
         sessionSearchError = nil
         isSearchingSessions = false
@@ -310,30 +310,20 @@ struct ContentView: View {
       }
       isSearchingSessions = true
       sessionSearchError = nil
-      do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
       let sessions = allSessions
-      let messagesByPath: [String: [String]]
+      sessionSearchResults = []
       do {
-        messagesByPath = try await workspace.server.sessionSearchMessages(
-          query: query, sessions: sessions)
+        try await Task.sleep(for: .milliseconds(250))
+        let results = try await workspace.server.searchSessions(
+          query: query.text, sessions: sessions)
+        try Task.checkCancellation()
+        sessionSearchResults = results
+        isSearchingSessions = false
       } catch {
         guard !Task.isCancelled else { return }
-        sessionSearchResults = []
         isSearchingSessions = false
-        sessionSearchError = "无法读取 Server 会话，请检查连接后重新搜索。"
-        return
+        sessionSearchError = "正文搜索失败，请检查连接后重试。"
       }
-      let search = Task.detached(priority: .userInitiated) {
-        SessionSearch.results(for: query, in: sessions, messagesByPath: messagesByPath)
-      }
-      let results = await withTaskCancellationHandler {
-        await search.value
-      } onCancel: {
-        search.cancel()
-      }
-      guard !Task.isCancelled else { return }
-      sessionSearchResults = results
-      isSearchingSessions = false
     }
     .onChange(of: tabID) {
       skillDismissedText = nil
@@ -358,7 +348,8 @@ struct ContentView: View {
       threads: workspace.server.threads, locallyRunningIDs: locallyRunningIDs)
     let visibleSessions = tree.rows(
       expandedPaths: expandedSessionPaths, rootLimit: visibleSessionCount)
-    let searching = !SessionSearchQuery(sessionSearchText).isEmpty
+    let searchQuery = ServerThreadSearchQuery(sessionSearchText)
+    let searching = !searchQuery.text.isEmpty
     return VStack(spacing: 0) {
       VStack(alignment: .leading, spacing: 0) {
         HStack(spacing: 9) {
@@ -561,7 +552,7 @@ struct ContentView: View {
               text: $sessionSearchText, focused: $sessionSearchFocused,
               onClose: closeSessionSearch,
               onSubmit: {
-                guard !isSearchingSessions, let result = sessionSearchResults.first,
+                guard let result = sessionSearchResults.first,
                   let projectURL = workspace.project(forSessionPath: result.session.path)?.url
                 else { return }
                 workspace.openSession(path: result.session.path, in: projectURL)
@@ -570,11 +561,19 @@ struct ContentView: View {
           }
 
           if searching {
-            if isSearchingSessions {
-              ProgressView("正在搜索…")
-                .controlSize(.small)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 8)
+            if let validationMessage = searchQuery.validationMessage {
+              Text(validationMessage)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+            } else if isSearchingSessions {
+              HStack(spacing: 8) {
+                ProgressView().controlSize(.mini)
+                Text("正在搜索正文…").font(.caption)
+              }
+              .foregroundStyle(.secondary)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .padding(.vertical, 4)
             } else if let searchError = sessionSearchError {
               VStack(alignment: .leading, spacing: 8) {
                 Label(searchError, systemImage: "exclamationmark.triangle")
@@ -588,11 +587,17 @@ struct ContentView: View {
               }
               .font(.caption)
               .padding(.vertical, 8)
-            } else if sessionSearchResults.isEmpty {
-              ContentUnavailableView.search(text: sessionSearchText)
-                .controlSize(.small)
+            }
+            if sessionSearchResults.isEmpty {
+              if !isSearchingSessions && sessionSearchError == nil
+                && searchQuery.validationMessage == nil
+              {
+                ContentUnavailableView.search(text: sessionSearchText)
+                  .controlSize(.small)
+              }
             } else {
-              Text("找到 \(sessionSearchResults.count) 个会话 · 回车打开首项")
+              Text("\(sessionSearchResults.count) 个会话 · Server 前 50 项")
+                .help("回车打开首项；正文按 Server 全局前 50 个命中会话筛选")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -774,10 +779,12 @@ struct ContentView: View {
         projectIcon(project, size: 29)
         VStack(alignment: .leading, spacing: 1) {
           Text(project.name).font(.callout).lineLimit(1)
-          Text(project.url.deletingLastPathComponent().path)
+          Text(project.url.path)
             .font(.caption2)
             .foregroundStyle(.secondary)
             .lineLimit(1)
+            .truncationMode(.middle)
+            .help(project.url.path)
         }
         Spacer()
         if selected {
@@ -958,6 +965,8 @@ struct ContentView: View {
       .contentShape(RoundedRectangle(cornerRadius: 9))
       .contextMenu {
         if let threadID = AppModel.threadID(from: session.path) {
+          SessionHTMLExportButton(
+            server: workspace.server, threadID: threadID, title: session.title, isBusy: running)
           Button("复制 Thread ID", systemImage: "doc.on.doc") {
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
@@ -994,10 +1003,7 @@ struct ContentView: View {
         }
         Divider()
         Button("归档会话", systemImage: "archivebox") {
-          guard let projectURL = workspace.project(forSessionPath: session.path)?.url else {
-            return
-          }
-          workspace.archiveSession(path: session.path, in: projectURL)
+          workspace.archiveSession(path: session.path)
         }
         .disabled(running)
       }
@@ -1551,6 +1557,17 @@ struct ContentView: View {
         .modifier(ComposerControlChrome())
         .disabled(app.isBusy)
         .help("压缩上下文")
+        SessionHTMLExportButton(
+          server: workspace.server, threadID: app.threadID,
+          title: app.threadID.flatMap {
+            workspace.server.thread($0)?["title"] as? String
+          } ?? "Pi 会话",
+          isBusy: app.isBusy
+        )
+        .font(.caption)
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .modifier(ComposerControlChrome())
         ComposerGitButton(
           server: workspace.server, store: workspace.git,
           hasProject: workspace.selectedGitDirectory != nil

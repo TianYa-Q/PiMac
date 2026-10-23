@@ -33,6 +33,7 @@ final class T3DesktopClient: ObservableObject {
   private let skillDiscovery:
     ((WorkspaceSkillCache.Key, Bool) async throws -> WorkspaceSkillCache.Success)?
   private var watches: [UUID: ThreadWatch] = [:]
+  private var projectCreations: [String: Task<String, Error>] = [:]
   private var imageCache: [String: PromptAttachment] = [:]
   private var replyImageCache: [String: [PromptAttachment]] = [:]
   private var toolDetailCache: [String: JSON] = [:]
@@ -44,7 +45,6 @@ final class T3DesktopClient: ObservableObject {
   private var imageFailures: [String: Int] = [:]
   private var htmlDocumentCache: [String: String] = [:]
   private var htmlRetryAfter: [String: Date] = [:]
-  private let searchIndex = ServerSessionSearchIndex()
   private var hasDeliveredShell = false
   private let sessionCatalog = SessionCatalogCache()
 
@@ -153,7 +153,6 @@ final class T3DesktopClient: ObservableObject {
             self.modelContextSettings = .empty
             self.textGenerationModels.reset()
             self.invalidateThreadSnapshots()
-            self.searchIndex.reset()
             self.isConnected = false
           }
           if serverURL == nil {
@@ -189,11 +188,12 @@ final class T3DesktopClient: ObservableObject {
   func stop() {
     hasLiveSkillShell = false
     skillCache.reset()
-    searchIndex.reset()
     generation = UUID()
     loop?.cancel()
     loop = nil
     threadRefreshes.cancelAll()
+    for task in projectCreations.values { task.cancel() }
+    projectCreations.removeAll()
     assetRefreshes.cancelAll()
     shellRefreshTask?.cancel()
     shellRefreshTask = nil
@@ -327,16 +327,32 @@ final class T3DesktopClient: ObservableObject {
   }
 
   func ensureProject(_ url: URL) async throws -> String {
-    try await waitUntilReady()
-    if let id = projectID(for: url) { return id }
-    // Stable root identity coalesces desktop startup/project imports.
-    let id = Self.projectIdentity(url.standardizedFileURL.path)
-    try await dispatch(
-      [
-        "type": "project.create", "projectId": id,
-        "title": url.lastPathComponent, "workspaceRoot": url.standardizedFileURL.path,
-      ], commandID: "desktop-project-\(id)")
-    return id
+    let root = url.standardizedFileURL
+    let path = root.path
+    if let pending = projectCreations[path] { return try await pending.value }
+    let current = generation
+    let task = Task<String, Error> {
+      try await self.waitUntilReady()
+      // 先读权威列表，避免启动缓存将已删除项目误判为存在；同目录并发请求共享本次任务。
+      try await self.refreshShell()
+      if let id = self.projectID(for: root) { return id }
+      // 删除后的项目 ID 是服务端墓碑；新的添加操作不能复用旧身份或旧命令回执。
+      let id = UUID().uuidString
+      try await self.dispatch(
+        [
+          "type": "project.create", "projectId": id,
+          "title": root.lastPathComponent, "workspaceRoot": path,
+        ], refreshAfter: false)
+      try await self.refreshShell()
+      guard let confirmedID = self.projectID(for: root) else { throw ClientError.rejected }
+      guard confirmedID == id else { throw ClientError.rejected }
+      return confirmedID
+    }
+    projectCreations[path] = task
+    defer {
+      if generation == current { projectCreations.removeValue(forKey: path) }
+    }
+    return try await task.value
   }
 
   func refresh() async throws {
@@ -458,27 +474,18 @@ final class T3DesktopClient: ObservableObject {
     onShell?(next)
   }
 
-  func sessionSearchMessages(query: String, sessions: [SessionItem]) async throws
-    -> [String: [String]]
+  func searchSessions(query: String, sessions: [SessionItem]) async throws -> [SessionSearchResult]
   {
+    let query = ServerThreadSearchQuery(query)
+    guard query.canSearch else { throw ClientError.rejected }
     let current = generation
-    return try await searchIndex.messages(for: query, in: sessions) { id in
-      guard self.generation == current, self.isConnected else { throw ClientError.unavailable }
-      let escaped = id.addingPercentEncoding(
-        withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
-      let native = try await self.request("/api/orchestration/threads/\(escaped)")
-      guard self.generation == current else { throw CancellationError() }
-      let detail = T3V2Presentation.detail(native)
-      guard let thread = detail["thread"] as? JSON,
-        let messages = thread["messages"] as? [JSON]
-      else { throw ClientError.rejected }
-      return messages.compactMap { message in
-        guard let role = message["role"] as? String, ["user", "assistant"].contains(role),
-          let text = message["text"] as? String, !text.isEmpty
-        else { return nil }
-        return text
-      }
-    }
+    let value = try await rpc(
+      "orchestration.searchThreads", payload: ["query": query.text, "limit": 50])
+    try Task.checkCancellation()
+    guard current == generation else { throw CancellationError() }
+    let data = try JSONSerialization.data(withJSONObject: value)
+    let response = try JSONDecoder().decode(ServerThreadSearchResponse.self, from: data)
+    return response.results(in: sessions)
   }
 
   func sessionMetrics(threadID: String) async throws -> SessionStats? {
@@ -491,6 +498,17 @@ final class T3DesktopClient: ObservableObject {
     }
     guard let data = defaults.data(forKey: key) else { return nil }
     return try? JSONDecoder().decode(SessionStats.self, from: data)
+  }
+
+  func exportSessionHTML(threadID: String) async throws -> String {
+    let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))
+    let escaped = threadID.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
+    let result = try await request(
+      "/api/orchestration/threads/\(escaped)/export-html", method: "POST", body: [:])
+    guard let html = result["html"] as? String, !html.isEmpty else {
+      throw ClientError.rejected
+    }
+    return html
   }
 
   func sessionControl(threadID: String, operation: String, accountName: String? = nil) async throws
@@ -1304,10 +1322,6 @@ final class T3DesktopClient: ObservableObject {
     guard let text = value as? String else { return .distantPast }
     return fractionalTimestampFormatter.date(from: text)
       ?? timestampFormatter.date(from: text) ?? .distantPast
-  }
-  static func projectIdentity(_ path: String) -> String {
-    // Namespace is distinct from thread IDs and legacy file/runtime identifiers.
-    "desktop-" + SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
   }
   // Use only fixed categories, never server error bodies, URLs or credentials.
   static func connectionFailureStatus(_ error: Error, phase: String) -> String {

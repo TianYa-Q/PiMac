@@ -28,18 +28,32 @@ enum T3UsageSummary {
     calendar.timeZone = zone
     var result = UsageSnapshot()
     var days: [Date: UsageDay] = [:]
+    // 同一天会按模型及来源拆成多个桶；只在本次响应内复用解析，避免重复调用昂贵的日期解析器。
+    // 不跨请求缓存，确保时区变化立即生效；失败的日期仍按损坏响应处理。
+    var parsedDays: [String: Date] = [:]
     var models: [String: ModelUsage] = [:]
     var unpriced = 0
     for bucket in buckets {
-      guard let dayString = bucket["day"] as? String, let date = formatter.date(from: dayString),
+      guard let dayString = bucket["day"] as? String,
         let model = bucket["model"] as? String, let totals = bucket["totals"] as? JSON
       else { throw T3DesktopClient.ClientError.rejected }
+      let date: Date
+      if let cached = parsedDays[dayString] {
+        date = cached
+      } else {
+        guard let parsed = formatter.date(from: dayString) else {
+          throw T3DesktopClient.ClientError.rejected
+        }
+        parsedDays[dayString] = parsed
+        date = parsed
+      }
       let input = UsageArithmetic.integer(totals["uncachedInputTokens"])
       let output = UsageArithmetic.integer(totals["outputTokens"])
       let read = UsageArithmetic.integer(totals["cachedInputTokens"])
       let write = UsageArithmetic.integer(totals["cacheCreationTokens"])
       // Reasoning is already included in output, not an additional category.
-      let tokens = UsageArithmetic.add(UsageArithmetic.add(input, output), UsageArithmetic.add(read, write))
+      let tokens = UsageArithmetic.add(
+        UsageArithmetic.add(input, output), UsageArithmetic.add(read, write))
       let cost = UsageArithmetic.cost(bucket["costUsd"])
       let requests = UsageArithmetic.integer(bucket["records"])
       result.inputTokens = UsageArithmetic.add(result.inputTokens, input)
@@ -62,7 +76,8 @@ enum T3UsageSummary {
     }
     // Bucket session counts overlap across days/models. Use the Server's source counts instead.
     for source in sources {
-      result.sessions = UsageArithmetic.add(result.sessions, UsageArithmetic.integer(source["distinctSessions"]))
+      result.sessions = UsageArithmetic.add(
+        result.sessions, UsageArithmetic.integer(source["distinctSessions"]))
       let status = source["status"] as? String ?? "failed"
       if status == "partial" || status == "failed" {
         result.coverageWarnings.append("部分用量来源读取不完整，汇总可能偏低。")
@@ -83,7 +98,9 @@ enum T3UsageSummary {
       }
     }
     result.days = days.values.sorted { $0.date < $1.date }
-    result.models = models.values.sorted { $0.tokens == $1.tokens ? $0.name < $1.name : $0.tokens > $1.tokens }
+    result.models = models.values.sorted {
+      $0.tokens == $1.tokens ? $0.name < $1.name : $0.tokens > $1.tokens
+    }
     return result
   }
 

@@ -146,7 +146,22 @@ SQLite and V1 transcript migration; do not reinterpret old private Pi cursors
 as native file paths. Back up real Server state before first upgraded startup.
 
 The desktop uses official runtime requests for extension dialogs and `/compact`
-for compaction. Arbitrary tool output, full diffs and image bytes are not
+for compaction. Session HTML export calls Pi's native `export_html` RPC through the
+same official session manager. After a Server restart, the persisted active Pi
+provider thread is restored with its workspace, instance settings and model
+selection before exporting, without dispatching a user message or creating a run.
+An injected command-only extension reads `ctx.getSystemPrompt()` (never a model
+request). Its correlated status reply fills the native HTML data block because
+Pi 1.3's exporter reads the legacy `agent.state.systemPrompt`, which can be empty
+after restore. Missing extension/unsupported template/metadata timeout fails
+explicitly rather than falling back to a model prompt or incomplete export.
+The system prompt and tools are the effective restored configuration, not a
+claim to recover their historical versions. Empty/non-Pi threads and missing
+native files fail explicitly; there is no JSONL-only fallback that silently
+omits system metadata. The authenticated orchestration-operate HTTP route returns
+HTML as no-store JSON download data, never executes it or accepts a client path;
+private temporary files are cleaned up. Desktop saving is atomic and warns about
+sensitive conversation/system/tool data. Arbitrary tool output, full diffs and image bytes are not
 embedded into shell snapshots; tool image metadata and signed downloads now
 use upstream's implementation. Terminal-only decoration and old private
 account/compaction-model overrides are not preserved; Fast uses the bounded

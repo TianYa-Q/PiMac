@@ -481,16 +481,22 @@ struct T3DesktopTests {
       model.messages.contains { $0.kind == .assistant && $0.text == "Reply: queued-followup" })
     let id = try #require(model.threadID)
     let searchSession = SessionItem(path: "t3:\(id)", title: "搜索测试", modifiedAt: .now)
-    let searchable = try await client.sessionSearchMessages(
+    // 搜索必须走真实 Server 的数据库路径，并返回摘要，而不是逐会话下载详情。
+    let nativeResults = try await client.searchSessions(
       query: "queued-followup", sessions: [searchSession])
-    #expect(
-      searchable[searchSession.path]?.contains("Reply: queued-followup") == true,
-      "Fixture searchable text: \(searchable[searchSession.path] ?? [])")
-    #expect(searchable[searchSession.path]?.contains("fixture.txt") == false)
-    #expect(
-      SessionSearch.results(
-        for: "搜索测试 queued-followup", in: [searchSession], messagesByPath: searchable
-      ).count == 1)
+    #expect(nativeResults.map(\.id) == [searchSession.path])
+    #expect(nativeResults.first?.snippet?.contains("queued-followup") == true)
+    let phraseResults = try await client.searchSessions(
+      query: "Reply: queued-followup", sessions: [searchSession])
+    #expect(phraseResults.map(\.id) == [searchSession.path])
+    // 旧 title:/text: 语法不再解释；标题和工具输出也不补入原生正文结果。
+    for query in ["text:queued-followup", "搜索测试", "fixture.txt"] {
+      let results = try await client.searchSessions(query: query, sessions: [searchSession])
+      #expect(results.isEmpty)
+    }
+    let noMatches = try await client.searchSessions(
+      query: "definitely-no-match-53b027", sessions: [searchSession])
+    #expect(noMatches.isEmpty)
     let detail = try await client.request("/api/orchestration/threads/\(id)")
     #expect(
       ((detail["projection"] as? [String: Any])?["thread"] as? [String: Any])?["id"] as? String

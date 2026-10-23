@@ -60,6 +60,13 @@ redemption credentials or implement unsupported account operations.
   managed installs do not reappear as enabled status rows. All drivers, runtime APIs
   and scopes remain intact; later official settings can enable any provider.
 - Pi response telemetry, account-selection status and Fast option integration.
+- Authenticated native Pi HTML export through the existing session manager,
+  including restart/resume without a user message or model run. A command-only
+  extension reads the effective system prompt; the host fills just the native
+  HTML data field because Pi 1.3 still exports the legacy empty agent-state
+  prompt. Missing metadata or an unknown template fails explicitly; native
+  rendering, tools, transcript and branch data remain Pi-owned. See the sidecar
+  README for the scope and private temporary-file boundary.
 - Optional pinned `pi-goal-x` presentation bridge: validate RPC status reports and
   mirror them into official `providerThread.goal`; extension scheduling/storage
   and upstream Pi lifecycle remain unchanged. See [Pi Goal](pi-goal.md).
