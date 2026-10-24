@@ -881,11 +881,6 @@ struct ContentView: View {
             }
             .padding(.trailing, 22)
             .help(session.title)
-            if regeneratingTitle {
-              Label("正在重新生成标题…", systemImage: "arrow.trianglehead.2.clockwise")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
             if parentID != nil {
               Text("隶属：\(parentThread?["title"] as? String ?? "父会话不在当前列表")")
                 .font(.caption2)
