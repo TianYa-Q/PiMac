@@ -11,12 +11,14 @@ struct ToolOutputView: NSViewRepresentable {
   var searchMatches: [NSRange] = []
   var followsTail = false
   var maximumHeight: CGFloat = 300
+  var onTailPaused: (() -> Void)? = nil
 
   func makeNSView(context: Context) -> ToolOutputScrollView {
     ToolOutputScrollView()
   }
 
   func updateNSView(_ view: ToolOutputScrollView, context: Context) {
+    view.onTailPaused = onTailPaused
     view.setWrapsLines(wrapsLines)
     view.setOutput(text)
     view.setSearchMatches(searchMatches)
@@ -40,6 +42,8 @@ final class ToolOutputScrollView: NSScrollView {
   private var searchSelection: NSRange?
   private(set) var searchMatches: [NSRange] = []
   private var followsTail = false
+  var onTailPaused: (() -> Void)?
+  private var liveScrollObserver: NSObjectProtocol?
   private(set) var wrapsLines = false
   private var layoutWidth: CGFloat = 0
 
@@ -74,9 +78,24 @@ final class ToolOutputScrollView: NSScrollView {
       ofSize: NSFont.smallSystemFontSize, weight: .regular)
     outputTextView.textColor = .labelColor
     documentView = outputTextView
+    liveScrollObserver = NotificationCenter.default.addObserver(
+      forName: NSScrollView.didLiveScrollNotification, object: self, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self, self.followsTail,
+          self.contentView.bounds.maxY < self.outputTextView.frame.height - 2
+        else { return }
+        self.followsTail = false
+        self.onTailPaused?()
+      }
+    }
   }
 
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  deinit {
+    if let liveScrollObserver { NotificationCenter.default.removeObserver(liveScrollObserver) }
+  }
 
   func setOutput(_ text: String) {
     guard outputTextView.string != text,

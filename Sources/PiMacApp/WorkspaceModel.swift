@@ -41,11 +41,31 @@ final class WorkspaceModel: ObservableObject {
     let projectID = projectFilterPath.flatMap {
       server.projectID(for: URL(fileURLWithPath: $0))
     }
-    if projectFilterPath != nil && projectID == nil { return [] }
-    return server.sessions(projectID: projectID, settled: settled)
+    let catalog =
+      projectFilterPath != nil && projectID == nil
+      ? [] : server.sessions(projectID: projectID, settled: settled)
+    let sessions = catalog.filter {
+      !pendingSettlementPaths.contains($0.path)
+    }
+    guard !settled else { return sessions }
+    // shell 到达后按线程身份自然交接；旧 shell 不能吞掉刚点击发送的会话。
+    let local = tabs.compactMap { tab -> SessionItem? in
+      guard let session = tab.model.locallySubmittedSession,
+        let id = tab.model.threadID, server.thread(id) == nil,
+        !pendingSettlementPaths.contains(session.path),
+        projectFilterPath == nil || tab.model.projectURL?.path == projectFilterPath
+      else { return nil }
+      return session
+    }.sorted { $0.modifiedAt > $1.modifiedAt }
+    return local + sessions
   }
 
   func project(forSessionPath path: String) -> WorkspaceProject? {
+    if let model = tabs.first(where: { $0.model.locallySubmittedSession?.path == path })?.model,
+      let url = model.projectURL
+    {
+      return projects.first { $0.url == url } ?? WorkspaceProject(url: url)
+    }
     guard let id = AppModel.threadID(from: path),
       let projectID = server.thread(id)?["projectId"] as? String,
       let project = server.projects.first(where: { $0["id"] as? String == projectID }),
@@ -75,6 +95,7 @@ final class WorkspaceModel: ObservableObject {
   let t3Bridge = T3BridgeService()
   let server: T3DesktopClient
   let git = GitWorkspaceStore()
+  let temporaryFiles: TemporaryFilesStore
 
   var selectedGitDirectory: String? {
     if let id = selectedModel?.threadID {
@@ -99,6 +120,7 @@ final class WorkspaceModel: ObservableObject {
     server client: T3DesktopClient? = nil, draftDefaults: UserDefaults? = nil
   ) {
     self.server = client ?? T3DesktopClient()
+    temporaryFiles = TemporaryFilesStore(defaults: restoreUserState ? .standard : nil)
     self.telegram = telegram ?? TelegramControl()
     persistsState = restoreUserState
     self.draftDefaults = draftDefaults ?? (restoreUserState ? .standard : nil)
@@ -155,10 +177,11 @@ final class WorkspaceModel: ObservableObject {
     if persistsState && !server.isConnected { reasons.append("Server 未连接，无法确认空闲") }
     if server.hasRunningThread { reasons.append("Server 有运行中的线程") }
     if git.busy { reasons.append("Git 操作进行中") }
+    if temporaryFiles.isRunning { reasons.append("临时文件整理进行中") }
     if tabs.contains(where: { $0.model.browserPreview.control.isControlling }) {
       reasons.append("浏览器正在由用户操作")
     }
-    if isSettlingIdleSessions { reasons.append("批量 Settle 进行中") }
+    if isSettlingIdleSessions || !pendingSettlementPaths.isEmpty { reasons.append("后台 Settle 进行中") }
     if !submittingTitleRegenerations.isEmpty
       || server.threads.contains(where: { $0["titleRegeneration"] is [String: Any] })
     {
@@ -178,6 +201,12 @@ final class WorkspaceModel: ObservableObject {
   private func applyShell(_ snapshot: [String: Any]) {
     // Read receipts can change without a title/date/catalog revision.
     objectWillChange.send()
+    pendingSettlementPaths = pendingSettlementPaths.filter { path in
+      guard let id = AppModel.threadID(from: path), let thread = server.thread(id) else {
+        return false
+      }
+      return !Self.isSettled(thread)
+    }
     let nextProjects = (snapshot["projects"] as? [[String: Any]] ?? []).compactMap {
       project -> WorkspaceProject? in
       guard let root = project["workspaceRoot"] as? String else { return nil }
@@ -197,7 +226,9 @@ final class WorkspaceModel: ObservableObject {
     for tab in tabs {
       tab.model.refreshCodexAccounts()
       if let project = tab.model.projectURL { tab.model.updateCatalog(sessions(in: project)) }
-      if let id = tab.model.threadID, server.thread(id) == nil, !tab.model.isLoadingConfiguration {
+      if let id = tab.model.threadID, server.thread(id) == nil, !tab.model.isLoadingConfiguration,
+        tab.model.locallySubmittedSession == nil
+      {
         tab.model.statusText = "此线程已归档或移除，请从 Server 列表重新选择。"
       }
     }
@@ -437,6 +468,8 @@ final class WorkspaceModel: ObservableObject {
   }
 
   @Published private(set) var isSettlingIdleSessions = false
+  // 仅表示正在收起，不修改 Server 的完成状态；轮询旧快照不能让会话重新闪回列表。
+  @Published private(set) var pendingSettlementPaths: Set<String> = []
 
   /// 只接受明确的终止/空闲状态；未知状态、待处理请求及后台任务保守保留。
   static func canBulkSettle(_ thread: [String: Any]) -> Bool {
@@ -463,6 +496,7 @@ final class WorkspaceModel: ObservableObject {
   var idleSessionPaths: [String] {
     server.threads.filter(canSettleIdleSession)
       .compactMap { ($0["id"] as? String).map { "t3:\($0)" } }
+      .filter { !pendingSettlementPaths.contains($0) }
   }
 
   func settleIdleSessions() {
@@ -470,12 +504,13 @@ final class WorkspaceModel: ObservableObject {
     let paths = idleSessionPaths
     guard !paths.isEmpty else { return }
     isSettlingIdleSessions = true
+    // 同步移出本批全部会话，不等并发槽位、网络往返或整批刷新。
+    pendingSettlementPaths.formUnion(paths)
     Task {
       defer { isSettlingIdleSessions = false }
       let (completed, unconfirmed) = await performSettlement(paths: paths) { id in
         try await self.server.dispatch(
           ["type": "thread.settle", "threadId": id], refreshAfter: false)
-        // 已确认的会话及时移出列表，不等最慢的会话完成整批操作，也不刷新所有转录。
         self.server.requestRefresh(includeThreads: false)
       }
       do {
@@ -494,7 +529,8 @@ final class WorkspaceModel: ObservableObject {
   func performSettlement(
     paths: [String], dispatch: @escaping @MainActor (String) async throws -> Void
   ) async -> (completed: Int, unconfirmed: Int) {
-    await withTaskGroup(of: Int.self) { group in
+    pendingSettlementPaths.formUnion(paths)
+    return await withTaskGroup(of: Int.self) { group in
       var iterator = paths.makeIterator()
       var completed = 0
       var unconfirmed = 0
@@ -503,11 +539,18 @@ final class WorkspaceModel: ObservableObject {
           guard !Task.isCancelled,
             let id = AppModel.threadID(from: path), let thread = self.server.thread(id),
             self.canSettleIdleSession(thread)
-          else { return 0 }
+          else {
+            self.pendingSettlementPaths.remove(path)
+            return 0
+          }
           do {
             try await dispatch(id)
+            // 成功后继续隐藏，直到 shell 确认；失败则立即恢复，允许检查后重试。
             return 1
-          } catch { return -1 }
+          } catch {
+            self.pendingSettlementPaths.remove(path)
+            return -1
+          }
         }
       }
       for _ in 0..<4 {
@@ -561,7 +604,12 @@ final class WorkspaceModel: ObservableObject {
   }
 
   func updateSessionLifecycle(path: String, action: SessionLifecycleAction) {
-    guard let id = AppModel.threadID(from: path) else { return }
+    guard let id = AppModel.threadID(from: path), server.isConnected,
+      !pendingSettlementPaths.contains(path)
+    else { return }
+    let settling: Bool
+    if case .settle = action { settling = true } else { settling = false }
+    if settling { pendingSettlementPaths.insert(path) }
     Task {
       do {
         var payload = action.payload
@@ -569,7 +617,10 @@ final class WorkspaceModel: ObservableObject {
         // 运行中、等待用户等限制由 Server 原子校验，不能仅依赖已打开的桌面标签。
         try await server.dispatch(payload, refreshAfter: false)
         try await server.refreshShell()
-      } catch { selectedModel?.statusText = "会话状态更新未确认；运行中或等待处理的任务不能收起，请检查 Server 状态。" }
+      } catch {
+        pendingSettlementPaths.remove(path)
+        selectedModel?.statusText = "会话状态更新未确认，已恢复显示；请检查 Server 状态后重试。"
+      }
     }
   }
 

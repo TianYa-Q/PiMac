@@ -163,7 +163,9 @@ final class AppModel: ObservableObject {
     await server.updateTextGenerationModel(modelID)
   }
   var promptSubmissionUnavailableReason: String? {
-    guard server?.isConnected == true else { return "正在等待 T3 Server 连接，请稍后发送" }
+    guard server?.isConnected == true else {
+      return "暂时无法发送：\(server?.status ?? "T3 Server 尚未连接")；草稿已保留"
+    }
     if isLoadingConfiguration { return "正在加载会话配置，请稍后发送" }
     guard connectionState == .connected else { return "会话尚未就绪，请重新打开聊天" }
     if isCompacting { return "正在压缩上下文，请完成后发送" }
@@ -184,6 +186,16 @@ final class AppModel: ObservableObject {
     return nil
   }
   var canReuseProcessForNewSession: Bool { false }  // A tab is a view, not a process pool slot.
+  /// 仅供列表补齐尚未进入 Server shell 的本地提交，不持久化另一份会话目录。
+  var locallySubmittedSession: SessionItem? {
+    guard let entry = pendingSentMessages.first ?? pendingQueuedMessages.first,
+      !currentSessionPath.isEmpty
+    else { return nil }
+    let title = String(entry.text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
+    return SessionItem(
+      path: currentSessionPath, title: title.isEmpty ? "附件消息" : title,
+      modifiedAt: entry.timestamp ?? .now)
+  }
   var hasUserMessage: Bool { messages.contains { $0.kind == .user } }
   var hasUnsubmittedInput: Bool {
     !composerText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
@@ -234,19 +246,20 @@ final class AppModel: ObservableObject {
   func attach(to server: T3DesktopClient) {
     self.server = server
     // 设置页也可在断线/重连时保持打开；不能依赖会话消息变化才刷新可编辑状态。
-    serverConnectionObservation = server.$isConnected.removeDuplicates().sink { [weak self] ready in
-      self?.objectWillChange.send()
-      guard ready else { return }
-      // @Published 的回调早于属性写入；下一轮再检查真实连接，避免读取到旧值。
-      // 仅恢复打开失败的视图，不重置运行中的会话，更不会重放任何提交命令。
-      Task { @MainActor [weak self, weak server] in
-        guard let self, server?.isConnected == true else { return }
-        self.refreshModels()
-        if case .failed = self.connectionState, let project = self.projectURL {
-          self.open(project: project, path: self.pendingThreadPath)
+    serverConnectionObservation = server.$isConnected.combineLatest(server.$status)
+      .sink { [weak self, weak server] ready, _ in
+        self?.objectWillChange.send()
+        guard ready else { return }
+        // @Published 的回调早于属性写入；下一轮再检查真实连接，避免读取到旧值。
+        // 仅恢复打开失败的视图，不重置运行中的会话，更不会重放任何提交命令。
+        Task { @MainActor [weak self, weak server] in
+          guard let self, server?.isConnected == true else { return }
+          self.refreshModels()
+          if case .failed = self.connectionState, let project = self.projectURL {
+            self.open(project: project, path: self.pendingThreadPath)
+          }
         }
       }
-    }
     if let projectURL { open(project: projectURL, path: pendingThreadPath) }
   }
   func connect(to projectURL: URL, continueLastSession: Bool = true) {
@@ -462,6 +475,7 @@ final class AppModel: ObservableObject {
     submittedFromTurnID = lastTurnID
     let selection = modelSelection
     let existingThreadID = threadID
+    let targetThreadID = existingThreadID ?? UUID().uuidString
     let submittedMessageID = messageID ?? UUID().uuidString
     let current = generation
     let entry = ChatEntry(
@@ -473,6 +487,8 @@ final class AppModel: ObservableObject {
       pendingSentMessages.append(entry)
       messages.append(entry)
     }
+    // 身份和正文在任何上传/网络等待前一并发布，让新会话立即进入侧栏。
+    if existingThreadID == nil { currentSessionPath = "t3:\(targetThreadID)" }
     submissionTask = Task { [weak self] in
       guard let self else { return }
       defer {
@@ -497,9 +513,8 @@ final class AppModel: ObservableObject {
             completion(false)
             return
           }
-          id = UUID().uuidString
-          // 先记录 ID：创建响应丢失时保留可核验的会话，不自动另建线程或重发消息。
-          self.currentSessionPath = "t3:\(id)"
+          id = targetThreadID
+          // 创建响应丢失时保留同一身份，不自动另建线程或重发消息。
           try await server.dispatch([
             "type": "thread.create", "threadId": id, "projectId": projectID,
             "title": "新任务", "modelSelection": selection, "runtimeMode": "full-access",

@@ -10,6 +10,7 @@ final class T3DesktopClient: ObservableObject {
   @Published private(set) var status = "正在启动本机 T3 Server…"
   @Published private(set) var supportsTitleRegeneration = false
   private(set) var shell: JSON = [:]
+  private var threadsByID: [String: JSON] = [:]
   private(set) var providers: [JSON] = []
   private(set) var modelContextSettings = ModelContextSettings.empty
   let textGenerationModels = TextGenerationModelStore()
@@ -81,8 +82,11 @@ final class T3DesktopClient: ObservableObject {
   }
 
   nonisolated static func snapshotFingerprint(_ snapshot: JSON) throws -> Data {
-    // JSON 字典顺序无语义，规范化后只保存摘要，避免为每个页面保留完整转录副本。
-    let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys])
+    // 全局事件游标随其他会话推进，不是当前页面的内容版本；仍比较完整内容，
+    // 包括继承历史与分页元数据，不能退化成仅凭当前线程事件序号跳过刷新。
+    var content = snapshot
+    content.removeValue(forKey: "snapshotSequence")
+    let data = try JSONSerialization.data(withJSONObject: content, options: [.sortedKeys])
     return Data(SHA256.hash(data: data))
   }
 
@@ -130,6 +134,7 @@ final class T3DesktopClient: ObservableObject {
       let snapshot = try? JSONSerialization.jsonObject(with: data) as? JSON
     {
       shell = snapshot
+      indexThreads()
       sessionCatalog.update(threads: threads)
     }
   }
@@ -226,7 +231,17 @@ final class T3DesktopClient: ObservableObject {
   }
   var projects: [JSON] { shell["projects"] as? [JSON] ?? [] }
   var threads: [JSON] { shell["threads"] as? [JSON] ?? [] }
-  func thread(_ id: String) -> JSON? { threads.first { $0["id"] as? String == id } }
+  func thread(_ id: String) -> JSON? { threadsByID[id] }
+
+  private func indexThreads() {
+    // 保留 first(where:) 对重复 ID 的首条语义；删除或重连整体替换，不能留旧线程。
+    var index: [String: JSON] = [:]
+    index.reserveCapacity(threads.count)
+    for thread in threads {
+      if let id = thread["id"] as? String, index[id] == nil { index[id] = thread }
+    }
+    threadsByID = index
+  }
   func projectID(for url: URL) -> String? {
     projects.first { $0["workspaceRoot"] as? String == url.standardizedFileURL.path }?["id"]
       as? String
@@ -409,11 +424,6 @@ final class T3DesktopClient: ObservableObject {
       $0.value.threadID == id && $0.value.deliveredSnapshot != fingerprint
     }
     if observers.isEmpty { return }
-    if let stats = T3V2Presentation.stats(nativeDetail),
-      let data = try? JSONEncoder().encode(stats)
-    {
-      defaults.set(data, forKey: "t3DesktopV2Metrics.\(id)")
-    }
     guard let base = service?.serverURL else { return }
     // 先用现有缓存发布正文、队列和交互状态；首次下载不得阻塞这些轻量更新。
     // 缓存路径复用完整水合逻辑，避免新快照使已显示的图片和工具输出闪回占位。
@@ -421,7 +431,13 @@ final class T3DesktopClient: ObservableObject {
       nativeDetail, threadID: id, base: base,
       performRPC: { try await self.rpc($0, payload: $1) },
       loadHTML: { try await self.htmlRenderDocument($0) }, cachedOnly: true)
-    let cachedDetail = T3V2Presentation.detail(cachedNative)
+    let cachedDetail = try await ImmutableJSONSnapshot(value: cachedNative).presentedThread().value
+    guard generation == current else { return }
+    if let metrics = cachedDetail["sessionStats"] as? JSON,
+      let data = try? JSONSerialization.data(withJSONObject: metrics)
+    {
+      defaults.set(data, forKey: "t3DesktopV2Metrics.\(id)")
+    }
     let (cachedReplies, cachedRepliesComplete) = await hydrateReplyImages(
       cachedDetail, threadID: id, cachedOnly: true)
     let (immediate, cachedImagesComplete) = await hydrateImages(cachedReplies, cachedOnly: true)
@@ -447,7 +463,9 @@ final class T3DesktopClient: ObservableObject {
       nativeDetail, threadID: id, base: base,
       performRPC: { try await self.rpc($0, payload: $1) },
       loadHTML: { try await self.htmlRenderDocument($0) })
-    let detail = T3V2Presentation.detail(richNative)
+    guard let detail = try? await ImmutableJSONSnapshot(value: richNative).presentedThread().value,
+      generation == current
+    else { return }
     let (withReplies, repliesComplete) = await hydrateReplyImages(detail, threadID: id)
     let (hydrated, complete) = await hydrateImages(withReplies)
     guard generation == current else { return }
@@ -465,6 +483,7 @@ final class T3DesktopClient: ObservableObject {
     guard !hasDeliveredShell || !NSDictionary(dictionary: shell).isEqual(to: next) else { return }
     hasDeliveredShell = true
     shell = next
+    indexThreads()
     reconcileSkillWorkspaces(now: Date())
     sessionCatalog.update(threads: threads)
     for event in taskStatusTracker.consume(threads) { onTaskStatus?(event) }

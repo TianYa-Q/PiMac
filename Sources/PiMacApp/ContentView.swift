@@ -160,6 +160,10 @@ struct ContentView: View {
                   composerSelection = result.selection
                   composerFocused = true
                 })
+            if selectedPage == .conversation, let source = taskLogSource {
+              TaskLogPanel(source: source)
+                .id(app.currentSessionPath + source.id)
+            }
             Divider()
             composer
           }
@@ -1159,6 +1163,13 @@ struct ContentView: View {
     }
     .buttonStyle(.plain)
     .foregroundStyle(.secondary)
+  }
+
+  private var taskLogSource: TaskLogSource? {
+    let thread = app.threadID.flatMap { workspace.server.thread($0) }
+    guard let path = thread?["worktreePath"] as? String ?? app.projectURL?.path else { return nil }
+    return TaskLogSource.latest(
+      in: app.messages, root: URL(fileURLWithPath: path, isDirectory: true))
   }
 
   private var conversation: some View {
@@ -3113,8 +3124,9 @@ struct SettingsView: View {
   @State private var installLocally = false
   @State private var extensionToRemove: ManagedExtension?
 
-  private enum SettingsTab: String, CaseIterable {
+  enum SettingsTab: String, CaseIterable {
     case runtime = "运行环境"
+    case development = "开发管理"
     case resources = "技能与指令"
     case mobile = "手机连接"
     case ps5 = "PS5 网关"
@@ -3124,6 +3136,7 @@ struct SettingsView: View {
     var icon: String {
       switch self {
       case .runtime: return "desktopcomputer"
+      case .development: return "wrench.and.screwdriver"
       case .resources: return "doc.text"
       case .mobile: return "iphone"
       case .ps5: return "gamecontroller"
@@ -3135,13 +3148,14 @@ struct SettingsView: View {
   }
   let projectURL: URL?
   let telegram: TelegramControl
-  let workspace: WorkspaceModel
+  @ObservedObject var workspace: WorkspaceModel
   let save: (String) -> Void
 
   init(
     path: String, projectURL: URL?, telegram: TelegramControl, workspace: WorkspaceModel,
-    save: @escaping (String) -> Void
+    initialTab: SettingsTab = .runtime, save: @escaping (String) -> Void
   ) {
+    _selectedTab = State(initialValue: initialTab)
     _path = State(initialValue: path)
     originalPath = path
     _versions = StateObject(
@@ -3184,6 +3198,12 @@ struct SettingsView: View {
 
             }
 
+            if selectedTab == .development {
+              TemporaryFilesSettingsView(
+                store: workspace.temporaryFiles, server: workspace.server,
+                projectCount: workspace.temporaryCleanupWorkspaces.count,
+                clean: { workspace.maintainTemporaryFiles(manually: true) })
+            }
             if selectedTab == .resources {
               PiResourcesSettingsView(
                 store: PiResourceStore(

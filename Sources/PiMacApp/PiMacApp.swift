@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sender.reply(toApplicationShouldTerminate: false)
         return
       }
+      await workspace.temporaryFiles.stopAndWait()
       workspace.disconnectAll()
       let stopped = await workspace.t3Bridge.stopAndWait()
       if !stopped {
@@ -90,7 +91,13 @@ struct PiMacApp: App {
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
           developmentReloader.check(workspace: workspace, appDelegate: appDelegate)
         }
-        .onAppear { appDelegate.workspace = workspace }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+          workspace.maintainTemporaryFiles()
+        }
+        .onAppear {
+          appDelegate.workspace = workspace
+          workspace.maintainTemporaryFiles()
+        }
     }
     .defaultSize(width: 1120, height: 760)
     .windowToolbarStyle(.unifiedCompact(showsTitle: false))

@@ -60,6 +60,23 @@ struct ToolOutputViewTests {
     #expect(view.contentView.bounds.origin.y == 0)
   }
 
+  @Test func manualScrollingPausesTailButProgrammaticUpdatesDoNot() {
+    let view = ToolOutputScrollView()
+    view.setFrameSize(CGSize(width: 300, height: 100))
+    view.setOutput(Array(repeating: "line", count: 100).joined(separator: "\n"))
+    var paused = false
+    view.onTailPaused = { paused = true }
+    view.setFollowsTail(true)
+    view.layoutSubtreeIfNeeded()
+    #expect(!paused)
+    view.contentView.scroll(to: .zero)
+    NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: view)
+    #expect(paused)
+    view.setOutput(Array(repeating: "line", count: 120).joined(separator: "\n"))
+    view.layoutSubtreeIfNeeded()
+    #expect(view.contentView.bounds.origin.y == 0)
+  }
+
   @Test func outputIsLaidOutBeforeAnyClickOrWindowAttachment() {
     let view = ToolOutputScrollView()
     view.setOutput("Script completed\nWall time 0.1 seconds\nOutput:\n\nimport Foundation")

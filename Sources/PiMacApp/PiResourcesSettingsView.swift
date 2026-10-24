@@ -48,12 +48,24 @@ struct PiResourcesSettingsView: View {
       case nil:
         ProgressView("读取文件…")
       }
-      Text(
-        "直接管理 Pi 标准目录中的文件，不代表当前会话已加载。此处包含 Pi 目录及 .agents/skills；其他配置路径、Pi 包及父目录中的资源仍由 Pi 加载，此处不修改。AGENTS.md 也可能继承自项目父目录；同目录的 AGENTS.override.md 可能覆盖它。"
-      )
-      .font(.caption).foregroundStyle(.secondary)
-      Text("保存后请重新打开 Pi 会话以加载变更；不会自动修改正在运行的会话。导入前请检查 Skill 中的指令和脚本。")
+      Label("保存后需重新打开 Pi 会话，正在运行的会话不受影响。", systemImage: "info.circle")
         .font(.caption).foregroundStyle(.secondary)
+      DisclosureGroup("目录与加载说明") {
+        VStack(alignment: .leading, spacing: 8) {
+          ForEach(PiResourceStore.SkillLocation.allCases) { location in
+            if let directory = try? store.skillsDirectory(for: scope, location: location) {
+              pathLabel(directory)
+            }
+          }
+          Text(
+            "此处管理 Pi 标准目录及 .agents/skills 中的文件，不代表当前会话已加载。其他配置路径、Pi 包及父目录资源仍由 Pi 加载，此处不修改。AGENTS.md 可能继承自项目父目录，也可能被同目录的 AGENTS.override.md 覆盖。"
+          )
+          Text("导入前请检查 Skill 中的指令和脚本。")
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        .padding(.top, 6)
+      }
+      .font(.caption).foregroundStyle(.secondary)
       if !message.isEmpty {
         Text(message).font(.caption).foregroundStyle(.secondary)
       }
@@ -120,24 +132,31 @@ struct PiResourcesSettingsView: View {
 
   private func instructionsCard(_ document: PiResourceStore.Document) -> some View {
     GroupBox {
-      VStack(alignment: .leading, spacing: 10) {
-        HStack {
-          Label("AGENTS.md", systemImage: "doc.text").font(.headline)
-          Spacer()
-          Text(document.original == nil ? "尚未创建" : "已存在")
-            .font(.caption).foregroundStyle(.secondary)
-        }
-        pathLabel(document.entry.url)
-        HStack {
-          Button(document.original == nil ? "创建" : "编辑") { self.document = document }
-          if document.original != nil {
-            Button("在 Finder 中显示") { reveal(document.entry.url) }
-            Spacer()
-            Button("移到废纸篓", role: .destructive) { removal = document }
+      HStack(spacing: 12) {
+        Image(systemName: "doc.text").font(.title2).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 4) {
+          HStack(spacing: 8) {
+            Text("AGENTS.md").font(.headline)
+            if document.original == nil {
+              Text("尚未创建").font(.caption).foregroundStyle(.secondary)
+            }
           }
+          pathLabel(document.entry.url)
         }
-        .controlSize(.small)
+        Spacer(minLength: 8)
+        Button(document.original == nil ? "创建" : "编辑") { self.document = document }
+        if document.original != nil {
+          Menu {
+            Button("在 Finder 中显示") { reveal(document.entry.url) }
+            Button("移到废纸篓", role: .destructive) { removal = document }
+          } label: {
+            Image(systemName: "ellipsis")
+          }
+          .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+          .accessibilityLabel("AGENTS.md 更多操作")
+        }
       }
+      .controlSize(.small)
       .padding(6)
       .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -161,17 +180,21 @@ struct PiResourcesSettingsView: View {
           }
         }
         .controlSize(.small)
-        Picker("新建及导入位置", selection: $skillLocation) {
-          ForEach(PiResourceStore.SkillLocation.allCases) { location in
-            Text(location.rawValue).tag(location)
+        HStack(spacing: 6) {
+          Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+          TextField("搜索名称或路径", text: $search).textFieldStyle(.plain)
+          if !search.isEmpty {
+            Button {
+              search = ""
+            } label: {
+              Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain).accessibilityLabel("清除搜索")
           }
         }
-        ForEach(PiResourceStore.SkillLocation.allCases) { location in
-          if let directory = try? store.skillsDirectory(for: scope, location: location) {
-            pathLabel(directory)
-          }
-        }
-        TextField("搜索名称或路径", text: $search).textFieldStyle(.roundedBorder)
+        .padding(7)
+        .background(.background, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.quaternary))
         if filtered.isEmpty {
           Text(entries.isEmpty ? "此目录暂无 Skill，新建或导入一个开始使用。" : "没有匹配的 Skill。")
             .font(.callout).foregroundStyle(.secondary).padding(.vertical, 10)
@@ -191,14 +214,27 @@ struct PiResourcesSettingsView: View {
                 } label: {
                   Image(systemName: "ellipsis")
                 }
-                .menuStyle(.borderlessButton).fixedSize()
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .accessibilityLabel("\(entry.title) 更多操作")
               }
               .controlSize(.small)
               pathLabel(entry.url)
             }
-            .padding(.vertical, 3)
+            .padding(.vertical, 5)
           }
         }
+        Divider()
+        HStack {
+          Text("新建及导入到").foregroundStyle(.secondary)
+          Picker("新建及导入位置", selection: $skillLocation) {
+            ForEach(PiResourceStore.SkillLocation.allCases) { location in
+              Text(location.rawValue).tag(location)
+            }
+          }
+          .labelsHidden().frame(width: 130)
+          Spacer()
+        }
+        .font(.caption).controlSize(.small)
       }
       .padding(6)
       .frame(maxWidth: .infinity, alignment: .leading)
@@ -206,8 +242,13 @@ struct PiResourcesSettingsView: View {
   }
 
   private func pathLabel(_ url: URL) -> some View {
-    Text(url.path).font(.caption.monospaced()).foregroundStyle(.secondary)
-      .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+    // 只缩写已知的用户目录前缀；完整路径保留在提示中，避免长路径撑高列表。
+    let home = store.homeDirectory.standardizedFileURL.path
+    let path = url.standardizedFileURL.path
+    let displayPath = path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    return Text(displayPath).font(.caption.monospaced()).foregroundStyle(.secondary)
+      .lineLimit(1).truncationMode(.middle)
+      .textSelection(.enabled).help(path)
   }
 
   private func refresh() {
@@ -229,7 +270,7 @@ struct PiResourcesSettingsView: View {
   private func importSkill() {
     let panel = NSOpenPanel()
     panel.title = "导入 Skill 文件夹"
-    panel.message = "选择包含 SKILL.md 的文件夹，将连同脚本和参考文件一起复制。"
+    panel.message = "选择包含 SKILL.md 的文件夹，将连同脚本和参考文件一起复制。导入前请检查其中的指令和脚本。"
     panel.canChooseFiles = false
     panel.canChooseDirectories = true
     panel.showsHiddenFiles = true
@@ -300,7 +341,11 @@ struct PiResourceEditor: View {
       }
     }
     .padding(24)
-    .frame(width: 700, height: 540)
+    // 默认提供宽编辑区，同时为小屏幕保留窗口边距，避免弹层超出可用桌面。
+    .frame(
+      width: min(1100, (NSScreen.main?.visibleFrame.width ?? 1200) - 96),
+      height: min(720, (NSScreen.main?.visibleFrame.height ?? 820) - 96)
+    )
     .interactiveDismissDisabled(hasChanges)
     .confirmationDialog("放弃未保存的修改？", isPresented: $confirmingDiscard) {
       Button("放弃修改", role: .destructive) { dismiss() }

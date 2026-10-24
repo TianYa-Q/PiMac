@@ -2,7 +2,6 @@ import Foundation
 
 /// Pure presentation mapping, not a second orchestration engine or persisted projection.
 /// All writes use the official V2 commands and all identity comes from the server.
-@MainActor
 enum T3V2Presentation {
   typealias JSON = [String: Any]
   static let active = ["preparing", "starting", "running", "waiting", "interrupting"]
@@ -43,6 +42,7 @@ enum T3V2Presentation {
     return running
   }
 
+  @MainActor
   static func hasUnreadCompletion(_ thread: JSON) -> Bool {
     guard thread["status"] as? String == "completed" else { return false }
     let completed = T3DesktopClient.date(thread["latestRunCompletedAt"])
@@ -240,6 +240,22 @@ enum T3V2Presentation {
         queued["runId"] = run["id"]
         return queued
       }
+    // Server 接收用户消息早于 Provider 创建 turn item；重开会话也必须显示已提交正文。
+    // 排队消息仍只放在可编辑队列中，取消队列时不能遗留虚假的历史记录。
+    let queuedMessageIDs = Set(
+      runs.filter {
+        ["queued", "cancelled"].contains($0["status"] as? String ?? "")
+      }.compactMap { $0["userMessageId"] as? String })
+    var visibleMessageIDs = Set(messages.compactMap { $0["messageId"] as? String })
+    for message in sourceMessages {
+      guard message["role"] as? String == "user", let id = message["id"] as? String,
+        !queuedMessageIDs.contains(id), visibleMessageIDs.insert(id).inserted
+      else { continue }
+      var visible = message
+      visible["messageId"] = id
+      visible["streaming"] = false
+      messages.append(visible)
+    }
     result["messages"] = messages
     result["activities"] = activities
     var detail: JSON = ["snapshotSequence": native["snapshotSequence"] ?? -1, "thread": result]
@@ -251,6 +267,7 @@ enum T3V2Presentation {
     return detail
   }
 
+  private static let contextTimestampLock = NSLock()
   private static let contextSecondsFormatter = ISO8601DateFormatter()
   private static let contextFractionalFormatter: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
@@ -260,6 +277,9 @@ enum T3V2Presentation {
 
   private static func contextTimestamp(_ value: Any?) -> Date? {
     guard let text = value as? String else { return nil }
+    // 后台会话并行映射时，复用的 Foundation formatter 不能被并发访问。
+    contextTimestampLock.lock()
+    defer { contextTimestampLock.unlock() }
     return contextFractionalFormatter.date(from: text) ?? contextSecondsFormatter.date(from: text)
   }
 
@@ -277,7 +297,7 @@ enum T3V2Presentation {
       ?? contextTimestamp(usageTurn?["startedAt"])
     let turnIDs = Set(turns.compactMap { $0["id"] as? String })
     // Deliberately exclude inherited visible history and child tool/subagent items.
-    // 在 MainActor 内复用 formatter；每条候选只解析一次日期，单遍取最大值，平手仍保留第一条。
+    // 每条候选只解析一次日期，单遍取最大值，平手仍保留第一条。
     var compaction: (date: Date, after: Int)?
     for item in projection["turnItems"] as? [JSON] ?? [] {
       guard item["type"] as? String == "compaction",

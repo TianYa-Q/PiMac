@@ -23,6 +23,14 @@ struct ImmutableJSONSnapshot: @unchecked Sendable {
     }.value
   }
 
+  /// 全量历史映射与 JSON 解析一样离开主线程；只返回只读值，不跨线程修改客户端缓存。
+  func presentedThread() async throws -> Self {
+    try await Task.detached(priority: .userInitiated) {
+      try Task.checkCancellation()
+      return Self(value: T3V2Presentation.detail(value))
+    }.value
+  }
+
   func encode() async throws -> Data {
     try await Task.detached(priority: .userInitiated) {
       try JSONSerialization.data(withJSONObject: value)
