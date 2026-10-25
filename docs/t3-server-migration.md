@@ -48,7 +48,7 @@ Pi runtime：原生认证、模型、扩展、skills、上下文和 session 文�
 - Pi 的 setStatus/title/widget 等终端装饰上游忽略。账户额度现在由独立的本机只读管理模块查询，不依赖 runtime status：支持 openai/openai-codex 的原生 OAuth 和 account-usage 多账户存储，按 Provider 隔离，缓存一分钟，手动刷新绕过缓存。读取仅接受当前用户的私有普通文件，返回字段白名单，不返回凭据、不写 auth/session、不触发付费 warm-up。过期授权明确报错，刷新授权仍由 Pi/扩展负责。Gemini 额度、reset credits 和线程授权绑定尚未补齐。
 - 原生 auth 与多账户列表按稳定 ChatGPT account ID（含 token 内的身份信息）合并，不因 token 刷新重复显示。匹配后保留用户账户名称，只为本次查询选用更新的授权，不改写存储；未匹配项标为“Pi 已保存授权”，不标为默认或当前线程账户。Telegram 未确认线程绑定时明确显示“未确认”，只读列表不提供切换按钮。
 - 桌面“管理”通过官方 message.dispatch 提交 `/accounts`，需要已安装 account-usage 扩展；命令提交不等于管理已打开。桌面直接账户切换保持禁用，不能把全局授权误认为某个线程的当前账户。额度接口只在独立 supervisor socket 上开放，需要宿主管理凭据，拒绝浏览器 Origin，不开放到 Tunnel。
-- 模型隐藏是服务端共享的选择器展示规则：桌面保存后，官方 `server.getConfig`、`server.refreshProviders` 和 `subscribeServerConfig` 的 Pi 模型列表均按隐藏 slug 过滤，已连接手机收到实时目录更新，规则重启后保留。所有 Pi 实例应用同一组隐藏 slug；非 Pi provider 的模型不受此规则影响，已禁用实例的状态行另按发现偏好隐藏。底层 provider catalog、桌面管理用完整目录、线程模型选择与运行不被过滤，历史线程仍可使用隐藏模型。手机自身收藏/展示偏好仍由手机管理。
+- 模型显隐统一使用官方 `server.updateSettings` 的 `setModelsHidden`，唯一持久化来源为 `providerModelPreferences`；桌面不再维护或回写 `t3HiddenModels`。偏好按 Provider 实例隔离，官方 `server.getConfig`、`server.refreshProviders` 和 `subscribeServerConfig` 的展示目录与标题候选均读取同一份设置；桌面轮询同步其他客户端的修改，手机订阅实时目录更新，重启后保留。旧版私有 `model-preferences.json` 仅在官方偏好尚未设置时通过官方迁移补丁导入，不覆盖已有偏好。已禁用实例的状态行另按发现偏好隐藏。底层 provider catalog、桌面管理用完整目录、线程模型选择与运行不被过滤，历史线程仍可使用隐藏模型。
 - 独立压缩模型选择不由桌面覆盖 Pi；Fast 沿用受支持 Provider 的实际能力，不伪造成功。
 - 真实模型/账号、旧真实数据升级、App Store iOS protocol 2、Apple 登录和 APNs 尚需实机验收。
 

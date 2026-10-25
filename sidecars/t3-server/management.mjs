@@ -19,7 +19,7 @@ export { oauthAwareCommandReadiness } from './oauth-readiness.mjs';
 
 import { originAllowed } from './origin-policy.mjs';
 import { connectionRoute } from './connection-diagnostics.mjs';
-import { syncModelPreferences, visibleProviders } from './model-preferences.mjs';
+import { migrateModelPreferences, visibleProviders } from './model-preferences.mjs';
 import { createTextGenerationSettings, configureTitleGenerationSettings } from './text-generation-settings.mjs';
 import { createModelContextSettings } from './model-context.mjs';
 import { ServerSettingsService } from './upstream/apps/server/src/serverSettings.ts';
@@ -163,11 +163,14 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
     });
     return Promise.race([browser, completed]);
   };
+  if ((yield* settings.getSettings).providerModelPreferences === null) {
+    yield* Effect.promise(() => migrateModelPreferences(broker.directory, patch => run(settings.updateSettings(patch))));
+  }
   const textGeneration = createTextGenerationSettings({
     readSettings: () => run(settings.getSettings),
     updateSettings: patch => run(settings.updateSettings(patch)),
     readProviders: () => run(providers.refreshInstance(PI_INSTANCE_ID)),
-    visibleProviders,
+    visibleProviders: async values => visibleProviders(values, await run(settings.getSettings)),
   });
   configureTitleGenerationSettings(textGeneration);
   // 标题服务在桌面连入前也可能被手机触发，启动时就解析一次 Pi 默认值。
@@ -187,10 +190,6 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
     },
     async modelContext(value) {
       return value === undefined ? modelContext.snapshot() : modelContext.set(value);
-    },
-    async modelPreferences(value) {
-      // 标题目录/回退由标题端点自行确认并报告错误，不能阻断已成功写入的可见性偏好。
-      return syncModelPreferences(value, patch => run(settings.updateSettings(patch)));
     },
     async desktopSession() {
       // 单用户桌面使用官方完整管理授权；仍由上游签发、验证和撤销凭据。

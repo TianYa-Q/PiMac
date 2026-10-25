@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile, chmod, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createServerGateway } from './fixtures/protocol-server.mjs';
+import { call } from '../generated/client.mjs';
 
 test('official title setting persists through private host management, visibility changes and restart', async t => {
   const root = new URL('../../../tmp/', import.meta.url).pathname;
@@ -19,6 +20,16 @@ test('official title setting persists through private host management, visibilit
     await new Promise(resolve => gateway.server.listen(0, '127.0.0.1', resolve));
   };
   await open();
+  const setHidden = async models => {
+    const { token: credential } = await gateway.official.management.desktopSession();
+    const ticketResponse = await fetch(gateway.serverURL + '/api/auth/websocket-ticket', {
+      method: 'POST', headers: { authorization: 'Bearer ' + credential, 'content-type': 'application/json', 'x-t3-orchestration-protocol': '2' }, body: '{}',
+    });
+    assert.equal(ticketResponse.status, 200);
+    const { ticket } = await ticketResponse.json();
+    await call(gateway.serverURL.replace('http:', 'ws:') + '/ws?orchestrationProtocol=2&wsTicket=' + ticket,
+      'server.updateSettings', { patch: { setModelsHidden: models.map(model => ({ provider: 'pi', model, hidden: true })) } });
+  };
   const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
   const url = route => `http://127.0.0.1:${gateway.server.address().port}/internal/auth/${route}`;
   const request = async (route, body) => fetch(url(route), { headers, ...(body ? { method: 'POST', body: JSON.stringify(body) } : {}) });
@@ -35,12 +46,15 @@ test('official title setting persists through private host management, visibilit
   await gateway.close();
   await open();
   assert.equal((await read()).selection.model, 'test/alternate');
-  assert.equal((await request('model-preferences', { hiddenModels: ['test/alternate'], defaultModel: null })).status, 200);
+  await setHidden(['test/alternate']);
   assert.deepEqual((await read()).selection, { instanceId: 'pi', model: 'test/model' });
   assert.deepEqual((await read()).candidates.map(m => m.id), ['test/model']);
-  assert.equal((await request('model-preferences', { hiddenModels: ['test/alternate', 'test/model'], defaultModel: null })).status, 200);
+  await setHidden(['test/model']);
   assert.deepEqual(await read(), { status: 'no-visible-models', selection: null, candidates: [] });
-  const visibility = JSON.parse(await readFile(join(directory, 'server-owned/model-preferences.json'), 'utf8'));
-  assert.equal(Object.hasOwn(visibility, 'textGenerationModelSelection'), false);
+  await gateway.close();
+  await open();
+  assert.deepEqual(await read(), { status: 'no-visible-models', selection: null, candidates: [] });
+  const settings = JSON.parse(await readFile(settingsFile, 'utf8'));
+  assert.deepEqual(settings.providerModelPreferences.pi.hiddenModels, ['test/alternate', 'test/model']);
   assert.equal((await request('text-generation-model', { model: 'test/model' })).status, 400);
 });

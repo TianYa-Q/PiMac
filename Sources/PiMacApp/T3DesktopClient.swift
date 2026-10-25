@@ -12,6 +12,10 @@ final class T3DesktopClient: ObservableObject {
   private(set) var shell: JSON = [:]
   private var threadsByID: [String: JSON] = [:]
   private(set) var providers: [JSON] = []
+  private(set) var hiddenModelIDs: Set<String> = []
+  var onModelsChanged: (() -> Void)?
+  private var modelVisibilityRevision = 0
+  private var isUpdatingModelVisibility = false
   private(set) var modelContextSettings = ModelContextSettings.empty
   let textGenerationModels = TextGenerationModelStore()
   var modelContextWindows: [String: Int] { modelContextSettings.overrides }
@@ -107,7 +111,7 @@ final class T3DesktopClient: ObservableObject {
   func sessions(projectID: String?, settled: Bool) -> [SessionItem] {
     sessionCatalog.sessions(projectID: projectID, settled: settled)
   }
-  private var syncedModelPreferences: Data?
+  private var syncedDefaultModelPreference: Data?
   // 分开连接池：即使下载占满连接，列表、凭据和命令仍有独立的网络通道。
   private let session = T3DesktopClient.makeSession(maxConnections: 4)
   private let threadSession = T3DesktopClient.makeSession(maxConnections: 4)
@@ -153,7 +157,9 @@ final class T3DesktopClient: ObservableObject {
             self.hasLiveSkillShell = false
             self.connectedServerURL = serverURL
             self.token = ""
-            self.syncedModelPreferences = nil
+            self.syncedDefaultModelPreference = nil
+            self.modelVisibilityRevision += 1
+            self.hiddenModelIDs = []
             self.providers = []
             self.modelContextSettings = .empty
             self.textGenerationModels.reset()
@@ -166,8 +172,12 @@ final class T3DesktopClient: ObservableObject {
           } else {
             if self.token.isEmpty { self.token = try await service.desktopCredential() }
             phase = "同步模型配置"
-            try await self.syncModelPreferences()
-            if self.providers.isEmpty { try await self.loadConfig() }
+            try await self.syncDefaultModelPreference()
+            if self.providers.isEmpty {
+              try await self.loadConfig()
+            } else {
+              try await self.refreshModelVisibility()
+            }
             phase = "读取会话状态"
             try await self.refreshShell()
             self.requestThreadRefreshes()
@@ -209,7 +219,8 @@ final class T3DesktopClient: ObservableObject {
     supportsTitleRegeneration = false
     modelContextSettings = .empty
     textGenerationModels.reset()
-    syncedModelPreferences = nil
+    syncedDefaultModelPreference = nil
+    modelVisibilityRevision += 1
     isConnected = false
     watches.removeAll()
     imageCache.removeAll()
@@ -626,31 +637,82 @@ final class T3DesktopClient: ObservableObject {
     }
   }
 
-  func syncModelPreferences() async throws {
-    guard let service else { throw ClientError.unavailable }
-    let hidden = (defaults.stringArray(forKey: "t3HiddenModels") ?? []).sorted()
+  func syncDefaultModelPreference() async throws {
     let model = defaults.string(forKey: "defaultNewSessionModelID")
-    let data = try JSONSerialization.data(
-      withJSONObject: [
-        "hiddenModels": hidden, "defaultModel": model as Any? ?? NSNull(),
-      ], options: [.sortedKeys])
-    guard data != syncedModelPreferences else { return }
-    try await service.syncModelPreferences(hiddenModels: hidden, defaultModel: model)
-    try await loadConfig()
-    syncedModelPreferences = data
+    let selection: Any = model.map { ["instanceId": "pi", "model": $0] } ?? NSNull()
+    let data = try JSONSerialization.data(withJSONObject: ["defaultModelSelection": selection])
+    guard data != syncedDefaultModelPreference else { return }
+    _ = try await rpc(
+      "server.updateSettings", payload: ["patch": ["defaultModelSelection": selection]])
+    syncedDefaultModelPreference = data
+  }
+
+  func applyModelVisibility(_ settings: JSON) throws {
+    guard let preferences = settings["providerModelPreferences"] else { throw ClientError.rejected }
+    let hidden: [String]
+    if preferences is NSNull {
+      hidden = []
+    } else if let preferences = preferences as? JSON {
+      if let pi = preferences["pi"] {
+        guard let pi = pi as? JSON, let values = pi["hiddenModels"] as? [String] else {
+          throw ClientError.rejected
+        }
+        hidden = values
+      } else {
+        hidden = []
+      }
+    } else {
+      throw ClientError.rejected
+    }
+    let next = Set(hidden)
+    guard next != hiddenModelIDs else { return }
+    hiddenModelIDs = next
+    onModelsChanged?()
+  }
+
+  private func refreshModelVisibility() async throws {
+    let revision = modelVisibilityRevision
+    let settings = try await rpc("server.getSettings")
+    // 读取开始后若发生写入或重连，迟到的快照不能覆盖新的显隐结果。
+    guard revision == modelVisibilityRevision else { return }
+    let previous = hiddenModelIDs
+    try applyModelVisibility(settings)
+    if previous != hiddenModelIDs { await updateTextGenerationModel(nil) }
+  }
+
+  func setModelVisible(_ visible: Bool, modelID: String) async throws {
+    guard isConnected, !isUpdatingModelVisibility else { throw ClientError.unavailable }
+    isUpdatingModelVisibility = true
+    modelVisibilityRevision += 1
+    let current = generation
+    let revision = modelVisibilityRevision
+    defer { isUpdatingModelVisibility = false }
+    let settings = try await rpc(
+      "server.updateSettings",
+      payload: [
+        "patch": ["setModelsHidden": [["provider": "pi", "model": modelID, "hidden": !visible]]]
+      ])
+    guard generation == current, revision == modelVisibilityRevision else {
+      throw ClientError.unavailable
+    }
+    modelVisibilityRevision += 1
+    try applyModelVisibility(settings)
+    await updateTextGenerationModel(nil)
   }
 
   func updateTextGenerationModel(_ modelID: String?) async {
     await textGenerationModels.update(refresh: modelID == nil) { [self] in
       guard let service else { throw ClientError.unavailable }
-      // 保存之前先同步本机隐藏列表，避免刚隐藏的模型仍被列为候选。
-      try await syncModelPreferences()
       return try await service.textGenerationModelSettings(modelID: modelID)
     }
   }
 
   func loadConfig() async throws {
+    let revision = modelVisibilityRevision
     let result = try await rpc("server.getConfig")
+    guard revision == modelVisibilityRevision else { return }
+    guard let settings = result["settings"] as? JSON else { throw ClientError.rejected }
+    try applyModelVisibility(settings)
     let environment = result["environment"] as? JSON
     let capabilities = environment?["capabilities"] as? JSON
     supportsTitleRegeneration = capabilities?["threadTitleRegeneration"] as? Bool == true
@@ -672,6 +734,7 @@ final class T3DesktopClient: ObservableObject {
       }
       return nativeProvider
     }
+    onModelsChanged?()
   }
   func didCompletePoll() {
     if !isConnected { isConnected = true }

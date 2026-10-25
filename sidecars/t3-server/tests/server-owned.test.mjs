@@ -334,6 +334,31 @@ test('server names a desktop draft on its first mobile message without overwriti
   }
 });
 
+test('legacy visibility migrates once and never overwrites official preferences on restart', async t => {
+  const root = new URL('../../../tmp/', import.meta.url).pathname;
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(join(root, 'legacy-model-visibility-'));
+  await mkdir(join(directory, 'server-owned'), { mode: 0o700 });
+  await writeFile(join(directory, 'server-owned/model-preferences.json'), JSON.stringify({
+    hiddenModels: ['test/legacy'], defaultModel: null,
+  }), { mode: 0o600 });
+  let f;
+  t.after(async () => { await f?.close(); });
+  f = await open(directory);
+  assert.deepEqual((await f.rpc('server.getSettings')).providerModelPreferences.pi.hiddenModels, ['test/legacy']);
+  await f.rpc('server.updateSettings', { patch: {
+    setModelsHidden: [{ provider: 'pi', model: 'test/legacy', hidden: false }, { provider: 'pi', model: 'test/model', hidden: true }],
+    setProviderModelOrder: { provider: 'pi', modelOrder: ['test/model', 'default'] },
+  } });
+  await f.close();
+  // 迁移后官方设置独立存在；过时旧文件即使损坏，也不再参与运行。
+  await writeFile(join(directory, 'server-owned/model-preferences.json'), '{', { mode: 0o600 });
+  f = await open(directory);
+  assert.deepEqual((await f.rpc('server.getSettings')).providerModelPreferences.pi, {
+    hiddenModels: ['test/model'], modelOrder: ['test/model', 'default'],
+  });
+});
+
 test('official Pi discovery, model preferences, and protocol authorization', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-official-config-'));
   const f = await open(directory);
@@ -344,9 +369,10 @@ test('official Pi discovery, model preferences, and protocol authorization', asy
   assert(config.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
   assert.equal((await fetch(f.gateway.serverURL + '/api/orchestration/shell', { headers: { 'x-t3-orchestration-protocol': '2' } })).status, 401);
   await assert.rejects(call(await f.ws('1'), 'server.getConfig'));
-  await f.gateway.official.management.modelPreferences({ hiddenModels: ['test/model'], defaultModel: 'test/model' });
+  await f.rpc('server.updateSettings', { patch: { setModelsHidden: [{ provider: 'pi', model: 'test/model', hidden: true }] } });
   const updated = await f.rpc('server.getConfig');
-  assert.equal(updated.settings.defaultModelSelection, null);
+  assert.deepEqual(updated.settings.defaultModelSelection, config.settings.defaultModelSelection);
+  assert.deepEqual((await f.rpc('server.getSettings')).providerModelPreferences.pi.hiddenModels, ['test/model']);
   assert(!updated.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
   assert(!(await f.rpc('server.refreshProviders', {})).providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
   const events = await readStream(await f.ws(), 'subscribeServerConfig', {}, { count: 2,
@@ -354,7 +380,7 @@ test('official Pi discovery, model preferences, and protocol authorization', asy
     onItem: async event => {
       if (event.type === 'snapshot') {
         assert(!event.config.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
-        await f.gateway.official.management.modelPreferences({ hiddenModels: [], defaultModel: null });
+        await f.rpc('server.updateSettings', { patch: { setModelsHidden: [{ provider: 'pi', model: 'test/model', hidden: false }] } });
       }
     } });
   const visible = events.find(event => event.type === 'providerStatuses');
@@ -366,7 +392,7 @@ test('official Pi discovery, model preferences, and protocol authorization', asy
     onItem: async event => {
       if (event.type === 'snapshot') {
         assert(event.config.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));
-        await f.gateway.official.management.modelPreferences({ hiddenModels: ['test/model'], defaultModel: null });
+        await f.rpc('server.updateSettings', { patch: { setModelsHidden: [{ provider: 'pi', model: 'test/model', hidden: true }] } });
       }
     } });
   assert(!hiddenEvents.find(event => event.type === 'providerStatuses').payload.providers.find(provider => provider.instanceId === 'pi').models.some(m => m.slug === 'test/model'));

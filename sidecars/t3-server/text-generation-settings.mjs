@@ -11,7 +11,7 @@ export function createTextGenerationSettings({ readSettings, updateSettings, rea
     if (!Array.isArray(providers) || !providers.some(p => p.instanceId === 'pi' && p.driver === 'pi')) {
       throw new Error('Pi model catalog unavailable');
     }
-    const pi = visibleProviders(providers).find(p => p.instanceId === 'pi' && p.driver === 'pi');
+    const pi = (await visibleProviders(providers)).find(p => p.instanceId === 'pi' && p.driver === 'pi');
     if (!pi) return [];
     if (!Array.isArray(pi.models)) throw new Error('Invalid Pi model catalog');
     if (pi.status === 'error' || pi.auth?.status === 'unknown') {

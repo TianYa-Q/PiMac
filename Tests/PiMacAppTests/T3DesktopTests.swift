@@ -5,6 +5,35 @@ import Testing
 
 @MainActor
 struct T3DesktopTests {
+  @Test func modelVisibilityUsesServerStateAndRejectsMalformedSnapshots() throws {
+    let suite = "pimac-visibility-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    defaults.set(["test/visible"], forKey: "t3HiddenModels")
+    let client = T3DesktopClient(defaults: defaults)
+    var changes = 0
+    client.onModelsChanged = { changes += 1 }
+    #expect(client.hiddenModelIDs.isEmpty)
+    try client.applyModelVisibility([
+      "providerModelPreferences": [
+        "pi": ["hiddenModels": ["test/hidden"], "modelOrder": []],
+        "work": ["hiddenModels": ["test/visible"], "modelOrder": []],
+      ]
+    ])
+    #expect(client.hiddenModelIDs == ["test/hidden"])
+    #expect(changes == 1)
+    #expect(throws: T3DesktopClient.ClientError.self) {
+      try client.applyModelVisibility(["providerModelPreferences": ["pi": ["hiddenModels": [42]]]])
+    }
+    #expect(throws: T3DesktopClient.ClientError.self) { try client.applyModelVisibility([:]) }
+    #expect(client.hiddenModelIDs == ["test/hidden"])
+    try client.applyModelVisibility(["providerModelPreferences": NSNull()])
+    #expect(client.hiddenModelIDs.isEmpty)
+    #expect(changes == 2)
+    try client.applyModelVisibility(["providerModelPreferences": [:]])
+    #expect(changes == 2)
+  }
+
   @Test func cachedShellIsVisibleBeforeConnectionButCannotAuthorizeCommands() throws {
     let suite = "pimac-cache-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
@@ -248,6 +277,16 @@ struct T3DesktopTests {
     #expect(model.currentSessionPath.isEmpty)
     model.changeModel(to: "test/model")
     for _ in 0..<200 where model.isBusy { try await Task.sleep(for: .milliseconds(50)) }
+    #expect(model.allModels.contains { $0.id == "test/model" })
+    try await client.setModelVisible(false, modelID: "test/model")
+    model.refreshModels()
+    #expect(client.hiddenModelIDs.contains("test/model"))
+    #expect(!model.models.contains { $0.id == "test/model" })
+    #expect(model.allModels.contains { $0.id == "test/model" })
+    try await client.setModelVisible(true, modelID: "test/model")
+    model.refreshModels()
+    #expect(model.models.contains { $0.id == "test/model" })
+    #expect(defaults.stringArray(forKey: "t3HiddenModels") == nil)
     #expect(model.thinkingLevels.contains("xhigh"))
     #expect(model.thinkingLevels.contains("max"))
     #expect(model.selectedModelId == "test/model")

@@ -12,7 +12,6 @@ import * as OtelEnvironment from '@t3tools/shared/otelEnvironment';
 import { configureNative } from './native.mjs';
 import { migratePiSettings, migrateProviderDiscoverySettings } from './settings-migration.mjs';
 import { BUILT_IN_DRIVERS } from './upstream/apps/server/src/provider/builtInDrivers.ts';
-import { configureModelPreferences } from './model-preferences.mjs';
 import { prepareServerPort } from './server-port.mjs';
 export { originAllowed } from './origin-policy.mjs';
 export { createAccountRuntime } from './account-runtime.ts';
@@ -45,7 +44,6 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   const broker = configureNative({ environmentId, directory, accounts });
   let binding;
   try {
-    configureModelPreferences(directory);
     binding = await prepareServerPort(directory, broker.connectionDiagnostics);
   } catch (error) { broker.close(); throw error; }
   const configLayer = Layer.effect(ServerConfig, Effect.gen(function* () {

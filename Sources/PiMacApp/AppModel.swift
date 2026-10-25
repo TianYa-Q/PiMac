@@ -655,7 +655,7 @@ final class AppModel: ObservableObject {
         reasoning: levels.count > 1, thinkingLevels: levels,
         defaultContextWindow: server?.modelContextSettings.defaults[slug])
     }
-    let hidden = Set(UserDefaults.standard.stringArray(forKey: "t3HiddenModels") ?? [])
+    let hidden = server?.hiddenModelIDs ?? []
     models = allModels.filter { !hidden.contains($0.id) }
     let selectingDefault = selectedModelId.isEmpty
     if selectingDefault {
@@ -875,11 +875,17 @@ final class AppModel: ObservableObject {
 
   func refreshModelPreferences() { refreshModels() }
   func setModelVisible(_ visible: Bool, modelID: String) {
-    var hidden = Set(UserDefaults.standard.stringArray(forKey: "t3HiddenModels") ?? [])
-    if visible { hidden.remove(modelID) } else { hidden.insert(modelID) }
-    UserDefaults.standard.set(Array(hidden), forKey: "t3HiddenModels")
-    refreshModels()
-    Task { await updateTextGenerationModel(nil) }
+    guard let server, server.isConnected, !isLoadingConfiguration else { return }
+    isLoadingConfiguration = true
+    Task {
+      defer { isLoadingConfiguration = false }
+      do {
+        try await server.setModelVisible(visible, modelID: modelID)
+        refreshModels()
+      } catch {
+        statusText = "模型显示设置未确认，请刷新 Server 状态：\(error.localizedDescription)"
+      }
+    }
   }
   func setDefaultModel(_ modelID: String?) {
     defaultModelID = modelID

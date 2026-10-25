@@ -129,6 +129,10 @@ final class WorkspaceModel: ObservableObject {
     }
     addTab(model: AppModel(restoreLastProjectOnLaunch: false), path: nil, draft: false)
     server.onShell = { [weak self] snapshot in self?.applyShell(snapshot) }
+    server.onModelsChanged = { [weak self] in
+      guard let self else { return }
+      for tab in self.tabs { tab.model.refreshModels() }
+    }
     server.onAccountPoll = { [weak self] in
       guard let self else { return }
       for tab in self.tabs { tab.model.refreshCodexAccounts() }

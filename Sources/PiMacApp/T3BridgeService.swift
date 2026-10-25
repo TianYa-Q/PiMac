@@ -309,15 +309,6 @@ final class T3BridgeService: ObservableObject {
     return try await admin("text-generation-model")
   }
 
-  func syncModelPreferences(hiddenModels: [String], defaultModel: String?) async throws {
-    struct Response: Decodable { let ok: Bool }
-    let _: Response = try await admin(
-      "model-preferences", method: "POST",
-      body: [
-        "hiddenModels": hiddenModels, "defaultModel": defaultModel as Any? ?? NSNull(),
-      ])
-  }
-
   func accountStatus(threadID: String, provider: String, force: Bool, selectionOnly: Bool)
     async throws -> [String: Any]
   {
