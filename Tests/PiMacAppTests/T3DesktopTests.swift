@@ -262,6 +262,12 @@ struct T3DesktopTests {
     #expect(ProcessInfo.processInfo.environment == originalEnvironment)
     client.start(service: service)
     try await client.waitUntilReady()
+    // 前台唤醒走独立的已认证 HTTP 通道，不重建 Server 或恢复任何写入命令。
+    await client.refreshConnection(to: nil) { "unused" }
+    #expect(!client.isConnected)
+    client.resumeConnectionChecks()
+    try await client.waitUntilReady()
+    #expect(service.serverURL?.host == "127.0.0.1")
     // 所有非 Pi 实例都已禁用；连 pending Codex 快照也不能触发原生探测。
     #expect(
       !FileManager.default.fileExists(

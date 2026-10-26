@@ -32,6 +32,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     return .terminateLater
   }
 
+  func applicationDidBecomeActive(_ notification: Notification) {
+    workspace?.server.resumeConnectionChecks()
+  }
+
   func applicationWillTerminate(_ notification: Notification) {
     PS5GatewayController.shared.stop()
     LidSleepController.shared.stop()

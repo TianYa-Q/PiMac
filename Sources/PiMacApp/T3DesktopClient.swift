@@ -27,6 +27,16 @@ final class T3DesktopClient: ObservableObject {
   private var token = ""
   private var connectedServerURL: URL?
   private var loop: Task<Void, Never>?
+  private var connectionLoop: Task<Void, Never>?
+  private var configurationLoop: Task<Void, Never>?
+  private var connectionCheckRevision = UUID()
+  enum RefreshArea: String, CaseIterable {
+    case shell = "会话列表"
+    case configuration = "模型配置"
+  }
+  private var refreshFailures: [RefreshArea: String] = [:]
+  private var connectionFailure: String?
+  private var hasLoadedConfiguration = false
   private let threadRefreshes = ThreadRefreshScheduler()
   private let assetRefreshes = ThreadRefreshScheduler()
   private var shellRefreshTask: Task<Void, Error>?
@@ -116,6 +126,8 @@ final class T3DesktopClient: ObservableObject {
   private let session = T3DesktopClient.makeSession(maxConnections: 4)
   private let threadSession = T3DesktopClient.makeSession(maxConnections: 4)
   private let assetSession = T3DesktopClient.makeSession(maxConnections: 4)
+  // 可用性检查不与配置 RPC、长时间运行的命令或附件争抢连接。
+  private let connectionSession: URLSession
 
   private static func makeSession(maxConnections: Int) -> URLSession {
     let config = URLSessionConfiguration.ephemeral
@@ -129,10 +141,18 @@ final class T3DesktopClient: ObservableObject {
   private let defaults: UserDefaults
   init(
     defaults: UserDefaults = .standard,
+    connectionSession: URLSession? = nil,
     skillDiscovery: ((WorkspaceSkillCache.Key, Bool) async throws -> WorkspaceSkillCache.Success)? =
       nil
   ) {
     self.defaults = defaults
+    let connectionConfiguration = URLSessionConfiguration.ephemeral
+    connectionConfiguration.httpShouldSetCookies = false
+    connectionConfiguration.connectionProxyDictionary = [:]
+    connectionConfiguration.httpMaximumConnectionsPerHost = 1
+    connectionConfiguration.timeoutIntervalForRequest = 3
+    connectionConfiguration.timeoutIntervalForResource = 5
+    self.connectionSession = connectionSession ?? URLSession(configuration: connectionConfiguration)
     self.skillDiscovery = skillDiscovery
     if let data = defaults.data(forKey: "t3DesktopShellCache"),
       let snapshot = try? JSONSerialization.jsonObject(with: data) as? JSON
@@ -147,57 +167,176 @@ final class T3DesktopClient: ObservableObject {
     stop()
     self.service = service
     let current = generation
+    resumeConnectionChecks()
     loop = Task { [weak self] in
       while let self, !Task.isCancelled, self.generation == current {
-        var phase = "获取桌面凭证"
-        do {
-          let serverURL = self.service?.serverURL
-          if serverURL != self.connectedServerURL {
-            self.skillCache.reset()
-            self.hasLiveSkillShell = false
-            self.connectedServerURL = serverURL
-            self.token = ""
-            self.syncedDefaultModelPreference = nil
-            self.modelVisibilityRevision += 1
-            self.hiddenModelIDs = []
-            self.providers = []
-            self.modelContextSettings = .empty
-            self.textGenerationModels.reset()
-            self.invalidateThreadSnapshots()
-            self.isConnected = false
-          }
-          if serverURL == nil {
-            let status = self.service?.status ?? "Server 未启动"
-            if self.status != status { self.status = status }
-          } else {
-            if self.token.isEmpty { self.token = try await service.desktopCredential() }
-            phase = "同步模型配置"
-            try await self.syncDefaultModelPreference()
-            if self.providers.isEmpty {
-              try await self.loadConfig()
-            } else {
-              try await self.refreshModelVisibility()
-            }
-            phase = "读取会话状态"
+        if self.isConnected {
+          let serverURL = self.connectedServerURL
+          do {
             try await self.refreshShell()
+            guard self.generation == current, !Task.isCancelled else { return }
+            guard self.connectedServerURL == serverURL else { continue }
+            self.recordRefreshResult(.shell, error: nil)
             self.requestThreadRefreshes()
-            self.didCompletePoll()
-            // 额度可在没有任何会话变化时更新，不依赖 shell 的内容去重回调。
+            self.reconcileSkillWorkspaces(now: Date())
             self.onAccountPoll?()
-            if self.status != "T3 Server 已连接" { self.status = "T3 Server 已连接" }
+          } catch {
+            guard self.generation == current, !Task.isCancelled else { return }
+            if self.connectedServerURL == serverURL {
+              self.recordRefreshResult(.shell, error: error)
+            }
           }
-        } catch {
-          guard self.generation == current, !Task.isCancelled else { return }
-          if self.isConnected { self.isConnected = false }
-          let status = Self.connectionFailureStatus(error, phase: phase)
-          if self.status != status { self.status = status }
-          if (error as? ClientError) == .unauthorized { self.token = "" }
         }
         try? await Task.sleep(
           for: .milliseconds(Self.pollIntervalMilliseconds(hasRunningThread: self.hasRunningThread))
         )
       }
     }
+    resumeConfigurationRefreshes()
+  }
+
+  private func resumeConfigurationRefreshes() {
+    configurationLoop?.cancel()
+    let current = generation
+    configurationLoop = Task { [weak self] in
+      while let self, !Task.isCancelled, self.generation == current {
+        var succeeded = false
+        if self.isConnected {
+          let serverURL = self.connectedServerURL
+          do {
+            try await self.syncDefaultModelPreference()
+            if !self.hasLoadedConfiguration {
+              try await self.loadConfig()
+            } else {
+              try await self.refreshModelVisibility()
+            }
+            guard self.generation == current, !Task.isCancelled else { return }
+            guard self.connectedServerURL == serverURL else { continue }
+            self.recordRefreshResult(.configuration, error: nil)
+            succeeded = true
+          } catch {
+            guard self.generation == current, !Task.isCancelled else { return }
+            if self.connectedServerURL == serverURL {
+              self.recordRefreshResult(.configuration, error: error)
+            }
+          }
+        }
+        // 配置不随每个 token 改变；与高频转录轮询分离，失败才短间隔重试。
+        try? await Task.sleep(for: .seconds(succeeded ? 30 : 2))
+      }
+    }
+  }
+
+  /// 切回前台只唤醒只读检查，不停止会话、不清空缓存，也不重放任何写入。
+  func resumeConnectionChecks() {
+    guard let service else { return }
+    connectionLoop?.cancel()
+    connectionCheckRevision = UUID()
+    let current = generation
+    connectionLoop = Task { [weak self] in
+      while let self, !Task.isCancelled, self.generation == current {
+        await self.refreshConnection(to: service.serverURL) {
+          try await service.desktopCredential()
+        }
+        try? await Task.sleep(for: .seconds(2))
+      }
+    }
+  }
+
+  func refreshConnection(
+    to serverURL: URL?, credential credentialProvider: () async throws -> String
+  ) async {
+    let current = generation
+    let revision = UUID()
+    connectionCheckRevision = revision
+    if serverURL != connectedServerURL {
+      skillCache.reset()
+      hasLiveSkillShell = false
+      connectedServerURL = serverURL
+      token = ""
+      syncedDefaultModelPreference = nil
+      modelVisibilityRevision += 1
+      hiddenModelIDs = []
+      providers = []
+      hasLoadedConfiguration = false
+      modelContextSettings = .empty
+      textGenerationModels.reset()
+      invalidateThreadSnapshots()
+      refreshFailures.removeAll()
+      isConnected = false
+    }
+    guard let serverURL else {
+      isConnected = false
+      connectionFailure = service?.status ?? "Server 未启动"
+      updateConnectionStatus()
+      return
+    }
+    var phase = "获取桌面凭证"
+    do {
+      let credential: String
+      if token.isEmpty {
+        credential = try await credentialProvider()
+      } else {
+        credential = token
+      }
+      guard generation == current, connectionCheckRevision == revision, !Task.isCancelled else {
+        return
+      }
+      token = credential
+      phase = "检查本机服务"
+      var request = URLRequest(
+        url: serverURL.appendingPathComponent("api/auth/session"), timeoutInterval: 3)
+      request.cachePolicy = .reloadIgnoringLocalCacheData
+      request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
+      let (data, response) = try await connectionSession.data(for: request)
+      guard generation == current, connectionCheckRevision == revision, !Task.isCancelled else {
+        return
+      }
+      guard let statusCode = (response as? HTTPURLResponse)?.statusCode else {
+        throw ClientError.unavailable
+      }
+      if statusCode == 401 { throw ClientError.unauthorized }
+      guard statusCode == 200, data.count <= 64 * 1024,
+        let result = try JSONSerialization.jsonObject(with: data) as? JSON,
+        let authenticated = result["authenticated"] as? Bool
+      else { throw ClientError.rejected }
+      guard authenticated else { throw ClientError.unauthorized }
+      let recovered = !isConnected
+      isConnected = true
+      connectionFailure = nil
+      updateConnectionStatus()
+      if recovered, service != nil {
+        if !hasLoadedConfiguration { resumeConfigurationRefreshes() }
+        requestRefresh()
+      }
+    } catch {
+      // 被前台唤醒替换的检查即使迟到，也不能覆盖新连接或清除新凭证。
+      guard generation == current, connectionCheckRevision == revision, !Task.isCancelled else {
+        return
+      }
+      isConnected = false
+      if (error as? ClientError) == .unauthorized { token = "" }
+      connectionFailure = Self.connectionFailureStatus(error, phase: phase)
+      updateConnectionStatus()
+    }
+  }
+
+  func recordRefreshResult(_ area: RefreshArea, error: Error?) {
+    refreshFailures[area] = error.map {
+      "\(area.rawValue)刷新失败（\(Self.failureReason($0))），正在重试"
+    }
+    updateConnectionStatus()
+  }
+
+  private func updateConnectionStatus() {
+    let next: String
+    if isConnected {
+      let warning = RefreshArea.allCases.compactMap { refreshFailures[$0] }.first
+      next = warning.map { "T3 Server 已连接；\($0)" } ?? "T3 Server 已连接"
+    } else {
+      next = connectionFailure ?? service?.status ?? "T3 Server 尚未连接"
+    }
+    if status != next { status = next }
   }
 
   func stop() {
@@ -206,6 +345,14 @@ final class T3DesktopClient: ObservableObject {
     generation = UUID()
     loop?.cancel()
     loop = nil
+    connectionLoop?.cancel()
+    connectionLoop = nil
+    configurationLoop?.cancel()
+    configurationLoop = nil
+    connectionCheckRevision = UUID()
+    connectionFailure = nil
+    refreshFailures.removeAll()
+    service = nil
     threadRefreshes.cancelAll()
     for task in projectCreations.values { task.cancel() }
     projectCreations.removeAll()
@@ -216,12 +363,14 @@ final class T3DesktopClient: ObservableObject {
     token = ""
     connectedServerURL = nil
     providers = []
+    hasLoadedConfiguration = false
     supportsTitleRegeneration = false
     modelContextSettings = .empty
     textGenerationModels.reset()
     syncedDefaultModelPreference = nil
     modelVisibilityRevision += 1
     isConnected = false
+    status = "T3 Server 尚未连接"
     watches.removeAll()
     imageCache.removeAll()
     replyImageCache.removeAll()
@@ -276,7 +425,7 @@ final class T3DesktopClient: ObservableObject {
   func waitUntilReady() async throws {
     for _ in 0..<300 {
       try Task.checkCancellation()
-      if isConnected { return }
+      if isConnected, hasLiveSkillShell, hasLoadedConfiguration { return }
       try await Task.sleep(for: .milliseconds(100))
     }
     throw ClientError.unavailable
@@ -285,26 +434,32 @@ final class T3DesktopClient: ObservableObject {
   func request(_ path: String, method: String = "GET", body: JSON? = nil) async throws -> JSON {
     guard let base = service?.serverURL, !token.isEmpty else { throw ClientError.unavailable }
     let current = generation
+    let credential = token
     var request = URLRequest(url: URL(string: base.absoluteString + path)!)
     request.httpMethod = method
-    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("2", forHTTPHeaderField: "x-t3-orchestration-protocol")
     if let body { request.httpBody = try await ImmutableJSONSnapshot(value: body).encode() }
     guard generation == current, !Task.isCancelled else { throw CancellationError() }
     let transport = path.hasPrefix("/api/orchestration/threads/") ? threadSession : session
     let (data, response) = try await transport.data(for: request)
-    guard generation == current else { throw CancellationError() }
+    guard generation == current, service?.serverURL == base else { throw CancellationError() }
     guard let status = (response as? HTTPURLResponse)?.statusCode else {
       throw ClientError.unavailable
     }
     if status == 401 {
+      guard token == credential else { throw CancellationError() }
       token = ""
+      connectionCheckRevision = UUID()
+      isConnected = false
+      connectionFailure = Self.connectionFailureStatus(ClientError.unauthorized, phase: "校验授权")
+      updateConnectionStatus()
       throw ClientError.unauthorized
     }
     guard status == 200, data.count <= 32 * 1024 * 1024 else { throw ClientError.rejected }
     let snapshot = try await ImmutableJSONSnapshot.decode(data)
-    guard generation == current else { throw CancellationError() }
+    guard generation == current, service?.serverURL == base else { throw CancellationError() }
     return snapshot.value
   }
 
@@ -675,16 +830,21 @@ final class T3DesktopClient: ObservableObject {
 
   func requestRefresh(includeThreads: Bool = true) {
     let current = generation
+    let serverURL = connectedServerURL
     Task { [weak self] in
       guard let self, self.generation == current else { return }
       do {
         // 新建/Settle 的列表确认有独立通道，不排在任何会话的附件下载后面。
         try await self.refreshShell()
+        guard self.generation == current, !Task.isCancelled else { return }
+        guard self.connectedServerURL == serverURL else { return }
+        self.recordRefreshResult(.shell, error: nil)
         if includeThreads { self.requestThreadRefreshes() }
       } catch {
         // 后台读取失败由下一次轮询恢复，不重试任何写入命令。
         guard self.generation == current, !Task.isCancelled else { return }
-        self.status = Self.connectionFailureStatus(error, phase: "读取会话列表")
+        guard self.connectedServerURL == serverURL else { return }
+        self.recordRefreshResult(.shell, error: error)
       }
     }
   }
@@ -694,8 +854,10 @@ final class T3DesktopClient: ObservableObject {
     let selection: Any = model.map { ["instanceId": "pi", "model": $0] } ?? NSNull()
     let data = try JSONSerialization.data(withJSONObject: ["defaultModelSelection": selection])
     guard data != syncedDefaultModelPreference else { return }
+    let revision = modelVisibilityRevision
     _ = try await rpc(
       "server.updateSettings", payload: ["patch": ["defaultModelSelection": selection]])
+    guard revision == modelVisibilityRevision else { throw CancellationError() }
     syncedDefaultModelPreference = data
   }
 
@@ -763,19 +925,25 @@ final class T3DesktopClient: ObservableObject {
     let revision = modelVisibilityRevision
     let result = try await rpc("server.getConfig")
     guard revision == modelVisibilityRevision else { return }
-    guard let settings = result["settings"] as? JSON else { throw ClientError.rejected }
+    guard let settings = result["settings"] as? JSON,
+      let providers = result["providers"] as? [JSON]
+    else { throw ClientError.rejected }
     try applyModelVisibility(settings)
     let environment = result["environment"] as? JSON
     let capabilities = environment?["capabilities"] as? JSON
     supportsTitleRegeneration = capabilities?["threadTitleRegeneration"] as? Bool == true
     let catalogs = try await service?.modelCatalog() ?? [:]
-    modelContextSettings = try await service?.modelContextSettings() ?? .empty
+    let contextSettings = try await service?.modelContextSettings() ?? .empty
+    guard revision == modelVisibilityRevision else { throw CancellationError() }
+    modelContextSettings = contextSettings
     if let service {
       await textGenerationModels.update(refresh: true) {
         try await service.textGenerationModelSettings(modelID: nil)
       }
     }
-    applyProviderCatalog(result["providers"] as? [JSON] ?? [], modelCatalogs: catalogs)
+    guard revision == modelVisibilityRevision else { throw CancellationError() }
+    hasLoadedConfiguration = true
+    applyProviderCatalog(providers, modelCatalogs: catalogs)
   }
 
   func applyProviderCatalog(_ values: [JSON], modelCatalogs: [String: [JSON]]) {
@@ -961,8 +1129,9 @@ final class T3DesktopClient: ObservableObject {
     receive: ((JSON) -> Void)? = nil
   ) async throws -> JSON {
     let current = generation
+    guard let base = service?.serverURL else { throw ClientError.unavailable }
     let ticket = try await request("/api/auth/websocket-ticket", method: "POST", body: [:])
-    guard let secret = ticket["ticket"] as? String, let base = service?.serverURL else {
+    guard service?.serverURL == base, let secret = ticket["ticket"] as? String else {
       throw ClientError.unavailable
     }
     var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
@@ -987,6 +1156,7 @@ final class T3DesktopClient: ObservableObject {
       "_tag": "Request", "id": id, "tag": method, "payload": payload, "headers": [],
     ]).encode()
     guard generation == current, !Task.isCancelled else { throw CancellationError() }
+    guard service?.serverURL == base else { throw CancellationError() }
     try await socket.send(.string(String(decoding: encoded, as: UTF8.self)))
     while true {
       let frame = try await withTaskCancellationHandler {
@@ -994,7 +1164,9 @@ final class T3DesktopClient: ObservableObject {
       } onCancel: {
         socket.cancel(with: .goingAway, reason: nil)
       }
-      guard generation == current, !Task.isCancelled else { throw CancellationError() }
+      guard generation == current, service?.serverURL == base, !Task.isCancelled else {
+        throw CancellationError()
+      }
       let data: Data
       switch frame {
       case .data(let value): data = value
@@ -1002,7 +1174,9 @@ final class T3DesktopClient: ObservableObject {
       @unknown default: throw ClientError.rejected
       }
       let frames = try await ImmutableJSONSnapshot.frames(data)
-      guard generation == current, !Task.isCancelled else { throw CancellationError() }
+      guard generation == current, service?.serverURL == base, !Task.isCancelled else {
+        throw CancellationError()
+      }
       for frame in frames {
         let response = frame.value
         if response["_tag"] as? String == "Ping" {
@@ -1459,6 +1633,10 @@ final class T3DesktopClient: ObservableObject {
   }
   // Use only fixed categories, never server error bodies, URLs or credentials.
   static func connectionFailureStatus(_ error: Error, phase: String) -> String {
+    "T3 Server 连接失败（\(phase)：\(failureReason(error))）；正在重试，命令不会自动重发。"
+  }
+
+  private static func failureReason(_ error: Error) -> String {
     let reason: String
     if let error = error as? URLError {
       switch error.code {
@@ -1473,7 +1651,7 @@ final class T3DesktopClient: ObservableObject {
     } else {
       reason = "初始化请求失败"
     }
-    return "T3 Server 连接失败（\(phase)：\(reason)）；正在重试，命令不会自动重发。"
+    return reason
   }
 
   enum ClientError: Error { case unavailable, unauthorized, rejected }
