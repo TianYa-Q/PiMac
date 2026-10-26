@@ -74,6 +74,60 @@ struct ImmediateSubmissionTests {
     #expect(workspace.filteredSessions.first?.title == "Server 标题")
   }
 
+  @Test func sentSessionCanReopenAfterNewChatBeforeShellCatchesUp() throws {
+    let suite = "pimac-send-new-chat-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let workspace = WorkspaceModel(
+      restoreUserState: false, server: T3DesktopClient(defaults: defaults))
+    defer { workspace.disconnectAll() }
+    let project = URL(fileURLWithPath: "/tmp/pimac-send-new-chat")
+    workspace.server.didCompletePoll()
+    workspace.server.applyShell([
+      "projects": [["id": "p", "workspaceRoot": project.path]], "threads": [],
+    ])
+    let original = try #require(workspace.selectedModel)
+    original.projectURL = project
+    original.connectionState = .connected
+    original.isLoadingConfiguration = false
+    original.composerText = "发送后立即新聊天"
+    original.sendPrompt()
+    let path = original.currentSessionPath
+    let id = try #require(original.threadID)
+    let messageIDs = original.messages.map(\.id)
+    #expect(workspace.server.thread(id) == nil)
+
+    workspace.newSessionInLastProject()
+    let draft = try #require(workspace.selectedModel)
+    #expect(draft !== original)
+    draft.composerText = "新聊天草稿"
+    let tabCount = workspace.tabs.count
+    #expect(workspace.project(forSessionPath: path)?.url == project)
+    workspace.openSession(path: path, in: project)
+
+    #expect(workspace.selectedModel === original)
+    #expect(original.currentSessionPath == path)
+    #expect(original.messages.map(\.id) == messageIDs)
+    #expect(workspace.tabs.count == tabCount)
+    #expect(draft.composerText == "新聊天草稿")
+    #expect(!draft.statusText.contains("尚未导入"))
+
+    // shell 到达后仍恢复同一模型，不能另建标签或重复提交。
+    workspace.server.applyShell([
+      "projects": [["id": "p", "workspaceRoot": project.path]],
+      "threads": [["id": id, "projectId": "p", "title": "Server 标题"]],
+    ])
+    workspace.newSessionInLastProject()
+    workspace.openSession(path: path, in: project)
+    #expect(workspace.selectedModel === original)
+    #expect(workspace.tabs.count == tabCount)
+
+    // 本地优先不能绕过项目身份边界。
+    workspace.newSessionInLastProject()
+    workspace.openSession(path: path, in: URL(fileURLWithPath: "/tmp/another-project"))
+    #expect(workspace.selectedModel === draft)
+  }
+
   @Test func disconnectedSendPreservesDraftAndReportsConnectionInsteadOfThreadRecycling() {
     let model = AppModel(restoreLastProjectOnLaunch: false)
     model.composerText = "保留草稿"

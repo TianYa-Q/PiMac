@@ -340,6 +340,58 @@ final class T3DesktopClient: ObservableObject {
     return attachments
   }
 
+  /// 新的排队输入直接编辑 Server 第一条；读取最新快照，不能拿 UI 的旧正文覆盖队列。
+  /// 编辑若遇到出队竞态或网络失败，保留未确认输入，不自动另发以免重复执行。
+  func appendToQueuedPrompt(
+    threadID: String, text: String, images: [JSON], modelSelection: JSON
+  ) async throws -> Bool {
+    let escaped = threadID.addingPercentEncoding(
+      withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
+    let native = try await request("/api/orchestration/threads/\(escaped)")
+    guard let projection = native["projection"] as? JSON,
+      projection["thread"] is JSON, let runs = projection["runs"] as? [JSON],
+      projection["messages"] is [JSON]
+    else { throw ClientError.rejected }
+    let detail = T3V2Presentation.detail(native)
+    guard let thread = detail["thread"] as? JSON,
+      let first = (thread["queuedMessages"] as? [JSON])?.first
+    else { return false }
+    guard let runID = first["runId"] as? String,
+      let messageID = first["id"] as? String,
+      let previousText = first["text"] as? String,
+      let previousAttachments = first["attachments"] as? [JSON]
+    else { throw ClientError.rejected }
+    // 自动通知、原生命令及指定了其他模型的输入仍由上游独立处理。
+    let run = runs.first { $0["id"] as? String == runID }
+    guard first["createdBy"] as? String == "user",
+      first["notification"] == nil, first["delegatedCompletion"] == nil,
+      first["scheduledTaskId"] == nil, first["senderThreadId"] == nil,
+      run?["restartContinuationOfRunId"] == nil, run?["delegatedTaskId"] == nil,
+      !previousText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/"),
+      !text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/"),
+      let selection = run?["modelSelection"] as? JSON,
+      NSDictionary(dictionary: selection).isEqual(to: modelSelection)
+    else { return false }
+    let uploaded = try await persistAttachments(images, threadID: threadID, messageID: messageID)
+    try await dispatch([
+      "type": "queued-run.edit", "threadId": threadID, "runId": runID,
+      "text": Self.appendingQueuedText(previousText, text),
+      "attachments": previousAttachments + uploaded,
+    ])
+    return true
+  }
+
+  static func appendingQueuedText(_ previous: String, _ next: String) -> String {
+    // 已合并的正文直接续号，保留每条输入内部的换行；单条正文在第二次输入时才编号。
+    let lines = previous.components(separatedBy: "\n")
+    var count = 0
+    for line in lines where line.hasPrefix("\(count + 1). ") { count += 1 }
+    if count >= 2, previous.hasPrefix("1. ") {
+      return "\(previous)\n\(count + 1). \(next)"
+    }
+    return "1. \(previous)\n2. \(next)"
+  }
+
   func interrupt(threadID: String, runID: String) async throws {
     // thread.stop 是 Server 内部命令；公开接口用 run.interrupt，holdQueue 同时阻止排队消息继续执行。
     try await dispatch([

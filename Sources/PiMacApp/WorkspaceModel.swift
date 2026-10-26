@@ -380,16 +380,19 @@ final class WorkspaceModel: ObservableObject {
     addTab(model: model, path: nil, draft: true)
   }
   func openSession(path: String, in projectURL: URL) {
+    // 首次发送先发布本地身份，Server shell 可能尚未包含该线程。
+    // 优先恢复同项目的原标签，保留在途提交和未确认消息，不重连或重发。
+    if let tab = tabs.first(where: {
+      ($0.model.currentSessionPath == path || $0.requestedSessionPath == path)
+        && $0.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL
+    }) {
+      selectTab(tab.id)
+      return
+    }
     guard let id = AppModel.threadID(from: path), let thread = server.thread(id),
       thread["projectId"] as? String == server.projectID(for: projectURL)
     else {
       selectedModel?.statusText = "此历史路径尚未导入 T3；不会启动旧桌面 Pi 进程。"
-      return
-    }
-    if let tab = tabs.first(where: {
-      $0.model.currentSessionPath == path || $0.requestedSessionPath == path
-    }) {
-      selectTab(tab.id)
       return
     }
     addTab(

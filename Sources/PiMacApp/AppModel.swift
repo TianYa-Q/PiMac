@@ -526,24 +526,39 @@ final class AppModel: ObservableObject {
           }
           self.observeThread(id, on: server)
         }
-        try await server.dispatch(
-          [
-            "type": "message.dispatch", "threadId": id,
-            "modelSelection": selection,
-            "messageId": submittedMessageID, "text": prompt.rpcText,
-            "attachments": try await server.persistAttachments(
-              images, threadID: id, messageID: submittedMessageID),
-            "dispatchMode": ["type": "queue_after_active"],
-          ].merging(isQueueing ? [:] : ["deliveryIntent": "steer"]) { _, new in new })
+        let appended =
+          if isQueueing, existingThreadID != nil {
+            try await server.appendToQueuedPrompt(
+              threadID: id, text: prompt.rpcText, images: images, modelSelection: selection)
+          } else {
+            false
+          }
+        if !appended {
+          try await server.dispatch(
+            [
+              "type": "message.dispatch", "threadId": id,
+              "modelSelection": selection,
+              "messageId": submittedMessageID, "text": prompt.rpcText,
+              "attachments": try await server.persistAttachments(
+                images, threadID: id, messageID: submittedMessageID),
+              "dispatchMode": ["type": "queue_after_active"],
+            ].merging(isQueueing ? [:] : ["deliveryIntent": "steer"]) { _, new in new })
+        }
         guard self.generation == current else {
           completion(true)
           return
         }
+        if appended {
+          // 编辑复用原消息身份；新的本地回显不会收到同 ID 的 Server 消息，确认后主动移交。
+          self.pendingQueuedMessages.removeAll { $0.id == submittedMessageID }
+        }
         completion(true)
         self.statusText =
-          isSteering
-          ? "已提交插入消息，当前工具调用结束后处理。"
-          : isQueueing ? "已提交到 T3 Server 队列。" : "已提交到 T3 Server"
+          appended
+          ? "已合并到 T3 Server 队列第一条。"
+          : isSteering
+            ? "已提交插入消息，当前工具调用结束后处理。"
+            : isQueueing ? "已提交到 T3 Server 队列。" : "已提交到 T3 Server"
         // Server owns initial naming, including first messages sent from mobile.
       } catch {
         guard self.generation == current else {
