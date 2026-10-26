@@ -16,6 +16,8 @@ struct TemporaryCleanupResult: Codable, Identifiable, Sendable {
   var message = ""
   var errors: [String] = []
   var items: [String] = []
+  // 旧记录没有完成时间；跳过或失败不标记为完整检查。
+  var completedAt: Date?
 }
 
 /// 只整理已登记工作区的 tmp 直接子项；绝不递归删除，也不清空废纸篓。
@@ -23,13 +25,22 @@ actor TemporaryFileCleaner {
   static let retention: TimeInterval = 3 * 24 * 60 * 60
   private let manager = FileManager.default
   private let moveToTrash: @Sendable (URL) throws -> Void
+  private let scanBudget: TimeInterval
+  private let itemScanBudget: TimeInterval
+  private let itemLimit: Int
+  private var resumeAfter: [String: String] = [:]
 
   init(
+    scanBudget: TimeInterval = 120, itemScanBudget: TimeInterval = 2,
+    itemLimit: Int = 100_000,
     moveToTrash: @escaping @Sendable (URL) throws -> Void = { url in
       try FileManager.default.trashItem(at: url, resultingItemURL: nil)
     }
   ) {
     self.moveToTrash = moveToTrash
+    self.scanBudget = scanBudget
+    self.itemScanBudget = itemScanBudget
+    self.itemLimit = itemLimit
   }
 
   private struct Facts: Equatable {
@@ -69,27 +80,45 @@ actor TemporaryFileCleaner {
         let tmp = root.appendingPathComponent("tmp", isDirectory: true)
         guard manager.fileExists(atPath: tmp.path) else {
           result.message = "没有临时目录"
+          result.completedAt = Date()
           results.append(result)
           continue
         }
         try validate(root: root, tmp: tmp)
         let cutoff = now.addingTimeInterval(-Self.retention)
-        let deadline = Date().addingTimeInterval(30)
+        let deadline = Date().addingTimeInterval(scanBudget)
         let tracked = try trackedPaths(root: root)
         let children = try manager.contentsOfDirectory(
           at: tmp, includingPropertiesForKeys: nil)
         if manager.fileExists(atPath: tmp.appendingPathComponent(".keep").path) {
           result.retained = children.count
           result.message = "tmp/.keep 已保留整个临时目录"
+          result.completedAt = Date()
           results.append(result)
           continue
         }
-        // 不穿透符号链接；目录内任何近期文件、保留标记或锁都会保留整个任务目录。
-        for child in children.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+        // 独立限制大目录耗时；全局预算耗尽后从下一项继续，避免每轮卡在同一目录。
+        let sorted = children.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let start =
+          resumeAfter[root.path].flatMap { name in
+            sorted.firstIndex { $0.lastPathComponent > name }
+          } ?? 0
+        let ordered = Array(sorted.dropFirst(start)) + Array(sorted.prefix(start))
+        var allChecked = true
+        for child in ordered {
           try Task.checkCancellation()
-          guard Date() < deadline else { throw CleanupError.scanLimit }
+          guard Date() < deadline else {
+            allChecked = false
+            if result.errors.count < 5 {
+              result.errors.append(CleanupError.scanLimit.localizedDescription)
+            }
+            break
+          }
+          resumeAfter[root.path] = child.lastPathComponent
           do {
-            let first = try facts(child, cutoff: cutoff, deadline: deadline)
+            let first = try facts(
+              child, cutoff: cutoff,
+              deadline: min(deadline, Date().addingTimeInterval(itemScanBudget)))
             if first.preserved || first.newest >= cutoff
               || tracked.contains(where: { Self.contains(child, $0) })
             {
@@ -98,6 +127,7 @@ actor TemporaryFileCleaner {
             }
             if let reason = await protection(workspace.directory) {
               result.message = reason
+              allChecked = false
               break
             }
             // 每次移动前重新读取进程与文件状态，避免扫描后启动的任务和新写入被误清。
@@ -112,13 +142,16 @@ actor TemporaryFileCleaner {
               result.retained += 1
               continue
             }
-            let second = try facts(child, cutoff: cutoff, deadline: deadline)
+            let second = try facts(
+              child, cutoff: cutoff,
+              deadline: min(deadline, Date().addingTimeInterval(itemScanBudget)))
             guard first == second, second.newest < cutoff, !second.preserved else {
               result.retained += 1
               continue
             }
             if let reason = await protection(workspace.directory) {
               result.message = reason
+              allChecked = false
               break
             }
             // 主线程保护检查期间也可能切换目录；回到文件执行器后再次确认边界与身份。
@@ -135,11 +168,15 @@ actor TemporaryFileCleaner {
             if result.errors.count < 5 {
               result.errors.append("\(child.lastPathComponent)：\(error.localizedDescription)")
             }
-            if Date() >= deadline { break }
+            if Date() >= deadline {
+              allChecked = false
+              break
+            }
           }
           await Task.yield()
         }
         result.retained = max(result.retained, children.count - result.moved)
+        if allChecked && result.errors.isEmpty { result.completedAt = Date() }
         if result.message.isEmpty { result.message = result.errors.isEmpty ? "检查完成" : "部分内容未整理" }
       } catch {
         result.message = "检查未完成"
@@ -162,40 +199,56 @@ actor TemporaryFileCleaner {
     var result = Facts()
     var pending = [entry]
     while let file = pending.popLast() {
-      guard Date() < deadline, result.count < 100_000 else { throw CleanupError.scanLimit }
-      let info = try manager.attributesOfItem(atPath: file.path)
-      let type = info[.type] as? FileAttributeType
+      guard Date() < deadline, result.count < itemLimit else { throw CleanupError.scanLimit }
+      // 一次 lstat 同时取得时间、类型和大小；不读内容、不跟随链接，也不重复请求访问时间。
+      var info = stat()
+      guard lstat(file.path, &info) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+      }
+      let type = info.st_mode & S_IFMT
       result.count += 1
-      if file == entry { result.inode = (info[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0 }
+      if file == entry { result.inode = UInt64(info.st_ino) }
       let name = file.lastPathComponent
       if name == ".keep" || name == ".pimac-keep" || name.hasSuffix(".lock")
-        || name.hasSuffix(".pid") || type == .typeSocket
+        || name.hasSuffix(".pid") || type == S_IFSOCK
       {
         result.preserved = true
         return result
       }
       // 根链接不属于本平台可判定的临时内容；内部链接只看链接本身，不访问目标。
-      if file == entry && type == .typeSymbolicLink {
+      if file == entry && type == S_IFLNK {
         result.preserved = true
         return result
       }
       result.newest = max(
-        result.newest, info[.modificationDate] as? Date ?? .distantFuture,
-        info[.creationDate] as? Date ?? .distantFuture)
-      if type == .typeRegular {
-        let values = try file.resourceValues(forKeys: [.contentAccessDateKey])
-        result.newest = max(result.newest, values.contentAccessDate ?? .distantFuture)
-        result.bytes += (info[.size] as? NSNumber)?.int64Value ?? 0
+        result.newest, Self.date(info.st_mtimespec), Self.date(info.st_birthtimespec))
+      if type == S_IFREG {
+        result.newest = max(result.newest, Self.date(info.st_atimespec))
+        result.bytes += Int64(info.st_size)
       }
       if result.newest >= cutoff { return result }
-      if type == .typeDirectory {
-        pending += try manager.contentsOfDirectory(at: file, includingPropertiesForKeys: nil)
-      } else if type != .typeRegular && type != .typeSymbolicLink {
+      if type == S_IFDIR {
+        let children = try manager.contentsOfDirectory(at: file, includingPropertiesForKeys: nil)
+        // 先检查直接保留标记，避免遍历大子树后才遇到 .keep。
+        if children.contains(where: {
+          let name = $0.lastPathComponent
+          return name == ".keep" || name == ".pimac-keep" || name.hasSuffix(".lock")
+            || name.hasSuffix(".pid")
+        }) {
+          result.preserved = true
+          return result
+        }
+        pending += children
+      } else if type != S_IFREG && type != S_IFLNK {
         result.preserved = true
         return result
       }
     }
     return result
+  }
+
+  private static func date(_ time: timespec) -> Date {
+    Date(timeIntervalSince1970: Double(time.tv_sec) + Double(time.tv_nsec) / 1_000_000_000)
   }
 
   private func trackedPaths(root: URL) throws -> [URL] {

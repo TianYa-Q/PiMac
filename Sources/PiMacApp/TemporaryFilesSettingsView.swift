@@ -30,7 +30,7 @@ struct TemporaryFilesSettingsView: View {
       Toggle(isOn: $store.automaticCleanup) {
         VStack(alignment: .leading, spacing: 4) {
           Text("自动清理")
-          Text("PiMac 运行期间每小时检查，统一管理 \(projectCount) 个工作区。")
+          Text("PiMac 运行期间每天检查一次，统一管理 \(projectCount) 个工作区。")
             .font(.caption).foregroundStyle(.secondary)
         }
       }

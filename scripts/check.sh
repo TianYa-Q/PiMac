@@ -2,11 +2,11 @@
 set -eu
 cd "$(dirname "$0")/.."
 # esbuild 的 Go 工作线程也受限；仅串行启动测试文件不足以限制打包阶段。
-export GOMAXPROCS=2
+export GOMAXPROCS=1
 ./scripts/lint.sh
 python3 -m unittest discover -s Tests/DevWatcher -p 'test_*.py'
 ./scripts/prepare-t3-server.sh
-swift test --jobs 2 --no-parallel
+swift test --jobs 1 --no-parallel
 npm --prefix extensions/account-usage run prepublishOnly
 npm --prefix extensions/account-usage test
 node scripts/test-fast-extension.mjs

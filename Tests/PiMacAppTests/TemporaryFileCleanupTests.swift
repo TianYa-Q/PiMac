@@ -264,6 +264,102 @@ struct TemporaryFileCleanupTests {
     #expect(store.records.count == 1)
   }
 
+  @Test func oversizedDirectoryDoesNotStarveLaterEntries() async throws {
+    let root = try fixture()
+    defer { try? dispose(root) }
+    let large = root.appendingPathComponent("tmp/a-large")
+    try manager.createDirectory(at: large, withIntermediateDirectories: true)
+    for index in 0..<8 {
+      try Data("old".utf8).write(to: large.appendingPathComponent("\(index).ts"))
+    }
+    let small = root.appendingPathComponent("tmp/z-small.ts")
+    try Data("small".utf8).write(to: small)
+    let limited = TemporaryFileCleaner(itemLimit: 4) { file in
+      try FileManager.default.moveItem(
+        at: file, to: root.appendingPathComponent(file.lastPathComponent))
+    }
+    let results = await limited.clean(
+      [TemporaryCleanupWorkspace(name: "Limit", directory: root)],
+      now: Date().addingTimeInterval(4 * 86400), protection: { _ in nil })
+    let result = try #require(results.first)
+    #expect(result.moved == 1)
+    #expect(result.errors.contains { $0.contains("a-large") })
+    #expect(result.completedAt == nil)
+    #expect(manager.fileExists(atPath: large.path))
+    #expect(!manager.fileExists(atPath: small.path))
+  }
+
+  @Test func nextPassResumesAfterWorkspaceBudgetIsExhausted() async throws {
+    let root = try fixture()
+    defer { try? dispose(root) }
+    let limited = TemporaryFileCleaner(scanBudget: 1) { file in
+      try FileManager.default.moveItem(
+        at: file, to: root.appendingPathComponent(file.lastPathComponent))
+      Thread.sleep(forTimeInterval: 1)
+    }
+    for name in ["a.ts", "b.ts"] {
+      try Data("old".utf8).write(to: root.appendingPathComponent("tmp/\(name)"))
+    }
+    let workspaces = [TemporaryCleanupWorkspace(name: "Resume", directory: root)]
+    let now = Date().addingTimeInterval(4 * 86400)
+    let first = await limited.clean(workspaces, now: now, protection: { _ in nil })
+    #expect(first.first?.moved == 1)
+    #expect(first.first?.completedAt == nil)
+    // 重新放回排在最前的旧项；下一轮必须从 b 开始，而非反复扫描 a。
+    try manager.moveItem(
+      at: root.appendingPathComponent("a.ts"), to: root.appendingPathComponent("tmp/a.ts"))
+    let second = await limited.clean(workspaces, now: now, protection: { _ in nil })
+    #expect(second.first?.items == ["b.ts"])
+    #expect(manager.fileExists(atPath: root.appendingPathComponent("tmp/a.ts").path))
+  }
+
+  @Test func directKeepMarkerAvoidsScanningLargeSubtree() async throws {
+    let root = try fixture()
+    defer { try? dispose(root) }
+    let task = root.appendingPathComponent("tmp/kept")
+    try manager.createDirectory(at: task, withIntermediateDirectories: true)
+    try Data().write(to: task.appendingPathComponent(".keep"))
+    for index in 0..<8 {
+      try Data("old".utf8).write(to: task.appendingPathComponent("\(index).ts"))
+    }
+    let results = await TemporaryFileCleaner(itemLimit: 1).clean(
+      [TemporaryCleanupWorkspace(name: "Keep", directory: root)],
+      now: Date().addingTimeInterval(4 * 86400), protection: { _ in nil })
+    #expect(results.first?.moved == 0)
+    #expect(results.first?.retained == 1)
+    #expect(results.first?.errors.isEmpty == true)
+    #expect(results.first?.completedAt != nil)
+  }
+
+  @MainActor @Test func automaticCleanupWaitsADayEvenAfterIncompleteCheck() async throws {
+    let root = try fixture()
+    defer { try? dispose(root) }
+    for (complete, age) in [
+      (false, 86_300.0), (true, 86_300.0), (false, 86_500.0), (true, 86_500.0),
+    ] {
+      let suite = "cleanup-daily-\(UUID().uuidString)"
+      let defaults = try #require(UserDefaults(suiteName: suite))
+      defer { defaults.removePersistentDomain(forName: suite) }
+      let date = Date().addingTimeInterval(-age)
+      let due = age >= 86_400
+      var result = TemporaryCleanupResult(name: "Fixture", path: root.path)
+      result.completedAt = complete ? date : nil
+      defaults.set(
+        try JSONEncoder().encode([
+          TemporaryCleanupRecord(id: UUID(), date: date, results: [result])
+        ]), forKey: "temporaryFiles.history")
+      let store = TemporaryFilesStore(defaults: defaults, cleaner: cleaner(root))
+      store.run(
+        workspaces: [TemporaryCleanupWorkspace(name: "Fixture", directory: root)],
+        manually: false, protection: { _ in nil })
+      #expect(store.isRunning == due)
+      let deadline = Date().addingTimeInterval(10)
+      while store.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+      #expect(!store.isRunning)
+      #expect(store.records.count == (due ? 2 : 1))
+    }
+  }
+
   @Test func directorySwappedAtFinalGateCannotEscapeTmp() async throws {
     let root = try fixture()
     defer { try? dispose(root) }

@@ -11,7 +11,7 @@ description: 在 PiMac 仓库中开发、排障、重构、测试或发布时先
 
 PiMac 是软件开发管理的统筹平台，不只是聊天客户端。跨项目的公共能力统一在 PiMac 管理，项目仅保留业务与技术差异，不分散维护同类清理工具。
 
-临时文件管理入口为「设置 → 开发管理」；生命周期遵循全局 `development-workflow`。实现由 `TemporaryFileCleaner.swift`、`TemporaryFilesStore.swift` 和 `TemporaryFilesSettingsView.swift` 维护，`WorkspaceModel` 提供实时项目/worktree 与任务保护，应用每分钟检查是否到达每小时的整理周期；关闭应用后不另起守护进程。相关回归为 `TemporaryFileCleanupTests`。策略默认保留 3 天，所有移动进入系统废纸篓；无法确认安全的内容必须保留并在 UI 显示原因。
+临时文件管理入口为「设置 → 开发管理」；生命周期遵循全局 `development-workflow`。实现由 `TemporaryFileCleaner.swift`、`TemporaryFilesStore.swift` 和 `TemporaryFilesSettingsView.swift` 维护，`WorkspaceModel` 提供实时项目/worktree 与任务保护，应用每分钟检查是否到达每日（24 小时）的整理周期；跳过或未完成也不进行分钟级重试；关闭应用后不另起守护进程。相关回归为 `TemporaryFileCleanupTests`。策略默认保留 3 天，所有移动进入系统废纸篓；无法确认安全的内容必须保留并在 UI 显示原因。
 
 ## 会话关联任务日志
 
@@ -42,5 +42,6 @@ python3 scripts/dev.py --begin-edit --label 'short task description'
 ## UI 和验证
 
 - UI 设计、修改、截图对比与交付统一加载全局 `ui-design`；涉及 SwiftUI/AppKit/WebKit 原生捕获时，再读 [PiMac 原生捕获接入](references/native-ui-capture.md)，只维护本项目脚本和 fixture 模板，不再单独维护 UI 设计/对比 skill。
+- 测试不允许并发：一次只运行一个验证任务；Swift 编译与测试统一使用 `--jobs 1 --no-parallel`（包括隔离截图），Node 使用 `--test-concurrency=1`，Go/esbuild 使用 `GOMAXPROCS=1`。不能把单个测试命令内部的并发编译漏掉。
 - 相关 Swift/Node/Python 检查按实际改动与现有入口选择，不把 ERP 的 Vue、Pinia、Electron 或 pnpm 检查套在本项目。
 - 真实原生视图、浏览器测试、运行中应用和上游 Server 的验证范围必须明确区分；不为获取截图重启正在工作的应用。

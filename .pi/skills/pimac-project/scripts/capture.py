@@ -72,7 +72,7 @@ log = output.with_suffix(".log")
 env = dict(os.environ, PIMAC_CAPTURE_FIXTURE=str(fixture), PIMAC_CAPTURE_OUTPUT=str(output))
 with log.open("w") as stream:
     result = subprocess.run(
-        ["swift", "test", "--filter", "PiMacNativeCaptureTests"],
+        ["swift", "test", "--jobs", "1", "--no-parallel", "--filter", "PiMacNativeCaptureTests"],
         cwd=package, env=env, stdout=stream, stderr=subprocess.STDOUT, timeout=300)
 if result.returncode or not output.is_file():
     raise SystemExit(f"捕获失败，查看 {log}（exit={result.returncode}）")

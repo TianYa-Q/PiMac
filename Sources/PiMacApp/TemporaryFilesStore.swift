@@ -18,6 +18,7 @@ final class TemporaryFilesStore: ObservableObject {
   private let defaults: UserDefaults?
   private let cleaner: TemporaryFileCleaner
   private var task: Task<Void, Never>?
+  private static let automaticInterval: TimeInterval = 24 * 60 * 60
   private var nextAutomaticCheck = Date.distantPast
 
   init(defaults: UserDefaults?, cleaner: TemporaryFileCleaner = TemporaryFileCleaner()) {
@@ -27,7 +28,9 @@ final class TemporaryFilesStore: ObservableObject {
     if let data = defaults?.data(forKey: "temporaryFiles.history") {
       do {
         records = try JSONDecoder().decode([TemporaryCleanupRecord].self, from: data)
-        if let last = records.first { nextAutomaticCheck = last.date.addingTimeInterval(3600) }
+        if let last = records.first {
+          nextAutomaticCheck = last.date.addingTimeInterval(Self.automaticInterval)
+        }
       } catch { errorMessage = "清理记录无法读取：\(error.localizedDescription)" }
     }
   }
@@ -41,7 +44,6 @@ final class TemporaryFilesStore: ObservableObject {
     else { return }
     isRunning = true
     errorMessage = ""
-    nextAutomaticCheck = Date().addingTimeInterval(3600)
     task = Task { [weak self, cleaner] in
       let results = await cleaner.clean(workspaces, now: Date()) { [weak self] directory in
         if Task.isCancelled { return "整理已停止，剩余内容保留" }
@@ -49,7 +51,11 @@ final class TemporaryFilesStore: ObservableObject {
         return await protection(directory)
       }
       guard let self else { return }
-      self.records.insert(TemporaryCleanupRecord(id: UUID(), date: Date(), results: results), at: 0)
+      // 无论完整检查、跳过还是失败，都按一天间隔调度；手动清理不受周期限制。
+      let finished = Date()
+      self.nextAutomaticCheck = finished.addingTimeInterval(Self.automaticInterval)
+      self.records.insert(
+        TemporaryCleanupRecord(id: UUID(), date: finished, results: results), at: 0)
       self.records = Array(self.records.prefix(20))
       do {
         let data = try JSONEncoder().encode(self.records)
