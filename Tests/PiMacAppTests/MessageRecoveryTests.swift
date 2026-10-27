@@ -41,8 +41,18 @@ struct MessageRecoveryTests {
     var onDispatch: (() throws -> Void)?
     var pauseMessage = false
     var pendingMessage: CheckedContinuation<Void, Never>?
+    var inspectionError: Error?
+    var inspectionFailures = 0
+    var inspections = 0
 
-    func recoveryEnvironmentID() async throws -> String { environment }
+    func recoveryEnvironmentID() async throws -> String {
+      inspections += 1
+      if inspectionFailures > 0 {
+        inspectionFailures -= 1
+        throw inspectionError ?? URLError(.timedOut)
+      }
+      return environment
+    }
     func recoveryProjectID(_ url: URL) async throws -> String? { project }
     func ensureProject(_ url: URL) async throws -> String { project }
     func recoverySnapshot(threadID: String) async throws -> [String: Any] {
@@ -84,6 +94,92 @@ struct MessageRecoveryTests {
       }
       return [:]
     }
+  }
+
+  @Test func activeSubmissionAutomaticallyRecoversPreflightAndLostRepliesWithFrozenIdentity()
+    async throws
+  {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    transport.inspectionFailures = 1
+    transport.dropCreate = true
+    transport.dropDispatch = true
+    transport.hideMessages = true
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let record = try save(store, root: root)
+    #expect(await coordinator.deliver(record.id, retryDelays: [.zero, .zero, .zero]))
+    #expect(transport.inspections == 4)
+    #expect(transport.commands.count == 4)
+    #expect(transport.commands[0] == transport.commands[1])
+    #expect(transport.commands[2] == transport.commands[3])
+    #expect(transport.runs == 1)
+    #expect(coordinator.activeThreads.isEmpty)
+  }
+
+  @Test func automaticRecoveryIsBoundedAndDoesNotRetryPermanentFailures() async throws {
+    let root = try directory()
+    for error: Error in [
+      URLError(.timedOut), T3DesktopClient.ClientError.unauthorized,
+      MessageRecoveryCoordinator.RecoveryError.environmentChanged,
+      T3DesktopClient.HTTPFailure(status: 403),
+    ] {
+      let store = MessageOutboxStore()
+      let transport = Transport()
+      transport.inspectionFailures = 10
+      transport.inspectionError = error
+      let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+      let record = try save(store, root: root)
+      #expect(await coordinator.deliver(record.id, retryDelays: [.zero, .zero]) == false)
+      #expect(transport.inspections == (error is URLError ? 3 : 1))
+      #expect(transport.commands.isEmpty)
+      #expect(store.message(record.id)?.state == .unknown)
+      #expect(coordinator.activeThreads.isEmpty)
+    }
+  }
+
+  @Test func explicitRejectionAndUnfrozenAttachmentsNeverAutomaticallyReplay() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    transport.onDispatch = {
+      throw T3DesktopClient.RPCFailure(exit: ["_tag": "ModelUnavailableError"])
+    }
+    let rejected = try save(store, root: root)
+    #expect(await coordinator.deliver(rejected.id, retryDelays: [.zero]) == false)
+    #expect(store.message(rejected.id)?.state == .rejected)
+    #expect(transport.commands.count == 1)
+
+    transport.onDispatch = nil
+    transport.inspectionFailures = 1
+    let source = root.appendingPathComponent("attachment.txt")
+    try Data("original attachment".utf8).write(to: source)
+    let attachment = try save(
+      store, root: root, attachments: [PromptAttachment(url: source, mimeType: "text/plain")])
+    #expect(await coordinator.deliver(attachment.id, retryDelays: [.zero]) == false)
+    #expect(store.message(attachment.id)?.state == .unknown)
+    #expect(transport.commands.count == 1)
+    try store.validateAttachments(#require(store.message(attachment.id)))
+  }
+
+  @Test func cancellationDuringAutomaticBackoffPreservesInputAndReleasesThread() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    transport.inspectionFailures = 1
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let record = try save(store, root: root)
+    let task = Task { await coordinator.deliver(record.id, retryDelays: [.seconds(60)]) }
+    for _ in 0..<100 where store.message(record.id)?.state != .sending { await Task.yield() }
+    #expect(store.message(record.id)?.state == .sending)
+    #expect(await coordinator.deliver(record.id) == false)
+    #expect(await coordinator.check(record.id) == .blocked)
+    task.cancel()
+    #expect(await task.value == false)
+    #expect(store.message(record.id)?.state == .unknown)
+    #expect(coordinator.activeThreads.isEmpty)
+    #expect(transport.commands.isEmpty)
   }
 
   @Test func attachmentCopiesAndInFlightIdentitySurviveReloadAndCorruptionIsExplicit() throws {

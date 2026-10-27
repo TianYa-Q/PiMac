@@ -125,6 +125,41 @@ struct MessageRecoveryIntegrationTests {
     }
     #expect(prompts.count == 1, "真实 Provider 只能执行一次")
 
+    // 同一个真实 Server 上验证自动重试：回执丢失且快照滞后时，仍只运行一次。
+    let automatic = try reloaded.save(
+      prompt: #require(
+        AppModel.makePrompt("automatic recovery once", attachments: [], delivery: .followUp)),
+      messageID: UUID().uuidString, threadID: record.threadID, project: root,
+      selection: ["instanceId": "pi", "model": "test/model"], createsThread: false, context: "")
+    transport.loseReply = true
+    transport.hideMessages = true
+    #expect(await recovery.deliver(automatic.id, retryDelays: [.zero]))
+    #expect(
+      Array(transport.dispatchIDs.suffix(2)) == [
+        automatic.dispatchCommandID, automatic.dispatchCommandID,
+      ])
+    transport.hideMessages = false
+    try await wait {
+      let log = try String(
+        contentsOf: root.appendingPathComponent("fixture-rpc.ndjson"), encoding: .utf8)
+      return log.contains("automatic recovery once")
+    }
+    let automaticSnapshot = try await client.recoverySnapshot(threadID: record.threadID)
+    let automaticProjection = try #require(automaticSnapshot["projection"] as? [String: Any])
+    let automaticMessages = try #require(automaticProjection["messages"] as? [[String: Any]])
+    #expect(automaticMessages.filter { $0["id"] as? String == automatic.id }.count == 1)
+    let automaticRuns = try #require(automaticProjection["runs"] as? [[String: Any]])
+    #expect(automaticRuns.count == 2)
+    let automaticLog = try String(
+      contentsOf: root.appendingPathComponent("fixture-rpc.ndjson"), encoding: .utf8)
+    let automaticPrompts = try automaticLog.split(separator: "\n").map {
+      try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any]
+    }.filter {
+      $0["command"] as? String == "prompt"
+        && $0["message"] as? String == "automatic recovery once"
+    }
+    #expect(automaticPrompts.count == 1)
+
     let missingID = UUID().uuidString
     do {
       try await client.dispatch([

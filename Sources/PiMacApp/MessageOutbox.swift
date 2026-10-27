@@ -334,7 +334,7 @@ protocol MessageDeliveryTransport: AnyObject {
     async throws -> [[String: Any]]
 }
 
-/// 网络恢复仅核验；用户确认继续后，才以相同冻结命令重放官方幂等接口。
+/// 历史输入恢复需用户确认；本次主动提交可在短暂故障后以冻结命令有限重试。
 @MainActor
 final class MessageRecoveryCoordinator: ObservableObject {
   enum Check: Equatable { case accepted, ready, needsEditing, missing, blocked }
@@ -411,7 +411,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
     }
   }
 
-  func deliver(_ id: String) async -> Bool {
+  func deliver(_ id: String, retryDelays: [Duration] = []) async -> Bool {
     if let record = store.message(id), [.accepted, .delivered].contains(record.state) {
       return true
     }
@@ -421,11 +421,60 @@ final class MessageRecoveryCoordinator: ObservableObject {
     else { return false }
     activeThreads.insert(initial.threadID)
     defer { activeThreads.remove(initial.threadID) }
+    // 整个退避周期持有线程锁；只恢复本次主动提交，不扫描并执行历史积压输入。
+    for attempt in 0...retryDelays.count {
+      do {
+        return try await deliverAttempt(id)
+      } catch {
+        let record = store.message(id)
+        if record.map({ [.accepted, .delivered].contains($0.state) }) == true { return true }
+        let canRetry =
+          attempt < retryDelays.count && Self.isTransient(error)
+          && !Task.isCancelled && record?.state == .unknown
+          && (record?.attachments.isEmpty == true || record?.dispatchCommand != nil)
+        guard canRetry else { return false }
+        do {
+          try store.update(id) {
+            $0.state = .sending
+            $0.issue = "连接暂时异常，正在自动核验并恢复（\(attempt + 1)/\(retryDelays.count)）"
+          }
+          try await Task.sleep(for: retryDelays[attempt])
+        } catch {
+          try? store.update(id) {
+            guard $0.state == .sending else { return }
+            $0.state = .unknown
+            $0.issue = "自动恢复已中断；原稿已保留，请检查并恢复"
+          }
+          return false
+        }
+      }
+    }
+    return false
+  }
+
+  private static func isTransient(_ error: Error) -> Bool {
+    if let error = error as? URLError {
+      return [
+        .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+        .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable,
+      ].contains(error.code)
+    }
+    if let error = error as? T3DesktopClient.HTTPFailure {
+      return [408, 429, 502, 503, 504].contains(error.status)
+    }
+    return (error as? T3DesktopClient.ClientError) == .unavailable
+  }
+
+  private func deliverAttempt(_ id: String) async throws -> Bool {
     do {
+      try Task.checkCancellation()
       let checked = try await inspect(id)
       if checked == .accepted { return true }
       guard checked == .ready else { return false }
-      guard var record = store.message(id) else { return false }
+      guard var record = store.message(id), record.isVisible,
+        ![.draft, .conflict, .missing, .rejected].contains(record.state)
+      else { return false }
+      try Task.checkCancellation()
       try store.validateAttachments(record)
       let selection = try Self.object(record.selection)
       try store.update(id) {
@@ -484,7 +533,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
         }
         $0.issue = Self.issue(error)
       }
-      return store.message(id).map { [.accepted, .delivered].contains($0.state) } ?? false
+      throw error
     }
   }
 
@@ -505,6 +554,9 @@ final class MessageRecoveryCoordinator: ObservableObject {
       return "授权已失效，请恢复 Server 授权后再次检查"
     }
     if error is CocoaError { return "本地记录或附件无法读取/保存；原稿已保留，请检查文件权限与附件" }
+    if let error = error as? URLError {
+      return "连接异常（URL \(error.code.rawValue)）；原稿已保留，请检查并恢复"
+    }
     return "连接中断或结果未知；原稿已保留，请检查并恢复"
   }
 

@@ -550,7 +550,8 @@ final class AppModel: ObservableObject {
     submittedFromTurnID = lastTurnID
     let current = generation
     submissionTask = Task { [weak self] in
-      let success = await deliveryCoordinator.deliver(id)
+      let success = await deliveryCoordinator.deliver(
+        id, retryDelays: [.seconds(1), .seconds(3), .seconds(8)])
       completion(success)
       guard let self, self.generation == current else { return }
       self.submitting = false
