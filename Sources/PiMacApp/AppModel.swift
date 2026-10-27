@@ -64,10 +64,13 @@ final class AppModel: ObservableObject {
   @Published var attachments: [PromptAttachment] = []
   /// Server 队列与尚未确认的本地提交分开保存；确认后按消息 ID 原位交接。
   @Published private var serverQueuedPrompts: [ServerQueuedPrompt] = []
-  @Published private var pendingQueuedMessages: [ChatEntry] = []
+  private var pendingQueuedMessages: [ChatEntry] {
+    deliveryRecords.filter { $0.delivery == .followUp && $0.state != .draft }.map(\.entry)
+  }
+  private let deliveryUpdates = PassthroughSubject<Void, Never>()
   var queuedPromptUpdates: AnyPublisher<Void, Never> {
     Publishers.Merge(
-      $serverQueuedPrompts.map { _ in () }, $pendingQueuedMessages.map { _ in () }
+      $serverQueuedPrompts.map { _ in () }, deliveryUpdates.eraseToAnyPublisher()
     ).eraseToAnyPublisher()
   }
   var queuedPrompts: [ServerQueuedPrompt] {
@@ -103,8 +106,10 @@ final class AppModel: ObservableObject {
   private var generation = UUID()
   @Published private var submitting = false
   private var submissionTask: Task<Void, Never>?
-  /// 仅补齐尚未出现在 Server 快照中的本地消息，不写入持久化历史。
-  private var pendingSentMessages: [ChatEntry] = []
+  private(set) var deliveryCoordinator: MessageRecoveryCoordinator?
+  private var pendingSentMessages: [ChatEntry] {
+    deliveryRecords.filter { $0.delivery == .steer && $0.state != .draft }.map(\.entry)
+  }
   private var pendingSelection: [String: Any]?
   private var submittedFromTurnID: String?
   private var lastTurnID: String?
@@ -146,11 +151,16 @@ final class AppModel: ObservableObject {
   var showsStatusProgress: Bool { isBusy || isLoadingConfiguration }
   var isProcessRunning: Bool { server?.isConnected == true && threadID != nil }
   var isBusy: Bool {
-    isStreaming || isCompacting || submitting || awaitingAgentStart || pendingSelection != nil
+    isStreaming || isCompacting || submitting || isCheckingDelivery
+      || deliveryCoordinator?.activeThreads.contains(threadID ?? "") == true || awaitingAgentStart
+      || pendingSelection != nil
       || codexRotationInFlight || isChangingFastMode || isManagingAccounts
       || extensionUI?.hasPendingDialog(for: self) == true
   }
-  var canRestartSafely: Bool { !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty }
+  var canRestartSafely: Bool {
+    !isBusy && !isLoadingConfiguration && queuedPrompts.isEmpty && recoveryRecords.isEmpty
+      && deliveryStorageFailure == nil
+  }
   var canReloadModelList: Bool { server?.isConnected == true && !isBusy }
   var modelContextWindows: [String: Int] { server?.modelContextWindows ?? [:] }
   private let disconnectedTextGenerationModels = TextGenerationModelStore()
@@ -170,7 +180,15 @@ final class AppModel: ObservableObject {
     guard connectionState == .connected else { return "会话尚未就绪，请重新打开聊天" }
     if isCompacting { return "正在压缩上下文，请完成后发送" }
     if codexRotationInFlight { return "正在切换账号，请稍后发送" }
-    if submitting { return "正在提交上一条消息，请稍后发送" }
+    if submitting || deliveryCoordinator?.activeThreads.contains(threadID ?? "") == true {
+      return "正在处理上一条投递，请稍后发送"
+    }
+    if deliveryCoordinator?.store.isReadOnly == true {
+      return "发件箱记录无法读取，请先处理保存错误；草稿已保留"
+    }
+    if recoveryRecords.contains(where: { $0.state != .draft }) {
+      return "有待恢复的输入，请先检查并恢复；新草稿已保留"
+    }
     if awaitingAgentStart { return "正在等待 Server 确认任务启动，请稍后发送" }
     if pendingSelection != nil { return "正在保存模型设置，请稍后发送" }
     if isManagingAccounts { return "请先完成账号管理操作" }
@@ -243,8 +261,15 @@ final class AppModel: ObservableObject {
     }
   }
 
-  func attach(to server: T3DesktopClient) {
+  func attach(to server: T3DesktopClient, deliveries: MessageRecoveryCoordinator? = nil) {
     self.server = server
+    let coordinator =
+      deliveries ?? MessageRecoveryCoordinator(store: MessageOutboxStore(), transport: server)
+    deliveryCoordinator = coordinator
+    deliveryObservation = coordinator.store.$messages.combineLatest(coordinator.store.$failure)
+      .sink { [weak self] _, _ in
+        Task { @MainActor [weak self] in self?.refreshDeliveryPresentation() }
+      }
     // 设置页也可在断线/重连时保持打开；不能依赖会话消息变化才刷新可编辑状态。
     serverConnectionObservation = server.$isConnected.combineLatest(server.$status)
       .sink { [weak self, weak server] ready, _ in
@@ -273,9 +298,11 @@ final class AppModel: ObservableObject {
     answeredDialogIDs.removeAll()
     isManagingSessionAccounts = false
     serverQueuedPrompts.removeAll()
-    pendingQueuedMessages.removeAll()
     goalState = .none
-    pendingSentMessages.removeAll()
+    displayedOutboxIDs = []
+    isCheckingDelivery = false
+    recoveryReady = false
+    recoveryChecked = false
     submissionTask = nil
     submitting = false
     awaitingAgentStart = false
@@ -291,6 +318,9 @@ final class AppModel: ObservableObject {
       threadID: path.flatMap { Self.threadID(from: $0) })
     enterSkillWorkspace()
     pendingThreadPath = path
+    if currentSessionPath != (path ?? "") { messages = [] }
+    currentSessionPath = path ?? ""
+    refreshDeliveryPresentation()
     // 已连接时的新聊天只是本地草稿，无须再排队等待一次异步连接流程。
     // 仍使用实时模型目录校验，不能把磁盘缓存当作发送许可。
     if path == nil, server?.isConnected == true {
@@ -389,7 +419,6 @@ final class AppModel: ObservableObject {
     extensionUI?.removeRequests(from: self)
     isManagingSessionAccounts = false
     serverQueuedPrompts.removeAll()
-    pendingQueuedMessages.removeAll()
     goalState = .none
     generation = UUID()
     connectTask?.cancel()
@@ -423,11 +452,7 @@ final class AppModel: ObservableObject {
     }
     guard let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
     else { return }
-    // 先更新界面，再进行附件上传和网络请求；新输入不会被异步完成回调清空。
-    composerText = ""
-    let ids = Set(prompt.attachments.map(\.id))
-    attachments.removeAll { ids.contains($0.id) }
-    submit(prompt) { _ in }
+    submit(prompt, clearComposer: true) { _ in }
   }
   /// 新目标不要求已有 Goal 快照；复用扩展原有入口，保持 composer 草稿完全独立。
   @discardableResult
@@ -462,130 +487,217 @@ final class AppModel: ObservableObject {
     submit(prompt, messageID: messageID, completion: completion)
   }
   private func submit(
-    _ prompt: QueuedPrompt, messageID: String? = nil, completion: @escaping (Bool) -> Void
+    _ prompt: QueuedPrompt, messageID: String? = nil, clearComposer: Bool = false,
+    completion: @escaping (Bool) -> Void
   ) {
-    guard let server, let projectURL, !submitting else {
+    guard let server, let projectURL, let deliveryCoordinator, !submitting else {
+      completion(false)
+      return
+    }
+    let id = messageID ?? UUID().uuidString
+    let target = threadID ?? UUID().uuidString
+    do {
+      _ = try deliveryCoordinator.store.save(
+        prompt: prompt, messageID: id, threadID: target, project: projectURL,
+        selection: modelSelection, createsThread: threadID == nil, context: recoveryContext,
+        replacingDraftID: clearComposer
+          ? deliveryRecords.first(where: { $0.state == .draft })?.id : nil)
+    } catch {
+      statusText = deliveryCoordinator.store.failure ?? "输入保存失败，尚未发送；草稿已保留"
+      completion(false)
+      return
+    }
+    // 持久化交接完成后才清理本次输入，异步结果不会清空后来编辑的草稿。
+    if clearComposer {
+      composerText = ""
+      let ids = Set(prompt.attachments.map(\.id))
+      attachments.removeAll { ids.contains($0.id) }
+    }
+    observeThread(target, on: server)
+    refreshDeliveryPresentation()
+    performDelivery(id, completion: completion)
+  }
+
+  private func performDelivery(_ id: String, completion: @escaping (Bool) -> Void) {
+    guard let deliveryCoordinator else {
       completion(false)
       return
     }
     submitting = true
-    let isSteering = isStreaming && prompt.delivery == .steer
-    let isQueueing = prompt.delivery == .followUp
-    awaitingAgentStart = !isSteering && !isQueueing
+    recoveryChecked = false
+    awaitingAgentStart = false
     submittedFromTurnID = lastTurnID
-    let selection = modelSelection
-    let existingThreadID = threadID
-    let targetThreadID = existingThreadID ?? UUID().uuidString
-    let submittedMessageID = messageID ?? UUID().uuidString
     let current = generation
-    let entry = ChatEntry(
-      id: submittedMessageID, kind: .user, title: "你", text: prompt.rpcText,
-      attachments: prompt.attachments.filter(\.isImage))
-    if isQueueing {
-      pendingQueuedMessages.append(entry)
-    } else {
-      pendingSentMessages.append(entry)
-      messages.append(entry)
-    }
-    // 身份和正文在任何上传/网络等待前一并发布，让新会话立即进入侧栏。
-    if existingThreadID == nil { currentSessionPath = "t3:\(targetThreadID)" }
     submissionTask = Task { [weak self] in
-      guard let self else { return }
-      defer {
-        if self.generation == current {
-          self.submitting = false
-          self.submissionTask = nil
-        }
-      }
-      do {
-        let encoded = try await PromptImagePayload.encode(prompt.attachments)
-        guard self.generation == current, !Task.isCancelled else {
-          completion(false)
-          return
-        }
-        let images = encoded.map(\.json)
-        let id: String
-        if let existingThreadID {
-          id = existingThreadID
-        } else {
-          let projectID = try await server.ensureProject(projectURL)
-          guard self.generation == current else {
-            completion(false)
-            return
-          }
-          id = targetThreadID
-          // 创建响应丢失时保留同一身份，不自动另建线程或重发消息。
-          try await server.dispatch([
-            "type": "thread.create", "threadId": id, "projectId": projectID,
-            "title": "新任务", "modelSelection": selection, "runtimeMode": "full-access",
-            "interactionMode": "default", "branch": NSNull(), "worktreePath": NSNull(),
-          ])
-          guard self.generation == current else {
-            completion(false)
-            return
-          }
-          self.observeThread(id, on: server)
-        }
-        let appended =
-          if isQueueing, existingThreadID != nil {
-            try await server.appendToQueuedPrompt(
-              threadID: id, text: prompt.rpcText, images: images, modelSelection: selection)
-          } else {
-            false
-          }
-        if !appended {
-          try await server.dispatch(
-            [
-              "type": "message.dispatch", "threadId": id,
-              "modelSelection": selection,
-              "messageId": submittedMessageID, "text": prompt.rpcText,
-              "attachments": try await server.persistAttachments(
-                images, threadID: id, messageID: submittedMessageID),
-              "dispatchMode": ["type": "queue_after_active"],
-            ].merging(isQueueing ? [:] : ["deliveryIntent": "steer"]) { _, new in new })
-        }
-        guard self.generation == current else {
-          completion(true)
-          return
-        }
-        if appended {
-          // 编辑复用原消息身份；新的本地回显不会收到同 ID 的 Server 消息，确认后主动移交。
-          self.pendingQueuedMessages.removeAll { $0.id == submittedMessageID }
-        }
-        completion(true)
-        self.statusText =
-          appended
-          ? "已合并到 T3 Server 队列第一条。"
-          : isSteering
-            ? "已提交插入消息，当前工具调用结束后处理。"
-            : isQueueing ? "已提交到 T3 Server 队列。" : "已提交到 T3 Server"
-        // Server owns initial naming, including first messages sent from mobile.
-      } catch {
-        guard self.generation == current else {
-          completion(false)
-          return
-        }
-        self.awaitingAgentStart = false
-        // 网络失败可能发生在 Server 接收之后：保留原消息 ID，不自动重发。
-        // 后续权威快照若包含该 ID，会自然替换这条未确认消息。
-        for index in self.pendingQueuedMessages.indices
-        where self.pendingQueuedMessages[index].id == submittedMessageID {
-          self.pendingQueuedMessages[index].isError = true
-        }
-        for index in self.pendingSentMessages.indices
-        where self.pendingSentMessages[index].id == submittedMessageID {
-          self.pendingSentMessages[index].title = "你 · 提交未确认"
-          self.pendingSentMessages[index].isError = true
-          if let visible = self.messages.firstIndex(where: { $0.id == submittedMessageID }) {
-            self.messages[visible] = self.pendingSentMessages[index]
-          }
-        }
-        completion(false)
-        self.statusText = "提交未确认；请检查会话后再操作，不会自动重发。"
-        server.requestRefresh()
-      }
+      let success = await deliveryCoordinator.deliver(id)
+      completion(success)
+      guard let self, self.generation == current else { return }
+      self.submitting = false
+      self.submissionTask = nil
+      self.statusText = deliveryCoordinator.store.message(id)?.issue ?? ""
+      self.refreshDeliveryPresentation()
+      self.server?.requestRefresh()
     }
   }
+
+  var deliveryRecords: [OutboxMessage] {
+    guard let threadID, let projectURL else { return [] }
+    return deliveryCoordinator?.store.records(threadID: threadID, project: projectURL) ?? []
+  }
+  var recoveryRecords: [OutboxMessage] {
+    deliveryRecords.filter {
+      $0.state.needsRecovery || ($0.state == .accepted && connectionState != .connected)
+    }.sorted { ($0.state == .draft ? 1 : 0) < ($1.state == .draft ? 1 : 0) }
+  }
+  var deliveryStorageFailure: String? { deliveryCoordinator?.store.failure }
+  @Published private(set) var isCheckingDelivery = false
+  @Published private(set) var recoveryReady = false
+  @Published private(set) var recoveryChecked = false
+  private var deliveryObservation: AnyCancellable?
+  private var displayedOutboxIDs: Set<String> = []
+  private var restoredDeliveryDrafts: Set<String> = []
+
+  private var recoveryContext: String {
+    let ids = Set(deliveryRecords.map(\.id))
+    return messages.filter {
+      [.user, .assistant, .compaction].contains($0.kind) && !ids.contains($0.id)
+    }.map { "\($0.kind == .user ? "用户" : "助手")：\($0.text)" }.joined(separator: "\n\n")
+  }
+
+  private func refreshDeliveryPresentation() {
+    if let draft = deliveryRecords.first(where: { $0.state == .draft }),
+      restoredDeliveryDrafts.insert(draft.id).inserted, !hasUnsubmittedInput
+    {
+      composerText = draft.text
+      attachments = draft.attachments.map(\.attachment)
+    }
+    let pending = pendingSentMessages
+    messages.removeAll { displayedOutboxIDs.contains($0.id) }
+    let visibleIDs = Set(messages.map(\.id))
+    messages.append(contentsOf: pending.filter { !visibleIDs.contains($0.id) })
+    messages.sort { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
+    displayedOutboxIDs = Set(pending.map(\.id))
+    deliveryUpdates.send()
+    objectWillChange.send()
+  }
+
+  func checkDeliveryRecovery() {
+    guard !isCheckingDelivery, !submitting, let deliveryCoordinator else { return }
+    isCheckingDelivery = true
+    recoveryReady = false
+    recoveryChecked = false
+    let ids = recoveryRecords.map(\.id)
+    let current = generation
+    Task { [weak self] in
+      var ready = false
+      var reachable = false
+      for id in ids {
+        let result = await deliveryCoordinator.check(id)
+        if result == .ready { ready = true }
+        if [.ready, .accepted, .needsEditing].contains(result) { reachable = true }
+      }
+      guard let self, self.generation == current else { return }
+      self.isCheckingDelivery = false
+      self.recoveryChecked = true
+      self.recoveryReady = ready && !self.recoveryRecords.contains { $0.state == .missing }
+      if reachable, let server = self.server, let threadID = self.threadID {
+        self.observeThread(threadID, on: server)
+        self.connectionState = .connected
+      }
+      self.refreshDeliveryPresentation()
+      self.server?.requestRefresh()
+    }
+  }
+
+  func continueDeliveryRecovery() {
+    guard recoveryReady, !isBusy, let first = recoveryRecords.first, let server else { return }
+    recoveryReady = false
+    observeThread(first.threadID, on: server)
+    connectionState = .connected
+    isLoadingConfiguration = false
+    performDelivery(first.id) { _ in }
+  }
+
+  var migrationPreview: String {
+    MessageOutboxStore.migrationText(
+      recoveryRecords,
+      context: recoveryRecords.max { $0.context.count < $1.context.count }?.context ?? "")
+  }
+
+  func migrateDeliveryRecovery() {
+    guard !submitting, !isCheckingDelivery, !isBusy, let deliveryCoordinator, let server else {
+      return
+    }
+    do {
+      let target = try deliveryCoordinator.store.migrate(recoveryRecords)
+      // 目标与来源映射已原子保存，退出后仍从同一迁移目标继续。
+      observeThread(target.threadID, on: server)
+      messages = []
+      displayedOutboxIDs = []
+      connectionState = .connected
+      recoveryReady = false
+      refreshDeliveryPresentation()
+      performDelivery(target.id) { _ in }
+    } catch { statusText = MessageRecoveryCoordinator.issue(error) }
+  }
+
+  func retryDeliveryStorage() {
+    guard !isBusy, let store = deliveryCoordinator?.store else { return }
+    do {
+      try store.retryPersistence()
+      statusText = store.failure ?? "本地保存已恢复；可继续发送或检查待恢复输入"
+      refreshDeliveryPresentation()
+    } catch { statusText = store.failure ?? "本地保存仍不可用，原稿已保留" }
+  }
+
+  func stopDeliveryRecovery() {
+    guard !isBusy, let first = recoveryRecords.first, let store = deliveryCoordinator?.store else {
+      return
+    }
+    do {
+      try store.update(first.id) { $0.state = .dismissed }
+      statusText = "已停止本地恢复，记录和附件仍保留；没有取消 Server 任务"
+      refreshDeliveryPresentation()
+    } catch { statusText = MessageRecoveryCoordinator.issue(error) }
+  }
+
+  func exportDeliveryRecovery() {
+    guard let store = deliveryCoordinator?.store, !recoveryRecords.isEmpty else { return }
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.canCreateDirectories = true
+    panel.prompt = "导出到此处"
+    guard panel.runModal() == .OK, let destination = panel.url else { return }
+    do {
+      let folder = try store.export(recoveryRecords, to: destination)
+      NSWorkspace.shared.activateFileViewerSelecting([folder])
+      statusText = "原稿与保留附件已导出；没有重发或取消旧请求"
+    } catch { statusText = "导出失败，请检查目标目录权限；本机原记录仍保留" }
+  }
+
+  var canTakeBackDeliveryDraft: Bool {
+    !isBusy && !hasUnsubmittedInput && connectionState == .connected
+      && recoveryRecords.first.map { $0.state != .missing } == true
+  }
+
+  func takeBackDeliveryDraft() {
+    guard canTakeBackDeliveryDraft,
+      let first = recoveryRecords.first, let store = deliveryCoordinator?.store
+    else { return }
+    do {
+      try store.update(first.id) {
+        $0.state = .draft
+        $0.issue = "原稿已取回并保留备份；重新发送前请核验旧请求是否已执行"
+      }
+      composerText = first.text
+      attachments = first.attachments.map(\.attachment)
+      statusText = "原稿已取回；这不会撤销旧请求，重新发送前请核验是否已执行"
+      recoveryReady = false
+      refreshDeliveryPresentation()
+    } catch { statusText = MessageRecoveryCoordinator.issue(error) }
+  }
+
   func abort() {
     guard let id = threadID, let runID = lastTurnID, let server else { return }
     let current = generation
@@ -847,9 +959,13 @@ final class AppModel: ObservableObject {
       (thread["queuedMessages"] as? [[String: Any]] ?? []).compactMap {
         $0["messageId"] as? String ?? $0["id"] as? String
       })
-    pendingSentMessages.removeAll { confirmedIDs.contains($0.id) }
-    pendingQueuedMessages.removeAll { confirmedIDs.contains($0.id) }
-    entries.append(contentsOf: pendingSentMessages)
+    do {
+      if let threadID {
+        try deliveryCoordinator?.store.acknowledge(threadID: threadID, messageIDs: confirmedIDs)
+      }
+    } catch { statusText = "消息已收到，但本地交接保存失败；请检查发件箱" }
+    entries.append(contentsOf: pendingSentMessages.filter { !confirmedIDs.contains($0.id) })
+    displayedOutboxIDs = Set(pendingSentMessages.map(\.id))
     entries.append(contentsOf: ChatEntry.groupingToolEntries(Array(toolEntries.values)))
     entries.sort { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
     if messages != entries { messages = entries }

@@ -1441,6 +1441,7 @@ struct ContentView: View {
 
   private var composer: some View {
     VStack(spacing: 8) {
+      MessageRecoveryBar(app: app)
       ThreadGoalView(
         state: app.goalState, canControl: app.canSubmitPrompt && !app.isBusy,
         onCommand: app.sendGoalCommand)

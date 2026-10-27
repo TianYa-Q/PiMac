@@ -452,23 +452,22 @@ struct T3DesktopTests {
     #expect(model.queueHeld)
     #expect(model.queuedPrompts.count == 1)
     #expect(!model.messages.contains { $0.text == "Reply: must-remain-queued" })
-    // 附件读取失败也保留可编辑的原消息，并明确标记未确认，不丢失新草稿。
+    // 附件无法导入时根本不提交：原稿留在输入框，不能制造一条假的未确认消息。
     model.composerText = "missing-image"
     model.attachments = [
       PromptAttachment(
         url: root.appendingPathComponent("missing.png"), mimeType: "image/png")
     ]
+    let previousIDs = model.messages.map(\.id)
     model.sendPrompt()
-    let failedID = try #require(model.messages.last?.id)
-    #expect(model.messages.last?.text == "missing-image")
-    #expect(model.messages.last?.attachments.count == 1)
+    #expect(model.composerText == "missing-image")
+    #expect(model.attachments.count == 1)
+    #expect(model.messages.map(\.id) == previousIDs)
+    #expect(model.deliveryStorageFailure != nil)
+    #expect(model.statusText.contains("尚未发送"))
     model.composerText = "new draft"
-    for _ in 0..<100 where !model.canSubmitPrompt {
-      try await Task.sleep(for: .milliseconds(10))
-    }
-    #expect(model.messages.first { $0.id == failedID }?.isError == true)
+    await Task.yield()
     #expect(model.composerText == "new draft")
-    #expect(model.statusText.contains("提交未确认"))
     // Optional LAN transport never changes the desktop's loopback Server.
     #expect(service.serverURL?.host == "127.0.0.1")
     let shell = try await client.request("/api/orchestration/shell")

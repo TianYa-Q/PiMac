@@ -49,18 +49,26 @@ final class WorkspaceModel: ObservableObject {
     }
     guard !settled else { return sessions }
     // shell 到达后按线程身份自然交接；旧 shell 不能吞掉刚点击发送的会话。
-    let local = tabs.compactMap { tab -> SessionItem? in
-      guard let session = tab.model.locallySubmittedSession,
-        let id = tab.model.threadID, server.thread(id) == nil,
-        !pendingSettlementPaths.contains(session.path),
-        projectFilterPath == nil || tab.model.projectURL?.path == projectFilterPath
+    var seen: Set<String> = []
+    let local = deliveries.store.messages.compactMap { record -> SessionItem? in
+      let path = "t3:\(record.threadID)"
+      guard record.isVisible, server.thread(record.threadID) == nil,
+        !pendingSettlementPaths.contains(path),
+        projectFilterPath == nil || record.projectPath == projectFilterPath,
+        seen.insert(path).inserted
       else { return nil }
-      return session
+      return SessionItem(
+        path: path, title: String(record.text.prefix(60)), modifiedAt: record.createdAt)
     }.sorted { $0.modifiedAt > $1.modifiedAt }
     return local + sessions
   }
 
   func project(forSessionPath path: String) -> WorkspaceProject? {
+    if let id = AppModel.threadID(from: path),
+      let record = deliveries.store.messages.first(where: { $0.threadID == id && $0.isVisible })
+    {
+      return WorkspaceProject(url: URL(fileURLWithPath: record.projectPath))
+    }
     if let model = tabs.first(where: { $0.model.locallySubmittedSession?.path == path })?.model,
       let url = model.projectURL
     {
@@ -110,6 +118,8 @@ final class WorkspaceModel: ObservableObject {
   private var remoteSubmissionHolds: Set<ObjectIdentifier> = []
   private let persistsState: Bool
   private let draftDefaults: UserDefaults?
+  let deliveries: MessageRecoveryCoordinator
+  private var deliveryObservation: AnyCancellable?
   private var shellLoaded = false
   private var pendingCompletionVisits: Set<String> = []
   @Published private(set) var sessionCatalogRevision = 0
@@ -117,9 +127,17 @@ final class WorkspaceModel: ObservableObject {
 
   init(
     telegram: TelegramControl? = nil, restoreUserState: Bool = true,
-    server client: T3DesktopClient? = nil, draftDefaults: UserDefaults? = nil
+    server client: T3DesktopClient? = nil, draftDefaults: UserDefaults? = nil,
+    outboxDirectory: URL? = nil
   ) {
-    self.server = client ?? T3DesktopClient()
+    let server = client ?? T3DesktopClient()
+    self.server = server
+    let directory =
+      outboxDirectory
+      ?? (restoreUserState
+        ? URL.applicationSupportDirectory.appendingPathComponent("PiMac/MessageOutbox") : nil)
+    deliveries = MessageRecoveryCoordinator(
+      store: MessageOutboxStore(directory: directory), transport: server)
     temporaryFiles = TemporaryFilesStore(defaults: restoreUserState ? .standard : nil)
     self.telegram = telegram ?? TelegramControl()
     persistsState = restoreUserState
@@ -128,6 +146,8 @@ final class WorkspaceModel: ObservableObject {
       self?.objectWillChange.send()
     }
     addTab(model: AppModel(restoreLastProjectOnLaunch: false), path: nil, draft: false)
+    deliveryObservation = deliveries.store.$messages.combineLatest(deliveries.store.$failure)
+      .sink { [weak self] _, _ in self?.objectWillChange.send() }
     server.onShell = { [weak self] snapshot in self?.applyShell(snapshot) }
     server.onModelsChanged = { [weak self] in
       guard let self else { return }
@@ -383,14 +403,19 @@ final class WorkspaceModel: ObservableObject {
     // 首次发送先发布本地身份，Server shell 可能尚未包含该线程。
     // 优先恢复同项目的原标签，保留在途提交和未确认消息，不重连或重发。
     if let tab = tabs.first(where: {
-      ($0.model.currentSessionPath == path || $0.requestedSessionPath == path)
+      ($0.model.currentSessionPath == path
+        || ($0.model.currentSessionPath.isEmpty && $0.requestedSessionPath == path))
         && $0.model.projectURL?.standardizedFileURL == projectURL.standardizedFileURL
     }) {
       selectTab(tab.id)
       return
     }
-    guard let id = AppModel.threadID(from: path), let thread = server.thread(id),
-      thread["projectId"] as? String == server.projectID(for: projectURL)
+    guard let id = AppModel.threadID(from: path),
+      server.thread(id)?["projectId"] as? String == server.projectID(for: projectURL)
+        && server.thread(id) != nil
+        || deliveries.store.messages.contains(where: {
+          $0.threadID == id && $0.projectPath == projectURL.standardizedFileURL.path && $0.isVisible
+        })
     else {
       selectedModel?.statusText = "此历史路径尚未导入 T3；不会启动旧桌面 Pi 进程。"
       return
@@ -686,7 +711,7 @@ final class WorkspaceModel: ObservableObject {
       // Published 回调先于属性落地；延后读取，覆盖异步绑定到会话的情况。
       Task { @MainActor [weak self] in self?.acknowledgeSelectedCompletion() }
     }
-    model.attach(to: server)
+    model.attach(to: server, deliveries: deliveries)
     if persistsDraft, let draftDefaults {
       let sessionPath = path ?? (model.currentSessionPath.isEmpty ? nil : model.currentSessionPath)
       if let key = Self.draftKey(sessionPath: sessionPath, projectURL: model.projectURL) {
@@ -706,26 +731,29 @@ final class WorkspaceModel: ObservableObject {
         }
       }
       // 使用 Published 传出的新值，避免 willSet 时读到旧文字或旧附件。
-      draftObservations[tab.id] = model.$composerText.combineLatest(model.$attachments)
-        .dropFirst().sink { [weak model] text, attachments in
-          guard let model else { return }
-          let sessionPath = model.currentSessionPath.isEmpty ? path : model.currentSessionPath
-          guard let key = Self.draftKey(sessionPath: sessionPath, projectURL: model.projectURL)
-          else { return }
-          do {
-            let draft = ComposerDraft(text: text, attachments: attachments)
-            if draft.isEmpty {
-              draftDefaults.removeObject(forKey: key)
-            } else {
-              draftDefaults.set(try PropertyListEncoder().encode(draft), forKey: key)
-            }
-            if let sessionPath {
-              draftDefaults.removeObject(forKey: "t3Draft.\(sessionPath)")
-            }
-          } catch {
-            model.statusText = "草稿保存失败，请保留输入内容后重试。"
+      draftObservations[tab.id] = model.$composerText.combineLatest(
+        model.$attachments, model.$currentSessionPath
+      )
+      .dropFirst().sink { [weak model] text, attachments, currentPath in
+        guard let model else { return }
+        // 迁移只改变线程身份也必须保存新归属，不能等用户再输入一个字才落盘。
+        let sessionPath = currentPath.isEmpty ? path : currentPath
+        guard let key = Self.draftKey(sessionPath: sessionPath, projectURL: model.projectURL)
+        else { return }
+        do {
+          let draft = ComposerDraft(text: text, attachments: attachments)
+          if draft.isEmpty {
+            draftDefaults.removeObject(forKey: key)
+          } else {
+            draftDefaults.set(try PropertyListEncoder().encode(draft), forKey: key)
           }
+          if let sessionPath {
+            draftDefaults.removeObject(forKey: "t3Draft.\(sessionPath)")
+          }
+        } catch {
+          model.statusText = "草稿保存失败，请保留输入内容后重试。"
         }
+      }
     }
     if select { selectTab(tab.id) }
   }

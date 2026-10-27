@@ -1,0 +1,314 @@
+import Foundation
+import Testing
+
+@testable import PiMacApp
+
+@MainActor
+struct MessageRecoveryTests {
+  private let selection: [String: Any] = [
+    "instanceId": "pi", "model": "test/model", "options": [["id": "thinking", "value": "medium"]],
+  ]
+
+  private func directory() throws -> URL {
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("tmp/delivery-recovery/tests-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    return root
+  }
+
+  private func save(
+    _ store: MessageOutboxStore, root: URL, creates: Bool = true,
+    attachments: [PromptAttachment] = []
+  ) throws -> OutboxMessage {
+    try store.save(
+      prompt: #require(AppModel.makePrompt("保留原稿", attachments: attachments, delivery: .steer)),
+      messageID: UUID().uuidString, threadID: UUID().uuidString, project: root,
+      selection: selection, createsThread: creates, context: "用户：之前的问题\n助手：已完成的分析")
+  }
+
+  private final class Transport: MessageDeliveryTransport {
+    var environment = "environment"
+    var project = "project"
+    var exists = false
+    var received: Set<String> = []
+    var hideMessages = false
+    var dropCreate = false
+    var dropDispatch = false
+    var commands: [(String, Data)] = []
+    var receipts: Set<String> = []
+    var runs = 0
+    var onDispatch: (() throws -> Void)?
+    var pauseMessage = false
+    var pendingMessage: CheckedContinuation<Void, Never>?
+
+    func recoveryEnvironmentID() async throws -> String { environment }
+    func recoveryProjectID(_ url: URL) async throws -> String? { project }
+    func ensureProject(_ url: URL) async throws -> String { project }
+    func recoverySnapshot(threadID: String) async throws -> [String: Any] {
+      guard exists else { throw T3DesktopClient.HTTPFailure(status: 404) }
+      return [
+        "projection": [
+          "thread": ["id": threadID, "projectId": project],
+          "messages": hideMessages ? [] : received.map { ["id": $0] },
+        ]
+      ]
+    }
+    func persistAttachments(_ images: [[String: Any]], threadID: String, messageID: String)
+      async throws -> [[String: Any]]
+    { [] }
+    func dispatch(_ fields: [String: Any], commandID: String, refreshAfter: Bool) async throws
+      -> [String: Any]
+    {
+      commands.append(
+        (commandID, try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])))
+      if receipts.insert(commandID).inserted {
+        if fields["type"] as? String == "thread.create" { exists = true }
+        if let id = fields["messageId"] as? String {
+          received.insert(id)
+          runs += 1
+        }
+      }
+      try onDispatch?()
+      if fields["type"] as? String == "message.dispatch", pauseMessage {
+        pauseMessage = false
+        await withCheckedContinuation { pendingMessage = $0 }
+      }
+      if fields["type"] as? String == "thread.create", dropCreate {
+        dropCreate = false
+        throw URLError(.networkConnectionLost)
+      }
+      if fields["type"] as? String == "message.dispatch", dropDispatch {
+        dropDispatch = false
+        throw URLError(.networkConnectionLost)
+      }
+      return [:]
+    }
+  }
+
+  @Test func attachmentCopiesAndInFlightIdentitySurviveReloadAndCorruptionIsExplicit() throws {
+    let root = try directory()
+    let source = root.appendingPathComponent("资料.txt")
+    try Data("附件内容".utf8).write(to: source)
+    let location = root.appendingPathComponent("outbox")
+    let store = MessageOutboxStore(directory: location)
+    let record = try save(
+      store, root: root, attachments: [PromptAttachment(url: source, mimeType: "text/plain")])
+    let copy = try #require(record.attachments.first?.attachment.url)
+    #expect(copy != source)
+    #expect(record.rpcText.contains(copy.path))
+    try FileManager.default.moveItem(at: source, to: root.appendingPathComponent("original.saved"))
+    try store.validateAttachments(record)
+    try store.update(record.id) { $0.state = .sending }
+    let reloaded = MessageOutboxStore(directory: location)
+    let restored = try #require(reloaded.message(record.id))
+    #expect(restored.state == .unknown)
+    #expect(restored.dispatchCommandID == record.dispatchCommandID)
+    #expect(restored.selection == record.selection)
+    try Data("损坏内容".utf8).write(to: copy)
+    #expect(throws: CocoaError.self) { try reloaded.validateAttachments(restored) }
+    let archive = location.appendingPathComponent("outbox.json")
+    try Data("broken archive".utf8).write(to: archive)
+    let corrupt = MessageOutboxStore(directory: location)
+    #expect(corrupt.failure != nil)
+    #expect(throws: CocoaError.self) { _ = try save(corrupt, root: root) }
+    #expect(try String(contentsOf: archive, encoding: .utf8) == "broken archive")
+  }
+
+  @Test func lostRepliesUseOriginalFrozenCommandsAcrossClientRestart() async throws {
+    let root = try directory()
+    let location = root.appendingPathComponent("outbox")
+    let transport = Transport()
+    transport.dropCreate = true
+    let store = MessageOutboxStore(directory: location)
+    let record = try save(store, root: root)
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    #expect(await coordinator.deliver(record.id) == false)
+    #expect(store.message(record.id)?.state == .unknown)
+    let nextStore = MessageOutboxStore(directory: location)
+    let next = MessageRecoveryCoordinator(store: nextStore, transport: transport)
+    transport.dropDispatch = true
+    #expect(await next.deliver(record.id) == false)
+    #expect(transport.commands[0] == transport.commands[1])
+    transport.hideMessages = true
+    let lastStore = MessageOutboxStore(directory: location)
+    let last = MessageRecoveryCoordinator(store: lastStore, transport: transport)
+    #expect(await last.check(record.id) == .ready)
+    #expect(transport.commands.count == 3, "检查不能执行变更")
+    #expect(await last.deliver(record.id))
+    #expect(transport.commands[2] == transport.commands[3])
+    #expect(transport.runs == 1)
+    #expect(lastStore.message(record.id)?.state == .accepted)
+  }
+
+  @Test func acceptedSnapshotHandsOffWithoutReplayingAndCannotRegressAfterLateFailure() async throws
+  {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let record = try save(store, root: root)
+    transport.onDispatch = {
+      if transport.received.contains(record.id) {
+        try store.acknowledge(threadID: record.threadID, messageIDs: [record.id])
+      }
+    }
+    transport.dropDispatch = true
+    #expect(await coordinator.deliver(record.id))
+    #expect(store.message(record.id)?.state == .delivered)
+    #expect(await coordinator.deliver(record.id))
+    #expect(transport.runs == 1)
+
+    let second = try save(store, root: root, creates: false)
+    try store.update(second.id) { $0.state = .unknown }
+    transport.received.insert(second.id)
+    let count = transport.commands.count
+    #expect(await coordinator.check(second.id) == .accepted)
+    #expect(transport.commands.count == count)
+  }
+
+  @Test func missingThreadMigratesOnceAndPreservesContextAndEnvironmentBoundary() async throws {
+    let root = try directory()
+    let location = root.appendingPathComponent("outbox")
+    let store = MessageOutboxStore(directory: location)
+    let transport = Transport()
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let record = try save(store, root: root, creates: false)
+    #expect(await coordinator.check(record.id) == .missing)
+    #expect(transport.commands.isEmpty)
+    let originals = try [#require(store.message(record.id))]
+    let migrated = try store.migrate(originals)
+    #expect(migrated.threadID != record.threadID)
+    #expect(migrated.rpcText.contains("之前的问题"))
+    #expect(migrated.rpcText.contains("不要逐条重新执行"))
+    #expect(try store.migrate(originals).id == migrated.id)
+    let reloaded = MessageOutboxStore(directory: location)
+    #expect(reloaded.message(record.id)?.migratedTo == migrated.id)
+    transport.environment = "another-environment"
+    let next = MessageRecoveryCoordinator(store: reloaded, transport: transport)
+    #expect(await next.check(migrated.id) == .blocked)
+    #expect(await next.deliver(migrated.id) == false)
+    #expect(transport.commands.isEmpty)
+    transport.environment = "environment"
+    #expect(await next.deliver(migrated.id))
+    #expect(transport.runs == 1)
+  }
+
+  @Test func takeBackDraftIsDurableAndReplacedOnlyByAtomicNewSubmission() throws {
+    let root = try directory()
+    let store = MessageOutboxStore(directory: root.appendingPathComponent("outbox"))
+    let record = try save(store, root: root, creates: false)
+    try store.update(record.id) { $0.state = .draft }
+    let reload = MessageOutboxStore(directory: root.appendingPathComponent("outbox"))
+    #expect(reload.message(record.id)?.state == .draft)
+    let edited = try #require(AppModel.makePrompt("修改后的原稿", attachments: [], delivery: .steer))
+    let next = try reload.save(
+      prompt: edited, messageID: UUID().uuidString, threadID: record.threadID, project: root,
+      selection: selection, createsThread: false, context: record.context,
+      replacingDraftID: record.id)
+    #expect(reload.message(record.id)?.state == .dismissed)
+    #expect(reload.message(next.id)?.text == "修改后的原稿")
+  }
+
+  @Test func failedPersistencePreservesComposerAndClosedTabsRemainDiscoverable() throws {
+    let root = try directory()
+    let invalid = root.appendingPathComponent("not-a-directory")
+    try Data("blocked".utf8).write(to: invalid)
+    let blocked = WorkspaceModel(restoreUserState: false, outboxDirectory: invalid)
+    defer { blocked.disconnectAll() }
+    blocked.server.didCompletePoll()
+    let model = try #require(blocked.selectedModel)
+    model.projectURL = root
+    model.connectionState = .connected
+    model.composerText = "保存失败时不能清空"
+    model.sendPrompt()
+    #expect(model.composerText == "保存失败时不能清空")
+    #expect(blocked.deliveries.store.messages.isEmpty)
+
+    let location = root.appendingPathComponent("working-outbox")
+    let store = MessageOutboxStore(directory: location)
+    let record = try save(store, root: root, creates: false)
+    let suite = "recovery-discovery-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let workspace = WorkspaceModel(
+      restoreUserState: false, server: T3DesktopClient(defaults: defaults),
+      outboxDirectory: location)
+    defer { workspace.disconnectAll() }
+    let path = "t3:\(record.threadID)"
+    #expect(workspace.filteredSessions.map(\.path) == [path])
+    #expect(workspace.project(forSessionPath: path)?.url.path == root.path)
+    workspace.openSession(path: path, in: root)
+    #expect(workspace.selectedModel?.currentSessionPath == path)
+    #expect(workspace.selectedModel?.recoveryRecords.first?.id == record.id)
+    #expect(workspace.selectedModel?.messages.first?.text == record.rpcText)
+  }
+
+  @Test func concurrentRecoveryIsSerializedAndLateSourceAcceptanceSurfacesConflict() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let record = try save(store, root: root)
+    transport.pauseMessage = true
+    let delivery = Task { await coordinator.deliver(record.id) }
+    for _ in 0..<100 where transport.pendingMessage == nil { await Task.yield() }
+    let gate = try #require(transport.pendingMessage)
+    #expect(await coordinator.deliver(record.id) == false)
+    #expect(await coordinator.check(record.id) == .blocked)
+    gate.resume()
+    #expect(await delivery.value)
+    #expect(transport.runs == 1)
+
+    let source = try save(store, root: root, creates: false)
+    try store.update(source.id) { $0.state = .missing }
+    let target = try store.migrate([#require(store.message(source.id))])
+    try store.acknowledge(threadID: source.threadID, messageIDs: [source.id])
+    #expect(store.message(target.id)?.state == .conflict)
+    #expect(await coordinator.check(target.id) == .blocked)
+    #expect(await coordinator.deliver(target.id) == false)
+    try store.acknowledge(threadID: target.threadID, messageIDs: [target.id])
+    #expect(store.message(target.id)?.state == .conflict)
+    #expect(transport.runs == 1)
+  }
+
+  @Test func transientSaveFailureCanRetryWithoutRestartAndCorruptArchiveCanReload() throws {
+    let root = try directory()
+    let blocker = root.appendingPathComponent("blocker")
+    try Data("blocked".utf8).write(to: blocker)
+    let store = MessageOutboxStore(directory: blocker)
+    #expect(throws: (any Error).self) { _ = try save(store, root: root) }
+    #expect(store.failure != nil)
+    try FileManager.default.moveItem(at: blocker, to: root.appendingPathComponent("blocker.saved"))
+    try store.retryPersistence()
+    #expect(store.failure == nil)
+    _ = try save(store, root: root)
+
+    let archive = blocker.appendingPathComponent("outbox.json")
+    let original = try Data(contentsOf: archive)
+    try Data("corrupt".utf8).write(to: archive)
+    let reloaded = MessageOutboxStore(directory: blocker)
+    #expect(reloaded.isReadOnly)
+    try original.write(to: archive, options: .atomic)
+    reloaded.reload()
+    #expect(!reloaded.isReadOnly)
+    #expect(reloaded.failure == nil)
+    #expect(reloaded.messages.count == 1)
+  }
+
+  @Test func structuredErrorsRetainTypeButNeverExposeRawSecretText() {
+    let failure = T3DesktopClient.RPCFailure(exit: [
+      "_tag": "Failure",
+      "cause": [
+        "_tag": "Fail",
+        "error": [
+          "_tag": "OrchestrationV2DispatchCommandError", "message": "secret-value",
+          "cause": ["name": "ProjectionStoreThreadNotFoundError", "message": "secret-value"],
+        ],
+      ],
+    ])
+    #expect(failure.threadMissing)
+    #expect(failure.localizedDescription.contains("找不到原会话"))
+    #expect(!failure.localizedDescription.contains("secret-value"))
+  }
+}

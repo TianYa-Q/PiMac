@@ -115,6 +115,28 @@ struct ReplyAndDraftRegressionTests {
     #expect(empty.selectedModel?.hasUnsubmittedInput == false)
   }
 
+  @Test func migrationRebindsAnUnchangedComposerDraftBeforeAnyFurtherTyping() throws {
+    let suite = "pimac-migration-draft-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let project = URL(fileURLWithPath: "/tmp/pimac-migration-draft")
+    let original = WorkspaceModel(restoreUserState: false, draftDefaults: defaults)
+    defer { original.disconnectAll() }
+    original.newSession(in: project)
+    let model = try #require(original.selectedModel)
+    model.currentSessionPath = "t3:source"
+    model.composerText = "迁移时另外正在编辑的内容"
+    model.attachments = [
+      PromptAttachment(url: project.appendingPathComponent("notes.txt"), mimeType: "text/plain")
+    ]
+    model.currentSessionPath = "t3:target"
+    let restored = WorkspaceModel(restoreUserState: false, draftDefaults: defaults)
+    defer { restored.disconnectAll() }
+    let target = restored.taskModel(in: project, sessionPath: "t3:target")
+    #expect(target.composerText == "迁移时另外正在编辑的内容")
+    #expect(target.attachments == model.attachments)
+  }
+
   @Test func sessionDraftsStaySeparateAndSaveBeforeConnectionCompletes() throws {
     let suite = "pimac-session-draft-\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))

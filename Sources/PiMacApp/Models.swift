@@ -101,7 +101,7 @@ struct ChatEntry: Identifiable, Equatable, Sendable {
   }
 }
 
-enum QueuedPromptDelivery: String, Sendable {
+enum QueuedPromptDelivery: String, Codable, Sendable {
   case steer
   case followUp
 

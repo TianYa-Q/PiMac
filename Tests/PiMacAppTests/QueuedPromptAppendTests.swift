@@ -5,17 +5,8 @@ import Testing
 
 @MainActor
 struct QueuedPromptAppendTests {
-  @Test func numberingPreservesMultilineInputAndContinuesExistingBatch() {
-    let second = T3DesktopClient.appendingQueuedText("第一个\n补充说明", "第二个")
-    #expect(second == "1. 第一个\n补充说明\n2. 第二个")
-    #expect(
-      T3DesktopClient.appendingQueuedText(second, "第三个\n详细说明")
-        == "1. 第一个\n补充说明\n2. 第二个\n3. 第三个\n详细说明")
-    #expect(T3DesktopClient.appendingQueuedText("1. 用户自己的单项", "新增") == "1. 1. 用户自己的单项\n2. 新增")
-  }
-
   @Test(.timeLimit(.minutes(2)))
-  func additionsEditOneServerRunAndSendOnceWithImages() async throws {
+  func independentQueuedInputsKeepRecoverableIdentityAndImages() async throws {
     let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
       .deletingLastPathComponent().deletingLastPathComponent()
     let root = repository.appendingPathComponent("tmp/queue-batch/swift-\(UUID().uuidString)")
@@ -71,15 +62,15 @@ struct QueuedPromptAppendTests {
     model.composerText = "第二条"
     model.sendPrompt(delivery: .followUp)
     try await wait {
-      model.canSubmitPrompt && model.queuedPrompts.count == 1
-        && model.queuedPrompts.first?.text == "1. 第一条\n详情\n2. 第二条"
+      model.canSubmitPrompt && model.queuedPrompts.count == 2
+        && model.queuedPrompts.last?.text == "第二条"
     }
     model.composerText = "第三条"
     model.sendPrompt(delivery: .followUp)
-    let expected = "1. 第一条\n详情\n2. 第二条\n3. 第三条"
+    let expected = ["第一条\n详情", "第二条", "第三条"]
     try await wait {
-      model.canSubmitPrompt && model.queuedPrompts.count == 1
-        && model.queuedPrompts.first?.text == expected
+      model.canSubmitPrompt && model.queuedPrompts.count == 3
+        && model.queuedPrompts.map(\.text) == expected
     }
     #expect(model.queuedPrompts.first?.id == firstRunID)
     let snapshot = try await client.request("/api/orchestration/threads/\(threadID)")
@@ -87,10 +78,10 @@ struct QueuedPromptAppendTests {
       .write(to: root.appendingPathComponent("snapshot.json"))
     let projection = try #require(snapshot["projection"] as? [String: Any])
     let runs = try #require(projection["runs"] as? [[String: Any]])
-    #expect(runs.filter { $0["status"] as? String == "queued" }.count == 1)
+    #expect(runs.filter { $0["status"] as? String == "queued" }.count == 3)
     let messages = try #require(projection["messages"] as? [[String: Any]])
-    let merged = try #require(messages.first { $0["text"] as? String == expected })
-    #expect((merged["attachments"] as? [[String: Any]])?.count == 1)
+    let imageMessage = try #require(messages.first { $0["text"] as? String == "第二条" })
+    #expect((imageMessage["attachments"] as? [[String: Any]])?.count == 1)
     // 运行身份可先于 Provider 的交互事件到达，不能拿此前快照推断请求已发布。
     var requestProjection = projection
     for _ in 0..<200 {
@@ -115,7 +106,9 @@ struct QueuedPromptAppendTests {
       "answers": [questionID: "continue"],
     ])
     try await wait {
-      model.messages.contains { $0.kind == .assistant && $0.text == "Reply: \(expected)" }
+      expected.allSatisfy { text in
+        model.messages.contains { $0.kind == .assistant && $0.text == "Reply: \(text)" }
+      }
     }
     #expect(model.queuedPrompts.isEmpty)
     let records = try String(
@@ -128,9 +121,9 @@ struct QueuedPromptAppendTests {
     let prompts = records.filter {
       $0["command"] as? String == "prompt" && $0["streamingBehavior"] != nil
     }
-    #expect(prompts.count == 2)
-    #expect(prompts.last?["message"] as? String == expected)
-    #expect(prompts.last?["imageCount"] as? Int == 1)
+    #expect(prompts.count == 4)
+    #expect(prompts.dropFirst().compactMap { $0["message"] as? String } == expected)
+    #expect(prompts.first { $0["message"] as? String == "第二条" }?["imageCount"] as? Int == 1)
   }
 
   private func wait(

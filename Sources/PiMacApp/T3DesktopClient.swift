@@ -4,7 +4,7 @@ import Foundation
 
 /// A T3 client, not an agent manager. Snapshots are authoritative server state.
 @MainActor
-final class T3DesktopClient: ObservableObject {
+final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   typealias JSON = [String: Any]
   @Published private(set) var isConnected = false
   @Published private(set) var status = "正在启动本机 T3 Server…"
@@ -457,7 +457,8 @@ final class T3DesktopClient: ObservableObject {
       updateConnectionStatus()
       throw ClientError.unauthorized
     }
-    guard status == 200, data.count <= 32 * 1024 * 1024 else { throw ClientError.rejected }
+    guard status == 200 else { throw HTTPFailure(status: status) }
+    guard data.count <= 32 * 1024 * 1024 else { throw ClientError.rejected }
     let snapshot = try await ImmutableJSONSnapshot.decode(data)
     guard generation == current, service?.serverURL == base else { throw CancellationError() }
     return snapshot.value
@@ -493,58 +494,6 @@ final class T3DesktopClient: ObservableObject {
       payload: ["threadId": threadID, "messageId": messageID, "attachments": images])
     guard let attachments = result["attachments"] as? [JSON] else { throw ClientError.rejected }
     return attachments
-  }
-
-  /// 新的排队输入直接编辑 Server 第一条；读取最新快照，不能拿 UI 的旧正文覆盖队列。
-  /// 编辑若遇到出队竞态或网络失败，保留未确认输入，不自动另发以免重复执行。
-  func appendToQueuedPrompt(
-    threadID: String, text: String, images: [JSON], modelSelection: JSON
-  ) async throws -> Bool {
-    let escaped = threadID.addingPercentEncoding(
-      withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
-    let native = try await request("/api/orchestration/threads/\(escaped)")
-    guard let projection = native["projection"] as? JSON,
-      projection["thread"] is JSON, let runs = projection["runs"] as? [JSON],
-      projection["messages"] is [JSON]
-    else { throw ClientError.rejected }
-    let detail = T3V2Presentation.detail(native)
-    guard let thread = detail["thread"] as? JSON,
-      let first = (thread["queuedMessages"] as? [JSON])?.first
-    else { return false }
-    guard let runID = first["runId"] as? String,
-      let messageID = first["id"] as? String,
-      let previousText = first["text"] as? String,
-      let previousAttachments = first["attachments"] as? [JSON]
-    else { throw ClientError.rejected }
-    // 自动通知、原生命令及指定了其他模型的输入仍由上游独立处理。
-    let run = runs.first { $0["id"] as? String == runID }
-    guard first["createdBy"] as? String == "user",
-      first["notification"] == nil, first["delegatedCompletion"] == nil,
-      first["scheduledTaskId"] == nil, first["senderThreadId"] == nil,
-      run?["restartContinuationOfRunId"] == nil, run?["delegatedTaskId"] == nil,
-      !previousText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/"),
-      !text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/"),
-      let selection = run?["modelSelection"] as? JSON,
-      NSDictionary(dictionary: selection).isEqual(to: modelSelection)
-    else { return false }
-    let uploaded = try await persistAttachments(images, threadID: threadID, messageID: messageID)
-    try await dispatch([
-      "type": "queued-run.edit", "threadId": threadID, "runId": runID,
-      "text": Self.appendingQueuedText(previousText, text),
-      "attachments": previousAttachments + uploaded,
-    ])
-    return true
-  }
-
-  static func appendingQueuedText(_ previous: String, _ next: String) -> String {
-    // 已合并的正文直接续号，保留每条输入内部的换行；单条正文在第二次输入时才编号。
-    let lines = previous.components(separatedBy: "\n")
-    var count = 0
-    for line in lines where line.hasPrefix("\(count + 1). ") { count += 1 }
-    if count >= 2, previous.hasPrefix("1. ") {
-      return "\(previous)\n\(count + 1). \(next)"
-    }
-    return "1. \(previous)\n2. \(next)"
   }
 
   func interrupt(threadID: String, runID: String) async throws {
@@ -1194,7 +1143,7 @@ final class T3DesktopClient: ObservableObject {
         }
         guard response["_tag"] as? String == "Exit", let exit = response["exit"] as? JSON
         else { continue }
-        guard exit["_tag"] as? String == "Success" else { throw ClientError.rejected }
+        guard exit["_tag"] as? String == "Success" else { throw RPCFailure(exit: exit) }
         return exit["value"] as? JSON ?? [:]
       }
     }
@@ -1652,6 +1601,64 @@ final class T3DesktopClient: ObservableObject {
       reason = "初始化请求失败"
     }
     return reason
+  }
+
+  func recoveryEnvironmentID() async throws -> String {
+    let config = try await rpc("server.getConfig")
+    guard let environment = config["environment"] as? JSON,
+      let id = environment["environmentId"] as? String, !id.isEmpty
+    else { throw ClientError.rejected }
+    return id
+  }
+
+  func recoveryProjectID(_ url: URL) async throws -> String? {
+    try await refreshShell()
+    return projectID(for: url)
+  }
+
+  func recoverySnapshot(threadID: String) async throws -> JSON {
+    let escaped = threadID.addingPercentEncoding(
+      withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
+    return try await request("/api/orchestration/threads/\(escaped)")
+  }
+
+  struct HTTPFailure: Error, Sendable { let status: Int }
+
+  struct RPCFailure: LocalizedError, Sendable {
+    let tags: [String]
+    var threadMissing: Bool { tags.contains("ProjectionStoreThreadNotFoundError") }
+
+    init(exit: JSON) {
+      // 仅提取有界的类型标签；原始错误可能带正文、路径或凭据，不能直接展示/持久化。
+      var result: [String] = []
+      var remaining = 256
+      func visit(_ value: Any, depth: Int) {
+        guard depth < 16, remaining > 0 else { return }
+        remaining -= 1
+        if let object = value as? JSON {
+          // Schema.Defect 将 Error 的 _tag 编码为 name，普通 TaggedError 保留 _tag。
+          if let tag = object["_tag"] as? String ?? object["name"] as? String,
+            tag.range(of: "^[A-Za-z][A-Za-z0-9]{0,95}$", options: .regularExpression) != nil,
+            !result.contains(tag)
+          {
+            result.append(tag)
+          }
+          for key in object.keys.sorted() { visit(object[key]!, depth: depth + 1) }
+        } else if let values = value as? [Any] {
+          for value in values { visit(value, depth: depth + 1) }
+        }
+      }
+      visit(exit, depth: 0)
+      tags = result
+    }
+
+    var errorDescription: String? {
+      if threadMissing { return "Server 找不到原会话；原稿和附件已保留，可检查后迁移" }
+      if tags.contains("OrchestratorCommandPreviouslyRejectedError") {
+        return "Server 已拒绝原命令；可取回原稿修正后重新提交，或导出保存"
+      }
+      return "Server 拒绝提交；原稿已保留，请检查授权、模型和会话后恢复"
+    }
   }
 
   enum ClientError: Error { case unavailable, unauthorized, rejected }

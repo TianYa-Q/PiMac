@@ -116,9 +116,10 @@ struct DesktopResponsivenessTests {
     // 不从真实桌面缓存读取历史线程，确保断言只针对本次操作。
     let defaults = try #require(UserDefaults(suiteName: "draft-readiness-\(UUID().uuidString)"))
     let client = T3DesktopClient(defaults: defaults)
-    client.applyProviderCatalog([
-      ["instanceId": "pi", "models": [["slug": "test/model", "name": "Test"]]]
-    ], modelCatalogs: [:])
+    client.applyProviderCatalog(
+      [
+        ["instanceId": "pi", "models": [["slug": "test/model", "name": "Test"]]]
+      ], modelCatalogs: [:])
     return client
   }
 
@@ -207,7 +208,7 @@ struct DesktopResponsivenessTests {
   }
 
   @Test(.timeLimit(.minutes(1)))
-  func failedQueuedUploadRemainsUnconfirmedWithoutClearingNewDraft() async throws {
+  func missingAttachmentFailsBeforeSubmissionAndPreservesComposer() async throws {
     let (model, client) = submissionModel()
     defer {
       model.disconnect()
@@ -220,13 +221,14 @@ struct DesktopResponsivenessTests {
         mimeType: "image/png")
     ]
     model.sendPrompt(delivery: .followUp)
-    model.composerText = "new draft"
-    for _ in 0..<200 where !model.canSubmitPrompt {
-      try await Task.sleep(for: .milliseconds(10))
-    }
-    #expect(model.queuedPrompts.first?.submissionState == .unconfirmed)
-    #expect(model.queuedPrompts.first?.attachments.count == 1)
+    #expect(model.composerText == "missing image")
+    #expect(model.attachments.count == 1)
+    #expect(model.queuedPrompts.isEmpty)
     #expect(model.messages.isEmpty)
+    #expect(model.deliveryStorageFailure != nil)
+    #expect(model.deliveryCoordinator?.store.messages.isEmpty == true)
+    model.composerText = "new draft"
+    await Task.yield()
     #expect(model.composerText == "new draft")
   }
 
