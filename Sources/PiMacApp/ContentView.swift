@@ -1441,7 +1441,6 @@ struct ContentView: View {
 
   private var composer: some View {
     VStack(spacing: 8) {
-      MessageRecoveryBar(app: app)
       ThreadGoalView(
         state: app.goalState, canControl: app.canSubmitPrompt && !app.isBusy,
         onCommand: app.sendGoalCommand)
@@ -1649,7 +1648,10 @@ struct ContentView: View {
             .font(.caption).foregroundStyle(.orange).lineLimit(1)
             .help(workspace.developmentReloadStatus)
         }
-        if !app.statusText.isEmpty {
+        if !app.recoveryRecords.isEmpty || app.deliveryStorageFailure != nil {
+          MessageRecoveryBar(app: app)
+            .frame(maxWidth: 420)
+        } else if !app.statusText.isEmpty {
           if app.showsStatusProgress {
             ProgressView().controlSize(.small)
               .frame(width: 18, height: 18)

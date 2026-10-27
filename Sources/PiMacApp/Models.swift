@@ -25,7 +25,7 @@ enum ConnectionState: Equatable {
   }
 }
 
-enum ChatEntryKind: Equatable, Sendable {
+enum ChatEntryKind: Equatable, Codable, Sendable {
   case user
   case assistant
   case thinking
@@ -34,7 +34,7 @@ enum ChatEntryKind: Equatable, Sendable {
   case system
 }
 
-struct ChatEntry: Identifiable, Equatable, Sendable {
+struct ChatEntry: Identifiable, Equatable, Codable, Sendable {
   let id: String
   var kind: ChatEntryKind
   var title: String

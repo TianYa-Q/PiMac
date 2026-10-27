@@ -2,8 +2,8 @@ import CoreFoundation
 import Foundation
 
 /// 在 Server 边界解析工具结果；内部只传递已校验的页面引用，不把任意 JSON 当网页执行。
-struct T3HTMLRender: Equatable, Sendable {
-  struct Measurement: Equatable, Sendable {
+struct T3HTMLRender: Equatable, Codable, Sendable {
+  struct Measurement: Equatable, Codable, Sendable {
     let width: Double
     let height: Double
   }

@@ -55,6 +55,7 @@ final class AppModel: ObservableObject {
   @Published var isCompacting = false
   @Published var isLoadingConfiguration = false
   @Published private(set) var goalState: ThreadGoal.State = .none
+  @Published private(set) var isShowingCachedConversation = false
   @Published var sessionName = ""
   @Published var sessions: [SessionItem] = []
   /// Compatibility name for UI/TG metadata; contains t3:<thread-id>, NEVER a file path.
@@ -312,14 +313,32 @@ final class AppModel: ObservableObject {
     pendingSelection = nil
     stats = nil
     let current = generation
+    let changingSession =
+      currentSessionPath != (path ?? "")
+      || projectURL != project.standardizedFileURL
     projectURL = project.standardizedFileURL
     skillWorkspaceContext = WorkspaceSkillContext(
       instanceID: "pi", projectCwd: project.standardizedFileURL.path,
       threadID: path.flatMap { Self.threadID(from: $0) })
     enterSkillWorkspace()
     pendingThreadPath = path
-    if currentSessionPath != (path ?? "") { messages = [] }
+    if changingSession {
+      messages = []
+      sessionName = ""
+      isStreaming = false
+      isCompacting = false
+      isShowingCachedConversation = false
+    }
     currentSessionPath = path ?? ""
+    if let projectURL, let id = threadID,
+      let cached = server?.conversationCache.snapshot(project: projectURL, threadID: id),
+      changingSession || messages.isEmpty
+    {
+      // 不能通过 apply 恢复：它会把旧快照标成已连接，并触发交互/发件箱确认。
+      messages = cached.messages
+      sessionName = cached.title
+      isShowingCachedConversation = true
+    }
     refreshDeliveryPresentation()
     // 已连接时的新聊天只是本地草稿，无须再排队等待一次异步连接流程。
     // 仍使用实时模型目录校验，不能把磁盘缓存当作发送许可。
@@ -336,7 +355,7 @@ final class AppModel: ObservableObject {
     }
     connectionState = .connecting
     isLoadingConfiguration = true
-    statusText = "正在连接 T3 线程…"
+    statusText = isShowingCachedConversation ? "正在后台核对会话…" : "正在连接 T3 线程…"
     connectTask = Task { [weak self] in
       guard let self, let server = self.server else {
         completion?(false)
@@ -364,13 +383,16 @@ final class AppModel: ObservableObject {
         self.pendingThreadPath = nil
         self.connectionState = .connected
         self.isLoadingConfiguration = false
-        self.statusText = ""
+        self.statusText = self.isShowingCachedConversation ? "正在后台核对会话…" : ""
         completion?(true)
       } catch {
         guard self.generation == current else { return }
         self.connectionState = .failed("无法打开 T3 线程；请检查 Server 和 Pi Provider 模型。")
         self.isLoadingConfiguration = false
-        self.statusText = "命令结果未确认时不会自动重试，请刷新列表后检查。"
+        self.statusText =
+          self.isShowingCachedConversation
+          ? "暂时无法核对会话，当前显示本地缓存；连接恢复后会同步。"
+          : "命令结果未确认时不会自动重试，请刷新列表后检查。"
         completion?(false)
       }
     }
@@ -395,7 +417,6 @@ final class AppModel: ObservableObject {
       return
     }
     messages = []
-    currentSessionPath = ""
     open(project: projectURL, path: nil, completion: completion)
   }
   func switchSession(path: String, in projectURL: URL, completion: ((Bool) -> Void)? = nil) {
@@ -815,6 +836,10 @@ final class AppModel: ObservableObject {
     guard let thread = detail["thread"] as? [String: Any], thread["id"] as? String == threadID
     else { return }
     connectionState = .connected
+    if isShowingCachedConversation {
+      isShowingCachedConversation = false
+      if statusText == "正在后台核对会话…" { statusText = "" }
+    }
     sessionName = thread["title"] as? String ?? ""
     goalState = ThreadGoal.State.read(thread["goal"], driver: thread["goalDriver"] as? String)
     queueHeld = thread["queueHeld"] as? Bool ?? false
@@ -964,9 +989,14 @@ final class AppModel: ObservableObject {
         try deliveryCoordinator?.store.acknowledge(threadID: threadID, messageIDs: confirmedIDs)
       }
     } catch { statusText = "消息已收到，但本地交接保存失败；请检查发件箱" }
+    entries.append(contentsOf: ChatEntry.groupingToolEntries(Array(toolEntries.values)))
+    entries.sort { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
+    if let projectURL, let threadID {
+      server?.conversationCache.store(
+        project: projectURL, threadID: threadID, title: sessionName, messages: entries)
+    }
     entries.append(contentsOf: pendingSentMessages.filter { !confirmedIDs.contains($0.id) })
     displayedOutboxIDs = Set(pendingSentMessages.map(\.id))
-    entries.append(contentsOf: ChatEntry.groupingToolEntries(Array(toolEntries.values)))
     entries.sort { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
     if messages != entries { messages = entries }
     if !isStreaming, let turnID, state != nil, lastSettledTurnID != turnID {

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// 预留固定一行，检查中与失败状态不挤动编辑器；次要操作只在详情中展开。
+/// 与底部指标共用既有状态行，不增加输入框高度；完整错误与次要操作在详情中展开。
 struct MessageRecoveryBar: View {
   @ObservedObject var app: AppModel
   @State private var showingDetails = false
@@ -21,9 +21,9 @@ struct MessageRecoveryBar: View {
   }
   private var title: String {
     if let failure = app.deliveryStorageFailure { return failure }
-    if app.isCheckingDelivery { return "正在核对 Server 接收情况，不会重复发送…" }
-    guard let first = records.first else { return "" }
-    return "\(records.count) 条输入待恢复 · \(first.issue)"
+    if app.isCheckingDelivery { return "正在核对接收情况…" }
+    guard !records.isEmpty else { return "" }
+    return "\(records.count) 条输入待恢复"
   }
 
   var body: some View {
@@ -33,11 +33,11 @@ struct MessageRecoveryBar: View {
           .foregroundStyle(.orange)
           .accessibilityHidden(true)
         Text(title)
-          .font(.system(size: 12))
+          .font(.caption)
           .lineLimit(1)
           .truncationMode(.middle)
-          .help(title)
-        Spacer(minLength: 8)
+          .help(app.deliveryStorageFailure ?? records.first?.issue ?? title)
+        Spacer(minLength: 0)
         Button("详情") { showingDetails = true }
           .popover(isPresented: $showingDetails) { details }
         if app.deliveryStorageFailure != nil {
@@ -56,14 +56,14 @@ struct MessageRecoveryBar: View {
               app.checkDeliveryRecovery()
             }
           }
-          .buttonStyle(.borderedProminent)
           .disabled(app.isCheckingDelivery || app.isBusy)
         }
       }
     }
-    .controlSize(.small)
-    .frame(height: 32)
-    .padding(.horizontal, 10)
+    .font(.caption)
+    .buttonStyle(.borderless)
+    .controlSize(.mini)
+    .frame(height: 18)
     .sheet(isPresented: $showingMigration) {
       VStack(alignment: .leading, spacing: 16) {
         Text("在新会话继续").font(.headline)

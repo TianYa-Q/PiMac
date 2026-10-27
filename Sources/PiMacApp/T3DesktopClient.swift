@@ -138,6 +138,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     return URLSession(configuration: config)
   }
 
+  let conversationCache: ConversationPresentationCache
   private let defaults: UserDefaults
   init(
     defaults: UserDefaults = .standard,
@@ -146,6 +147,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       nil
   ) {
     self.defaults = defaults
+    conversationCache = ConversationPresentationCache(defaults: defaults)
     let connectionConfiguration = URLSessionConfiguration.ephemeral
     connectionConfiguration.httpShouldSetCookies = false
     connectionConfiguration.connectionProxyDictionary = [:]
@@ -340,6 +342,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   }
 
   func stop() {
+    conversationCache.persist()
     hasLiveSkillShell = false
     skillCache.reset()
     generation = UUID()

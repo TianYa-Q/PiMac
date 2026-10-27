@@ -2,7 +2,7 @@ import Foundation
 
 /// Pi persists bounded metadata, not nested tool output. Keep the same representation
 /// in live views and restored history rather than fabricating standalone transcript rows.
-struct NestedToolCall: Identifiable, Equatable, Sendable {
+struct NestedToolCall: Identifiable, Equatable, Codable, Sendable {
   let id: String
   let name: String
   var input: String?
