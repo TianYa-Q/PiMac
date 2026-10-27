@@ -11,12 +11,18 @@ struct MessageRecoveryIntegrationTests {
     var loseReply = true
     var hideMessages = false
     var dispatchIDs: [String] = []
+    var snapshotFailures = 0
+    var attachmentBatches = 0
     init(client: T3DesktopClient) { self.client = client }
     func recoveryEnvironmentID() async throws -> String { try await client.recoveryEnvironmentID() }
     func recoveryProjectID(_ url: URL) async throws -> String? {
       try await client.recoveryProjectID(url)
     }
     func recoverySnapshot(threadID: String) async throws -> [String: Any] {
+      if snapshotFailures > 0 {
+        snapshotFailures -= 1
+        throw URLError(.timedOut)
+      }
       var snapshot = try await client.recoverySnapshot(threadID: threadID)
       if hideMessages, var projection = snapshot["projection"] as? [String: Any] {
         projection["messages"] = [[String: Any]]()
@@ -28,7 +34,8 @@ struct MessageRecoveryIntegrationTests {
     func persistAttachments(_ images: [[String: Any]], threadID: String, messageID: String)
       async throws -> [[String: Any]]
     {
-      try await client.persistAttachments(images, threadID: threadID, messageID: messageID)
+      if !images.isEmpty { attachmentBatches += 1 }
+      return try await client.persistAttachments(images, threadID: threadID, messageID: messageID)
     }
     func dispatch(_ fields: [String: Any], commandID: String, refreshAfter: Bool) async throws
       -> [String: Any]
@@ -125,15 +132,26 @@ struct MessageRecoveryIntegrationTests {
     }
     #expect(prompts.count == 1, "真实 Provider 只能执行一次")
 
-    // 同一个真实 Server 上验证自动重试：回执丢失且快照滞后时，仍只运行一次。
+    // 带图预检超时后安全重试；实际上传一次，丢失提交回执后仍按原身份重放。
+    let image = root.appendingPathComponent("attachment.png")
+    try #require(
+      Data(
+        base64Encoded:
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      )
+    ).write(to: image)
     let automatic = try reloaded.save(
       prompt: #require(
-        AppModel.makePrompt("automatic recovery once", attachments: [], delivery: .followUp)),
+        AppModel.makePrompt(
+          "automatic recovery once",
+          attachments: [PromptAttachment(url: image, mimeType: "image/png")], delivery: .followUp)),
       messageID: UUID().uuidString, threadID: record.threadID, project: root,
       selection: ["instanceId": "pi", "model": "test/model"], createsThread: false, context: "")
     transport.loseReply = true
     transport.hideMessages = true
-    #expect(await recovery.deliver(automatic.id, retryDelays: [.zero]))
+    transport.snapshotFailures = 1
+    #expect(await recovery.deliver(automatic.id, retryDelays: [.zero, .zero]))
+    #expect(transport.attachmentBatches == 1)
     #expect(
       Array(transport.dispatchIDs.suffix(2)) == [
         automatic.dispatchCommandID, automatic.dispatchCommandID,
@@ -148,6 +166,9 @@ struct MessageRecoveryIntegrationTests {
     let automaticProjection = try #require(automaticSnapshot["projection"] as? [String: Any])
     let automaticMessages = try #require(automaticProjection["messages"] as? [[String: Any]])
     #expect(automaticMessages.filter { $0["id"] as? String == automatic.id }.count == 1)
+    let automaticMessage = try #require(
+      automaticMessages.first { $0["id"] as? String == automatic.id })
+    #expect((automaticMessage["attachments"] as? [[String: Any]])?.count == 1)
     let automaticRuns = try #require(automaticProjection["runs"] as? [[String: Any]])
     #expect(automaticRuns.count == 2)
     let automaticLog = try String(

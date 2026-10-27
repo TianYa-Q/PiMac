@@ -19,6 +19,14 @@ struct MessageRecoveryBar: View {
     if records.first?.state == .rejected && app.recoveryChecked { return "取回原稿" }
     return app.recoveryReady ? "继续发送" : "检查并恢复"
   }
+  private var actionDisabled: Bool {
+    if records.first?.state == .conflict { return false }
+    if canMigrate { return app.isBusy }
+    if records.first?.state == .rejected && app.recoveryChecked {
+      return !app.canTakeBackDeliveryDraft
+    }
+    return app.recoveryReady ? !app.canContinueDeliveryRecovery : !app.canCheckDeliveryRecovery
+  }
   private var title: String {
     if let failure = app.deliveryStorageFailure { return failure }
     if app.isCheckingDelivery { return "正在核对接收情况…" }
@@ -56,7 +64,9 @@ struct MessageRecoveryBar: View {
               app.checkDeliveryRecovery()
             }
           }
-          .disabled(app.isCheckingDelivery || app.isBusy)
+          // 核对完成后标题变短，仍保留同一操作槽，避免把“详情”推来推去。
+          .frame(minWidth: 70, alignment: .trailing)
+          .disabled(actionDisabled)
         }
       }
     }
@@ -121,6 +131,10 @@ struct MessageRecoveryBar: View {
             VStack(alignment: .leading, spacing: 4) {
               Text(record.text).lineLimit(4)
               Text(record.issue).foregroundStyle(.secondary)
+              if let failure = record.lastFailure {
+                Text("最近失败：\(failure.stage.title) · \(failure.elapsedMilliseconds) 毫秒")
+                  .foregroundStyle(.secondary)
+              }
               if !record.attachments.isEmpty {
                 Text("已保留 \(record.attachments.count) 个附件").foregroundStyle(.secondary)
               }
@@ -147,6 +161,13 @@ struct MessageRecoveryBar: View {
           showingTakeBack = true
         }
         .disabled(!app.canTakeBackDeliveryDraft)
+      }
+      if records.contains(where: { $0.state == .missing }) {
+        Button("重新核对原会话") {
+          showingDetails = false
+          app.checkDeliveryRecovery()
+        }
+        .disabled(!app.canCheckDeliveryRecovery)
       }
       Button("保留记录，停止本地恢复…") {
         showingDetails = false

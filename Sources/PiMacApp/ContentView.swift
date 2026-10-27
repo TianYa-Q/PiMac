@@ -81,6 +81,7 @@ struct ContentView: View {
   @State private var selectedPage: MainPage = .conversation
   @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
+  @State private var isPastingImage = false
   @State private var composerSelection = NSRange(location: 0, length: 0)
   @State private var skillSelectedIndex = 0
   @State private var skillDismissedText: String?
@@ -1502,6 +1503,9 @@ struct ContentView: View {
           onFollowUp: { sendPromptFollowingOutput(delivery: .followUp) },
           onPasteFiles: registerAttachments,
           onPasteImage: registerPastedImage,
+          onPasteError: { app.statusText = $0 },
+          onPastePendingChange: { isPastingImage = $0 },
+          pasteContextID: "\(ObjectIdentifier(app))-\(app.currentSessionPath)",
           onCompletionKey: handleSkillKey
         )
         .onChange(of: skillKey) { _, _ in skillSelectedIndex = 0 }
@@ -1735,13 +1739,12 @@ struct ContentView: View {
 
   @ViewBuilder
   private func composerAttachment(_ attachment: PromptAttachment) -> some View {
-    if attachment.isImage, let image = NSImage(contentsOf: attachment.url) {
+    if attachment.isImage {
       ZStack(alignment: .topTrailing) {
         Button {
           previewedAttachment = attachment
         } label: {
-          Image(nsImage: image)
-            .resizable()
+          AttachmentThumbnail(url: attachment.url, maxPixelSize: 160)
             .scaledToFill()
             .frame(width: 62, height: 48)
             .clipped()
@@ -1825,6 +1828,10 @@ struct ContentView: View {
   }
 
   private func sendPromptFollowingOutput(delivery: QueuedPromptDelivery) {
+    guard !isPastingImage else {
+      app.statusText = "图片仍在读取，请稍候再发送"
+      return
+    }
     // 发送消息明确恢复固定底部模式；随后的用户滚动仍可立即切回手动模式。
     conversationScrollMode = .pinnedToBottom
     app.sendPrompt(delivery: delivery)
@@ -2056,7 +2063,7 @@ private struct SidebarHoverRegion<Content: View>: View {
   }
 }
 
-private struct ComposerTextView: NSViewRepresentable {
+struct ComposerTextView: NSViewRepresentable {
   @Binding var text: String
   @Binding var selection: NSRange
   @Binding var isFocused: Bool
@@ -2064,6 +2071,9 @@ private struct ComposerTextView: NSViewRepresentable {
   let onFollowUp: () -> Void
   let onPasteFiles: ([URL]) -> [String]
   let onPasteImage: (Data, String) -> [String]
+  let onPasteError: (String) -> Void
+  let onPastePendingChange: (Bool) -> Void
+  let pasteContextID: String
   let onCompletionKey: (UInt16) -> Bool
 
   func makeCoordinator() -> Coordinator {
@@ -2097,6 +2107,9 @@ private struct ComposerTextView: NSViewRepresentable {
     textView.onFollowUp = onFollowUp
     textView.onPasteFiles = onPasteFiles
     textView.onPasteImage = onPasteImage
+    textView.onPasteError = onPasteError
+    textView.onPastePendingChange = onPastePendingChange
+    textView.pasteContextID = pasteContextID
     textView.onCompletionKey = onCompletionKey
     textView.string = text
     textView.isRichText = false
@@ -2138,6 +2151,9 @@ private struct ComposerTextView: NSViewRepresentable {
     textView.onFollowUp = onFollowUp
     textView.onPasteFiles = onPasteFiles
     textView.onPasteImage = onPasteImage
+    textView.onPasteError = onPasteError
+    textView.onPastePendingChange = onPastePendingChange
+    textView.pasteContextID = pasteContextID
     textView.onCompletionKey = onCompletionKey
     // AppModel 的流式事件会频繁触发 SwiftUI 更新。只有 Binding 确实发生了外部
     // 变化（例如发送后清空）才回写 NSTextView，避免旧的 View 快照覆盖刚输入的字符。
@@ -2150,6 +2166,7 @@ private struct ComposerTextView: NSViewRepresentable {
       } else if !textView.hasMarkedText() {
         // Binding 来自 AppModel（例如消息发送后清空），此时才同步到原生编辑器。
         context.coordinator.pendingLocalTexts.removeAll()
+        textView.cancelImagePastes()
         context.coordinator.lastBindingText = text
         if textView.string != text {
           textView.string = text
@@ -2232,7 +2249,51 @@ private struct ComposerTextView: NSViewRepresentable {
     var onFollowUp: (() -> Void)?
     var onPasteFiles: (([URL]) -> [String])?
     var onPasteImage: ((Data, String) -> [String])?
+    var onPasteError: ((String) -> Void)?
+    var onPastePendingChange: ((Bool) -> Void)?
+    var pasteContextID = "" {
+      didSet {
+        if pasteContextID != oldValue { cancelImagePastes() }
+      }
+    }
+    private(set) var imagePasteTasks: [UUID: Task<Void, Never>] = [:]
+    private var pasteGeneration = UUID()
     var onCompletionKey: ((UInt16) -> Bool)?
+
+    func cancelImagePastes() {
+      pasteGeneration = UUID()
+      for task in imagePasteTasks.values { task.cancel() }
+      imagePasteTasks.removeAll()
+      // updateNSView 切换会话时也会取消；延后通知，避免在 SwiftUI 更新中修改状态。
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        self.onPastePendingChange?(!self.imagePasteTasks.isEmpty)
+      }
+    }
+
+    func pasteImage(from pasteboard: NSPasteboard) {
+      let name = pasteboard.name.rawValue
+      let changeCount = pasteboard.changeCount
+      let generation = pasteGeneration
+      let id = UUID()
+      onPastePendingChange?(true)
+      imagePasteTasks[id] = Task { @MainActor [weak self] in
+        do {
+          let png = try await AttachmentImageLoader.shared.pastedPNG(
+            name: name, changeCount: changeCount)
+          try Task.checkCancellation()
+          guard let self, self.pasteGeneration == generation else { return }
+          self.imagePasteTasks[id] = nil
+          self.onPastePendingChange?(!self.imagePasteTasks.isEmpty)
+          self.insertAttachmentReferences(self.onPasteImage?(png, "image/png") ?? [])
+        } catch {
+          guard let self, self.pasteGeneration == generation else { return }
+          self.imagePasteTasks[id] = nil
+          self.onPastePendingChange?(!self.imagePasteTasks.isEmpty)
+          if !(error is CancellationError) { self.onPasteError?(error.localizedDescription) }
+        }
+      }
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
       // AppKit may ask every view to handle a key equivalent. Only intercept paste when
@@ -2253,32 +2314,18 @@ private struct ComposerTextView: NSViewRepresentable {
 
     override func paste(_ sender: Any?) {
       let pasteboard = NSPasteboard.general
+      let types = pasteboard.types ?? []
       let urls =
-        pasteboard.readObjects(
-          forClasses: [NSURL.self],
-          options: [.urlReadingFileURLsOnly: true]
-        ) as? [URL] ?? []
+        types.contains(.fileURL)
+        ? (pasteboard.readObjects(
+          forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+        : []
       if !urls.isEmpty {
         insertAttachmentReferences(onPasteFiles?(urls) ?? [])
         return
       }
-      if let png = pasteboard.data(forType: .png) {
-        insertAttachmentReferences(onPasteImage?(png, "image/png") ?? [])
-        return
-      }
-      if let tiff = pasteboard.data(forType: .tiff),
-        let representation = NSBitmapImageRep(data: tiff),
-        let png = representation.representation(using: .png, properties: [:])
-      {
-        insertAttachmentReferences(onPasteImage?(png, "image/png") ?? [])
-        return
-      }
-      if let image = NSImage(pasteboard: pasteboard),
-        let tiff = image.tiffRepresentation,
-        let representation = NSBitmapImageRep(data: tiff),
-        let png = representation.representation(using: .png, properties: [:])
-      {
-        insertAttachmentReferences(onPasteImage?(png, "image/png") ?? [])
+      if types.contains(where: AttachmentImageLoader.isImageType) {
+        pasteImage(from: pasteboard)
         return
       }
       super.paste(sender)
@@ -2320,6 +2367,10 @@ private struct ComposerTextView: NSViewRepresentable {
         // 直接插入换行会绕过 NSTextInputContext，使部分输入法把 Shift 松开
         // 误判为单独按下 Shift，进而切换中英文。
         super.keyDown(with: event)
+        return
+      }
+      if !imagePasteTasks.isEmpty {
+        onPasteError?("图片仍在读取，请稍候再发送")
         return
       }
       if modifiers.contains(.option) {
@@ -3045,13 +3096,12 @@ private struct MessageAttachmentsView: View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
         ForEach(attachments) { attachment in
-          if attachment.isImage, let image = NSImage(contentsOf: attachment.url) {
+          if attachment.isImage {
             Button {
               previewedAttachment = attachment
             } label: {
               VStack(alignment: .leading, spacing: 4) {
-                Image(nsImage: image)
-                  .resizable()
+                AttachmentThumbnail(url: attachment.url, maxPixelSize: 256)
                   .scaledToFill()
                   .frame(width: 118, height: 82)
                   .clipped()

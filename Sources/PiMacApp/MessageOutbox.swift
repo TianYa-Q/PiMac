@@ -12,6 +12,8 @@ struct OutboxMessage: Identifiable, Codable, Equatable, Sendable {
     case saved, sending, unknown, rejected, missing, draft, conflict, accepted, delivered, migrated,
       dismissed
 
+    var isConfirmed: Bool { self == .accepted || self == .delivered }
+
     var needsRecovery: Bool {
       [.saved, .unknown, .rejected, .missing, .draft, .conflict].contains(self)
     }
@@ -37,12 +39,15 @@ struct OutboxMessage: Identifiable, Codable, Equatable, Sendable {
   var state: State = .saved
   var issue = "输入已保存在本机"
   var migratedTo: String?
+  // 可选字段兼容已落盘的旧记录；只存受控阶段和安全错误，不保存 URL、凭据或响应正文。
+  var lastFailure: MessageRecoveryCoordinator.FailureDiagnostic?
 
   var isVisible: Bool { ![.delivered, .migrated, .dismissed].contains(state) }
   var entry: ChatEntry {
     ChatEntry(
       id: id, kind: .user,
-      title: state == .accepted ? "你" : "你 · \(state.needsRecovery ? "待恢复" : "正在提交")",
+      title: state == .accepted
+        ? "你" : state == .saved ? "你 · 已保存" : "你 · \(state.needsRecovery ? "待恢复" : "正在提交")",
       text: rpcText, isError: state.needsRecovery && state != .saved,
       attachments: attachments.map(\.attachment).filter(\.isImage), timestamp: createdAt)
   }
@@ -338,6 +343,58 @@ protocol MessageDeliveryTransport: AnyObject {
 @MainActor
 final class MessageRecoveryCoordinator: ObservableObject {
   enum Check: Equatable { case accepted, ready, needsEditing, missing, blocked }
+
+  enum Stage: String, Codable, Sendable {
+    case environment, snapshot, project, createProject, createThread, prepareAttachments, upload,
+      dispatch
+
+    var title: String {
+      switch self {
+      case .environment: "核对 Server 环境"
+      case .snapshot: "读取会话"
+      case .project: "核对项目"
+      case .createProject: "准备项目"
+      case .createThread: "创建会话"
+      case .prepareAttachments: "准备附件"
+      case .upload: "上传附件"
+      case .dispatch: "提交消息"
+      }
+    }
+  }
+
+  struct FailureDiagnostic: Codable, Equatable, Sendable {
+    let stage: Stage
+    let elapsedMilliseconds: Int
+    let occurredAt: Date
+    let reason: String
+  }
+
+  @MainActor
+  private struct Attempt {
+    var stage: Stage = .environment
+    var startedAt = ContinuousClock.now
+
+    mutating func begin(_ stage: Stage) {
+      self.stage = stage
+      startedAt = .now
+    }
+
+    func failure(_ cause: Error) -> AttemptFailure {
+      let elapsed = startedAt.duration(to: .now).components
+      return AttemptFailure(
+        cause: cause,
+        diagnostic: FailureDiagnostic(
+          stage: stage,
+          elapsedMilliseconds: Int(
+            elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000),
+          occurredAt: .now, reason: MessageRecoveryCoordinator.issue(cause)))
+    }
+  }
+
+  private struct AttemptFailure: Error {
+    let cause: Error
+    let diagnostic: FailureDiagnostic
+  }
   let store: MessageOutboxStore
   private let transport: MessageDeliveryTransport
   @Published private(set) var activeThreads: Set<String> = []
@@ -353,52 +410,41 @@ final class MessageRecoveryCoordinator: ObservableObject {
     else { return .blocked }
     activeThreads.insert(record.threadID)
     defer { activeThreads.remove(record.threadID) }
-    do { return try await inspect(id) } catch {
-      try? store.update(id) { $0.issue = Self.issue(error) }
+    var attempt = Attempt()
+    do { return try await inspect(id, attempt: &attempt) } catch {
+      let state = store.message(id)?.state
+      if state == .delivered || (state == .accepted && record.state != .accepted) {
+        return .accepted
+      }
+      let failure = attempt.failure(error)
+      try? store.update(id) {
+        guard $0.isVisible, $0.state != .conflict else { return }
+        $0.issue = Self.issue(failure)
+        $0.lastFailure = failure.diagnostic
+      }
       return .blocked
     }
   }
 
-  private func inspect(_ id: String) async throws -> Check {
-    guard let record = store.message(id) else { throw CocoaError(.fileReadNoSuchFile) }
-    if record.state == .conflict { return .blocked }
+  private func inspect(_ id: String, attempt: inout Attempt) async throws -> Check {
+    guard var record = store.message(id) else { throw CocoaError(.fileReadNoSuchFile) }
+    guard record.isVisible, record.state != .conflict else { return .blocked }
+    attempt.begin(.environment)
     let environment = try await transport.recoveryEnvironmentID()
     guard record.environmentID == nil || record.environmentID == environment else {
       throw RecoveryError.environmentChanged
     }
     if record.environmentID == nil { try store.update(id) { $0.environmentID = environment } }
+    attempt.begin(.snapshot)
+    let snapshot: [String: Any]
     do {
-      let snapshot = try await transport.recoverySnapshot(threadID: record.threadID)
-      guard let projection = snapshot["projection"] as? [String: Any],
-        let thread = projection["thread"] as? [String: Any],
-        thread["id"] as? String == record.threadID,
-        let messages = projection["messages"] as? [[String: Any]]
-      else { throw RecoveryError.invalidSnapshot }
-      // 不把另一个项目的同名/陈旧线程当成当前输入的投递目标。
-      let projectID = try await transport.recoveryProjectID(
-        URL(fileURLWithPath: record.projectPath))
-      guard let projectID, thread["projectId"] as? String == projectID else {
-        throw RecoveryError.projectChanged
-      }
-      if messages.contains(where: { $0["id"] as? String == record.id }) {
-        try store.update(id) {
-          guard ![.delivered, .conflict, .migrated, .dismissed].contains($0.state) else { return }
-          $0.state = .accepted
-          $0.issue = "Server 已收到，不会重复发送"
-        }
-        return .accepted
-      }
-      if record.state == .accepted { return .accepted }
-      if record.state == .rejected || record.state == .draft {
-        try store.update(id) { $0.issue = "旧命令已停止重试；可取回原稿修正后重新提交" }
-        return record.state == .rejected ? .needsEditing : .blocked
-      }
-      // 快照不存在某条消息不证明未接收；继续使用原 commandId 查询/重放回执。
-      try store.update(id) { $0.issue = "核对完成；可用原投递身份继续，不会创建重复命令" }
-      return .ready
+      snapshot = try await transport.recoverySnapshot(threadID: record.threadID)
     } catch let error as T3DesktopClient.HTTPFailure where error.status == 404 {
-      if record.createsThread && !record.threadCreated && record.dispatchCommand == nil
-        && record.state != .rejected
+      guard let current = store.message(id) else { throw CocoaError(.fileReadNoSuchFile) }
+      if current.state.isConfirmed { return .accepted }
+      guard current.isVisible, current.state != .conflict else { return .blocked }
+      if current.createsThread && !current.threadCreated && current.dispatchCommand == nil
+        && current.state != .rejected
       {
         try store.update(id) { $0.issue = "新会话创建尚未完成，可从原步骤继续" }
         return .ready
@@ -409,6 +455,39 @@ final class MessageRecoveryCoordinator: ObservableObject {
       }
       return .missing
     }
+    guard let projection = snapshot["projection"] as? [String: Any],
+      let thread = projection["thread"] as? [String: Any],
+      thread["id"] as? String == record.threadID,
+      let messages = projection["messages"] as? [[String: Any]]
+    else { throw RecoveryError.invalidSnapshot }
+    // 项目读取的 404 不是线程丢失；只有上面的线程详情读取可以转入 missing。
+    attempt.begin(.project)
+    let projectID = try await transport.recoveryProjectID(URL(fileURLWithPath: record.projectPath))
+    guard let projectID, thread["projectId"] as? String == projectID else {
+      throw RecoveryError.projectChanged
+    }
+    // await 期间观察者可能已经确认投递或发现迁移冲突，不能沿用旧记录覆盖终态。
+    guard let current = store.message(id) else { throw CocoaError(.fileReadNoSuchFile) }
+    record = current
+    if record.state.isConfirmed { return .accepted }
+    guard record.isVisible, record.state != .conflict else { return .blocked }
+    if messages.contains(where: { $0["id"] as? String == record.id }) {
+      try store.update(id) {
+        $0.state = .accepted
+        $0.issue = "Server 已收到，不会重复发送"
+      }
+      return .accepted
+    }
+    if record.state == .rejected || record.state == .draft {
+      try store.update(id) { $0.issue = "旧命令已停止重试；可取回原稿修正后重新提交" }
+      return record.state == .rejected ? .needsEditing : .blocked
+    }
+    // 原会话已按环境和项目重新核实；退出 missing，但不把快照缺消息当成未接收。
+    try store.update(id) {
+      if $0.state == .missing { $0.state = .unknown }
+      $0.issue = "核对完成；可用原投递身份继续，不会创建重复命令"
+    }
+    return .ready
   }
 
   func deliver(_ id: String, retryDelays: [Duration] = []) async -> Bool {
@@ -431,7 +510,8 @@ final class MessageRecoveryCoordinator: ObservableObject {
         let canRetry =
           attempt < retryDelays.count && Self.isTransient(error)
           && !Task.isCancelled && record?.state == .unknown
-          && (record?.attachments.isEmpty == true || record?.dispatchCommand != nil)
+          // 只读预检和冻结命令允许重试；上传结果未知时仍停止，避免重复上传。
+          && (error as? AttemptFailure)?.diagnostic.stage != .upload
         guard canRetry else { return false }
         do {
           try store.update(id) {
@@ -445,7 +525,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
             $0.state = .unknown
             $0.issue = "自动恢复已中断；原稿已保留，请检查并恢复"
           }
-          return false
+          return store.message(id)?.state.isConfirmed == true
         }
       }
     }
@@ -453,6 +533,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
   }
 
   private static func isTransient(_ error: Error) -> Bool {
+    if let failure = error as? AttemptFailure { return isTransient(failure.cause) }
     if let error = error as? URLError {
       return [
         .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
@@ -466,15 +547,23 @@ final class MessageRecoveryCoordinator: ObservableObject {
   }
 
   private func deliverAttempt(_ id: String) async throws -> Bool {
+    var attempt = Attempt()
     do {
       try Task.checkCancellation()
-      let checked = try await inspect(id)
-      if checked == .accepted { return true }
+      try store.update(id) {
+        if [.saved, .unknown, .sending].contains($0.state) {
+          $0.state = .sending
+          $0.issue = "正在核对并提交已保存的输入"
+        }
+      }
+      let checked = try await inspect(id, attempt: &attempt)
+      if store.message(id)?.state.isConfirmed == true { return true }
       guard checked == .ready else { return false }
       guard var record = store.message(id), record.isVisible,
         ![.draft, .conflict, .missing, .rejected].contains(record.state)
       else { return false }
       try Task.checkCancellation()
+      attempt.begin(.prepareAttachments)
       try store.validateAttachments(record)
       let selection = try Self.object(record.selection)
       try store.update(id) {
@@ -483,8 +572,11 @@ final class MessageRecoveryCoordinator: ObservableObject {
       }
       if record.createsThread && !record.threadCreated {
         if record.createCommand == nil {
+          attempt.begin(.createProject)
           let projectID = try await transport.ensureProject(
             URL(fileURLWithPath: record.projectPath))
+          if store.message(id)?.state.isConfirmed == true { return true }
+          guard store.message(id)?.state == .sending else { return false }
           let command: [String: Any] = [
             "type": "thread.create", "threadId": record.threadID, "projectId": projectID,
             "title": "新任务", "modelSelection": selection, "runtimeMode": "full-access",
@@ -494,15 +586,24 @@ final class MessageRecoveryCoordinator: ObservableObject {
           try store.update(id) { $0.createCommand = data }
           record = store.message(id)!
         }
+        attempt.begin(.createThread)
         _ = try await transport.dispatch(
           Self.object(record.createCommand!), commandID: record.createCommandID, refreshAfter: true)
         try store.update(id) { $0.threadCreated = true }
       }
       record = store.message(id)!
+      if record.state.isConfirmed { return true }
+      guard record.state == .sending else { return false }
       if record.dispatchCommand == nil {
+        attempt.begin(.prepareAttachments)
         let images = try await PromptImagePayload.encode(record.attachments.map(\.attachment))
+        if store.message(id)?.state.isConfirmed == true { return true }
+        guard store.message(id)?.state == .sending else { return false }
+        attempt.begin(.upload)
         let uploaded = try await transport.persistAttachments(
           images.map(\.json), threadID: record.threadID, messageID: record.id)
+        if store.message(id)?.state.isConfirmed == true { return true }
+        guard store.message(id)?.state == .sending else { return false }
         let command: [String: Any] = [
           "type": "message.dispatch", "threadId": record.threadID, "messageId": record.id,
           "modelSelection": selection, "text": record.rpcText, "attachments": uploaded,
@@ -512,6 +613,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
         try store.update(id) { $0.dispatchCommand = data }
         record = store.message(id)!
       }
+      attempt.begin(.dispatch)
       _ = try await transport.dispatch(
         Self.object(record.dispatchCommand!), commandID: record.dispatchCommandID,
         refreshAfter: true)
@@ -523,6 +625,8 @@ final class MessageRecoveryCoordinator: ObservableObject {
       }
       return true
     } catch {
+      if store.message(id)?.state.isConfirmed == true { return true }
+      let diagnostic = attempt.failure(error)
       try? store.update(id) {
         if [.delivered, .accepted, .conflict, .migrated, .dismissed].contains($0.state) { return }
         if let failure = error as? T3DesktopClient.RPCFailure {
@@ -531,9 +635,10 @@ final class MessageRecoveryCoordinator: ObservableObject {
         } else {
           $0.state = .unknown
         }
-        $0.issue = Self.issue(error)
+        $0.issue = Self.issue(diagnostic)
+        $0.lastFailure = diagnostic.diagnostic
       }
-      throw error
+      throw diagnostic
     }
   }
 
@@ -545,6 +650,9 @@ final class MessageRecoveryCoordinator: ObservableObject {
   }
 
   static func issue(_ error: Error) -> String {
+    if let failure = error as? AttemptFailure {
+      return "\(failure.diagnostic.stage.title)：\(failure.diagnostic.reason)"
+    }
     if let error = error as? T3DesktopClient.RPCFailure { return error.localizedDescription }
     if let error = error as? RecoveryError { return error.localizedDescription }
     if let error = error as? T3DesktopClient.HTTPFailure {

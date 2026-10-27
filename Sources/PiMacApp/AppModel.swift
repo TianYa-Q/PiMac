@@ -535,8 +535,8 @@ final class AppModel: ObservableObject {
       attachments.removeAll { ids.contains($0.id) }
     }
     observeThread(target, on: server)
-    refreshDeliveryPresentation()
     performDelivery(id, completion: completion)
+    refreshDeliveryPresentation()
   }
 
   private func performDelivery(_ id: String, completion: @escaping (Bool) -> Void) {
@@ -568,7 +568,8 @@ final class AppModel: ObservableObject {
   }
   var recoveryRecords: [OutboxMessage] {
     deliveryRecords.filter {
-      $0.state.needsRecovery || ($0.state == .accepted && connectionState != .connected)
+      ($0.state.needsRecovery && !($0.state == .saved && submitting))
+        || ($0.state == .accepted && connectionState != .connected)
     }.sorted { ($0.state == .draft ? 1 : 0) < ($1.state == .draft ? 1 : 0) }
   }
   var deliveryStorageFailure: String? { deliveryCoordinator?.store.failure }
@@ -603,8 +604,20 @@ final class AppModel: ObservableObject {
     objectWillChange.send()
   }
 
+  // 只读核对与 Agent 执行互不排斥；同一线程的投递/核对仍由协调器串行化。
+  var canCheckDeliveryRecovery: Bool {
+    !isCheckingDelivery && !submitting && !recoveryRecords.isEmpty
+      && !(threadID.map { deliveryCoordinator?.activeThreads.contains($0) == true } ?? false)
+  }
+
+  var canContinueDeliveryRecovery: Bool {
+    canCheckDeliveryRecovery && recoveryReady && !isCompacting && pendingSelection == nil
+      && !codexRotationInFlight && !isChangingFastMode && !isManagingAccounts
+      && extensionUI?.hasPendingDialog(for: self) != true
+  }
+
   func checkDeliveryRecovery() {
-    guard !isCheckingDelivery, !submitting, let deliveryCoordinator else { return }
+    guard canCheckDeliveryRecovery, let deliveryCoordinator else { return }
     isCheckingDelivery = true
     recoveryReady = false
     recoveryChecked = false
@@ -632,7 +645,7 @@ final class AppModel: ObservableObject {
   }
 
   func continueDeliveryRecovery() {
-    guard recoveryReady, !isBusy, let first = recoveryRecords.first, let server else { return }
+    guard canContinueDeliveryRecovery, let first = recoveryRecords.first, let server else { return }
     recoveryReady = false
     observeThread(first.threadID, on: server)
     connectionState = .connected

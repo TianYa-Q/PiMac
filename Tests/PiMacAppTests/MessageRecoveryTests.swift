@@ -44,18 +44,37 @@ struct MessageRecoveryTests {
     var inspectionError: Error?
     var inspectionFailures = 0
     var inspections = 0
+    var snapshotFailures = 0
+    var snapshots = 0
+    var projectError: Error?
+    var onProject: (() throws -> Void)?
+    var pausePreflight = false
+    var pendingPreflight: CheckedContinuation<Void, Never>?
+    var uploadError: Error?
+    var uploads = 0
+    var uploadedImages = 0
 
     func recoveryEnvironmentID() async throws -> String {
       inspections += 1
+      if pausePreflight { await withCheckedContinuation { pendingPreflight = $0 } }
       if inspectionFailures > 0 {
         inspectionFailures -= 1
         throw inspectionError ?? URLError(.timedOut)
       }
       return environment
     }
-    func recoveryProjectID(_ url: URL) async throws -> String? { project }
+    func recoveryProjectID(_ url: URL) async throws -> String? {
+      try onProject?()
+      if let projectError { throw projectError }
+      return project
+    }
     func ensureProject(_ url: URL) async throws -> String { project }
     func recoverySnapshot(threadID: String) async throws -> [String: Any] {
+      snapshots += 1
+      if snapshotFailures > 0 {
+        snapshotFailures -= 1
+        throw URLError(.timedOut)
+      }
       guard exists else { throw T3DesktopClient.HTTPFailure(status: 404) }
       return [
         "projection": [
@@ -66,7 +85,12 @@ struct MessageRecoveryTests {
     }
     func persistAttachments(_ images: [[String: Any]], threadID: String, messageID: String)
       async throws -> [[String: Any]]
-    { [] }
+    {
+      uploads += 1
+      uploadedImages += images.count
+      if let uploadError { throw uploadError }
+      return []
+    }
     func dispatch(_ fields: [String: Any], commandID: String, refreshAfter: Bool) async throws
       -> [String: Any]
     {
@@ -138,7 +162,7 @@ struct MessageRecoveryTests {
     }
   }
 
-  @Test func explicitRejectionAndUnfrozenAttachmentsNeverAutomaticallyReplay() async throws {
+  @Test func explicitRejectionNeverAutomaticallyReplays() async throws {
     let root = try directory()
     let store = MessageOutboxStore()
     let transport = Transport()
@@ -151,16 +175,186 @@ struct MessageRecoveryTests {
     #expect(store.message(rejected.id)?.state == .rejected)
     #expect(transport.commands.count == 1)
 
-    transport.onDispatch = nil
-    transport.inspectionFailures = 1
-    let source = root.appendingPathComponent("attachment.txt")
-    try Data("original attachment".utf8).write(to: source)
-    let attachment = try save(
-      store, root: root, attachments: [PromptAttachment(url: source, mimeType: "text/plain")])
-    #expect(await coordinator.deliver(attachment.id, retryDelays: [.zero]) == false)
-    #expect(store.message(attachment.id)?.state == .unknown)
-    #expect(transport.commands.count == 1)
-    try store.validateAttachments(#require(store.message(attachment.id)))
+  }
+
+  @Test func attachmentRetriesReadOnlyPreflightButNotAmbiguousUpload() async throws {
+    let root = try directory()
+    let source = root.appendingPathComponent("attachment.png")
+    try #require(
+      Data(
+        base64Encoded:
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+      )
+    ).write(to: source)
+    for uploadFails in [false, true] {
+      let store = MessageOutboxStore(directory: root.appendingPathComponent(UUID().uuidString))
+      let transport = Transport()
+      transport.exists = true
+      transport.snapshotFailures = 1
+      if uploadFails { transport.uploadError = URLError(.timedOut) }
+      let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+      let record = try save(
+        store, root: root, creates: false,
+        attachments: [PromptAttachment(url: source, mimeType: "image/png")])
+      #expect(await coordinator.deliver(record.id, retryDelays: [.zero, .zero]) == !uploadFails)
+      #expect(transport.snapshots == 2)
+      #expect(transport.uploads == 1)
+      #expect(transport.uploadedImages == 1)
+      #expect(transport.commands.count == (uploadFails ? 0 : 1))
+      #expect(transport.runs == (uploadFails ? 0 : 1))
+      let saved = try #require(store.message(record.id))
+      #expect(saved.lastFailure?.stage == (uploadFails ? .upload : .snapshot))
+      #expect(saved.lastFailure?.elapsedMilliseconds ?? -1 >= 0)
+      #expect(saved.state == (uploadFails ? .unknown : .accepted))
+      #expect(saved.dispatchCommandID == record.dispatchCommandID)
+      try store.validateAttachments(saved)
+      let reloaded = MessageOutboxStore(directory: store.storageDirectory)
+      #expect(reloaded.message(record.id)?.lastFailure == saved.lastFailure)
+      if uploadFails { #expect(saved.dispatchCommand == nil) }
+    }
+  }
+
+  @Test func normalPreflightIsInFlightAndInterruptedPreparationRemainsRecoverable() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore(directory: root.appendingPathComponent("outbox"))
+    let record = try save(store, root: root, creates: false)
+    let transport = Transport()
+    transport.exists = true
+    transport.pausePreflight = true
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let task = Task { await coordinator.deliver(record.id) }
+    for _ in 0..<1000 where transport.pendingPreflight == nil { await Task.yield() }
+    let continuation = try #require(transport.pendingPreflight)
+    #expect(coordinator.activeThreads.contains(record.threadID))
+    #expect(store.message(record.id)?.state == .sending)
+    #expect(store.message(record.id)?.state.needsRecovery == false)
+    #expect(store.message(record.id)?.entry.title == "你 · 正在提交")
+    #expect(transport.commands.isEmpty)
+    let restarted = MessageOutboxStore(directory: store.storageDirectory)
+    #expect(restarted.message(record.id)?.state == .unknown)
+    continuation.resume()
+    #expect(await task.value)
+  }
+
+  @Test func missingThreadCanReturnOnlyAfterEnvironmentAndProjectAreRevalidated() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let record = try save(store, root: root, creates: false)
+    #expect(await coordinator.check(record.id) == .missing)
+    transport.exists = true
+    transport.environment = "other-environment"
+    #expect(await coordinator.check(record.id) == .blocked)
+    #expect(store.message(record.id)?.state == .missing)
+    transport.environment = "environment"
+    transport.projectError = T3DesktopClient.HTTPFailure(status: 404)
+    #expect(await coordinator.check(record.id) == .blocked)
+    #expect(store.message(record.id)?.lastFailure?.stage == .project)
+    transport.projectError = nil
+    #expect(await coordinator.check(record.id) == .ready)
+    #expect(store.message(record.id)?.state == .unknown)
+    #expect(transport.commands.isEmpty)
+    #expect(await coordinator.deliver(record.id))
+    #expect(transport.runs == 1)
+    #expect(transport.commands.first?.0 == record.dispatchCommandID)
+    #expect(
+      !transport.commands.contains {
+        String(data: $0.1, encoding: .utf8)?.contains("thread.create") == true
+      })
+  }
+
+  @Test func authoritativeAcknowledgementDuringProjectReadConvergesWithoutDispatch() async throws {
+    let root = try directory()
+    for projectFails in [false, true] {
+      let store = MessageOutboxStore()
+      let transport = Transport()
+      transport.exists = true
+      let record = try save(store, root: root, creates: false)
+      transport.onProject = {
+        try store.acknowledge(threadID: record.threadID, messageIDs: [record.id])
+      }
+      if projectFails { transport.projectError = URLError(.timedOut) }
+      let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+      #expect(await coordinator.deliver(record.id, retryDelays: [.zero]))
+      #expect(store.message(record.id)?.state == .delivered)
+      #expect(await coordinator.deliver(record.id))
+      #expect(transport.commands.isEmpty)
+      #expect(transport.uploads == 0)
+    }
+  }
+
+  @Test func projectLookup404IsNotThreadMissingAndDiagnosticsRedactSecrets() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    transport.exists = true
+    transport.projectError = T3DesktopClient.HTTPFailure(status: 404)
+    let record = try save(store, root: root, creates: false)
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    #expect(await coordinator.deliver(record.id) == false)
+    #expect(store.message(record.id)?.state == .unknown)
+    #expect(store.message(record.id)?.lastFailure?.stage == .project)
+    transport.projectError = NSError(
+      domain: NSURLErrorDomain, code: -1001,
+      userInfo: [
+        NSLocalizedDescriptionKey: "secret-value",
+        NSURLErrorFailingURLStringErrorKey: "https://secret-value",
+      ])
+    #expect(await coordinator.check(record.id) == .blocked)
+    let diagnostic = try #require(store.message(record.id)?.lastFailure)
+    #expect(
+      !String(decoding: try JSONEncoder().encode(diagnostic), as: UTF8.self).contains(
+        "secret-value"))
+    #expect(transport.commands.isEmpty)
+  }
+
+  @Test func runningAgentAllowsCheckedRecoveryButNotConcurrentDeliveryOrCompaction() async throws {
+    let root = try directory()
+    let suite = "recovery-running-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    let client = T3DesktopClient(defaults: defaults)
+    let model = AppModel(restoreLastProjectOnLaunch: false)
+    defer {
+      model.disconnect()
+      client.stop()
+      defaults.removePersistentDomain(forName: suite)
+    }
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    transport.exists = true
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let record = try save(store, root: root, creates: false)
+    try store.update(record.id) { $0.state = .unknown }
+    model.attach(to: client, deliveries: coordinator)
+    model.projectURL = root
+    model.currentSessionPath = "t3:\(record.threadID)"
+    model.connectionState = .connected
+    model.isStreaming = true
+    #expect(model.isBusy)
+    #expect(model.canCheckDeliveryRecovery)
+    #expect(!model.canContinueDeliveryRecovery)
+    model.checkDeliveryRecovery()
+    #expect(!model.canCheckDeliveryRecovery)
+    for _ in 0..<1000 where model.isCheckingDelivery { await Task.yield() }
+    #expect(model.recoveryReady)
+    #expect(model.canContinueDeliveryRecovery)
+    model.isCompacting = true
+    #expect(!model.canContinueDeliveryRecovery)
+    model.isCompacting = false
+    transport.pausePreflight = true
+    model.continueDeliveryRecovery()
+    #expect(!model.canCheckDeliveryRecovery)
+    for _ in 0..<1000 where transport.pendingPreflight == nil { await Task.yield() }
+    let continuation = try #require(transport.pendingPreflight)
+    #expect(await coordinator.deliver(record.id) == false)
+    continuation.resume()
+    for _ in 0..<1000 where store.message(record.id)?.state != .accepted { await Task.yield() }
+    #expect(store.message(record.id)?.state == .accepted)
+    #expect(transport.runs == 1)
+    let command = try #require(transport.commands.last)
+    let fields = try #require(JSONSerialization.jsonObject(with: command.1) as? [String: Any])
+    #expect(fields["dispatchMode"] as? [String: String] == ["type": "queue_after_active"])
   }
 
   @Test func cancellationDuringAutomaticBackoffPreservesInputAndReleasesThread() async throws {
@@ -178,6 +372,25 @@ struct MessageRecoveryTests {
     task.cancel()
     #expect(await task.value == false)
     #expect(store.message(record.id)?.state == .unknown)
+    #expect(coordinator.activeThreads.isEmpty)
+    #expect(transport.commands.isEmpty)
+  }
+
+  @Test func acknowledgementDuringBackoffWinsOverCancellation() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    transport.inspectionFailures = 1
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let record = try save(store, root: root)
+    let task = Task { await coordinator.deliver(record.id, retryDelays: [.seconds(60)]) }
+    for _ in 0..<1000 where store.message(record.id)?.lastFailure == nil { await Task.yield() }
+    #expect(store.message(record.id)?.state == .sending)
+    #expect(store.message(record.id)?.lastFailure?.stage == .environment)
+    try store.acknowledge(threadID: record.threadID, messageIDs: [record.id])
+    task.cancel()
+    #expect(await task.value)
+    #expect(store.message(record.id)?.state == .delivered)
     #expect(coordinator.activeThreads.isEmpty)
     #expect(transport.commands.isEmpty)
   }
@@ -260,6 +473,10 @@ struct MessageRecoveryTests {
     transport.received.insert(second.id)
     let count = transport.commands.count
     #expect(await coordinator.check(second.id) == .accepted)
+    #expect(transport.commands.count == count)
+    transport.environment = "another-environment"
+    #expect(await coordinator.check(second.id) == .blocked)
+    #expect(store.message(second.id)?.state == .accepted)
     #expect(transport.commands.count == count)
   }
 
