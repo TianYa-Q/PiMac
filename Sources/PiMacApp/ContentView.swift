@@ -2468,7 +2468,7 @@ private struct CompactionEntryView: View {
       .disabled(entry.text.isEmpty)
       .help(entry.text.isEmpty ? "上下文已压缩" : "展开或收起压缩摘要")
       if expanded, !entry.text.isEmpty {
-        MarkdownView(entry.text)
+        MarkdownView(entry.text, textStyle: .callout)
           .equatable()
           .font(.callout)
           .textSelection(.enabled)

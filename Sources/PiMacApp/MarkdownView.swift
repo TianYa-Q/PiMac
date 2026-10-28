@@ -378,15 +378,19 @@ struct MarkdownView: View, Equatable {
   let source: String
   let document: MarkdownDocument
   let attachments: [PromptAttachment]
+  let textStyle: NSFont.TextStyle
 
-  init(_ source: String, attachments: [PromptAttachment] = []) {
+  init(
+    _ source: String, attachments: [PromptAttachment] = [], textStyle: NSFont.TextStyle = .body
+  ) {
     self.source = source
     self.attachments = attachments
+    self.textStyle = textStyle
     document = MarkdownDocumentCache.document(for: source)
   }
 
   static func == (lhs: Self, rhs: Self) -> Bool {
-    lhs.source == rhs.source && lhs.attachments == rhs.attachments
+    lhs.source == rhs.source && lhs.attachments == rhs.attachments && lhs.textStyle == rhs.textStyle
   }
 
   var body: some View {
@@ -394,12 +398,8 @@ struct MarkdownView: View, Equatable {
       ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
         switch section {
         case .text(let blocks):
-          combinedText(blocks)
-            .textSelection(.enabled)
+          SelectableMarkdownText(blocks: blocks, textStyle: textStyle)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // Measure the selectable renderer at its final wrapping width, not
-            // the plain Text before macOS installs its selection presentation.
-            .fixedSize(horizontal: false, vertical: true)
         case .image(let attachment, let caption):
           InlineReplyImageView(attachment: attachment, caption: caption)
         case .table(let headers, let rows, let alignments):
@@ -444,71 +444,6 @@ struct MarkdownView: View, Equatable {
     return result
   }
 
-  private func combinedText(_ blocks: [MarkdownBlock]) -> Text {
-    blocks.enumerated().reduce(Text("")) { result, element in
-      let separator = element.offset == 0 ? Text("") : Text("\n\n")
-      return result + separator + blockText(element.element)
-    }
-  }
-
-  private func blockText(_ block: MarkdownBlock) -> Text {
-    switch block {
-    case .paragraph(let text):
-      return inlineText(text)
-    case .heading(let level, let text):
-      return inlineText(text).font(headingFont(level))
-    case .code(let language, let text):
-      let label =
-        language.map {
-          Text("\($0)\n").font(.caption2).foregroundColor(.secondary)
-        } ?? Text("")
-      return label
-        + Text(text.isEmpty ? " " : text)
-        .font(.system(.body, design: .monospaced))
-    case .quote(let text):
-      let quoted = text.replacingOccurrences(of: "\n", with: "\n▎ ")
-      return Text("▎ ").foregroundColor(.accentColor)
-        + inlineText(quoted).foregroundColor(.secondary)
-    case .list(let ordered, let start, let items):
-      return items.enumerated().reduce(Text("")) { result, element in
-        let separator = element.offset == 0 ? Text("") : Text("\n")
-        let markerText = listMarker(element.element)
-        let marker = ordered ? "\(start + element.offset). " : "\(markerText) "
-        return result + separator + Text(marker).foregroundColor(.secondary)
-          + inlineText(listText(element.element))
-      }
-    case .table:
-      return Text("")
-    case .divider:
-      return Text("────────────────────────").foregroundColor(.secondary)
-    }
-  }
-
-  private func inlineText(_ source: String) -> Text {
-    Text(MarkdownInlineCache.attributedString(for: source))
-  }
-
-  private func headingFont(_ level: Int) -> Font {
-    switch level {
-    case 1: .title.bold()
-    case 2: .title2.bold()
-    case 3: .title3.bold()
-    default: .headline
-    }
-  }
-
-  private func listMarker(_ text: String) -> String {
-    if text.hasPrefix("[ ] ") { return "☐" }
-    if text.lowercased().hasPrefix("[x] ") { return "☑" }
-    return "•"
-  }
-
-  private func listText(_ text: String) -> String {
-    if text.hasPrefix("[ ] ") || text.lowercased().hasPrefix("[x] ") {
-      return String(text.dropFirst(4))
-    }
-    return text
-  }
 }
 
 enum MarkdownSection {

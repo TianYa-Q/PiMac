@@ -80,7 +80,9 @@ struct ConversationWindowLayoutTests {
     let layout = ConversationWindowLayout(ids: (0..<1000).map(String.init), heights: [:])
     let previous = CGRect(x: 0, y: 10_000, width: 800, height: 900)
     for delta in [-100, -1, 1, 100] {
-      #expect(!layout.requiresWindowUpdate(from: previous, to: previous.offsetBy(dx: 0, dy: CGFloat(delta))))
+      #expect(
+        !layout.requiresWindowUpdate(
+          from: previous, to: previous.offsetBy(dx: 0, dy: CGFloat(delta))))
     }
     #expect(layout.requiresWindowUpdate(from: previous, to: previous.offsetBy(dx: 0, dy: 2000)))
   }
@@ -108,6 +110,25 @@ struct ConversationWindowLayoutTests {
     let updated = ConversationWindowLayout(ids: ["a", "b", "c"], heights: ["a": 500, "b": 20_000])
     let correction = layout.anchorCorrection(to: updated, viewportY: after.minY)
     #expect(after.minY + correction - updated.offsets[1] == after.minY - layout.offsets[1])
+  }
+
+  @Test func liveTailOnlyStaysMountedWhenFollowingOrInsideThePrefetchWindow() {
+    let layout = ConversationWindowLayout(ids: (0..<100).map(String.init), heights: [:])
+    let history = CGRect(x: 0, y: 4000, width: 800, height: 900)
+    let manual = layout.mountedIndices(viewport: history, pinnedToBottom: false)
+    #expect(manual == Array(layout.window(viewport: history)))
+    #expect(!manual.contains(99))
+    #expect(layout.mountedIndices(viewport: history, pinnedToBottom: true) == manual + [99])
+    let bottom = CGRect(x: 0, y: layout.height - 900, width: 800, height: 900)
+    for pinned in [false, true] {
+      let mounted = layout.mountedIndices(viewport: bottom, pinnedToBottom: pinned)
+      #expect(mounted.contains(99))
+      #expect(Set(mounted).count == mounted.count)
+    }
+    #expect(
+      ConversationWindowLayout(ids: [], heights: [:]).mountedIndices(
+        viewport: nil, pinnedToBottom: true
+      ).isEmpty)
   }
 
   @Test func windowIsClampedDuringOverscrollAndResize() {

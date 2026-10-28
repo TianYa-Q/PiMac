@@ -57,6 +57,15 @@ struct ConversationWindowLayout {
     return first..<max(first + 1, last + 1)
   }
 
+  func mountedIndices(viewport: CGRect?, pinnedToBottom: Bool) -> [Int] {
+    let window = window(viewport: viewport)
+    var indices = Array(window)
+    // 跟随底部时预先测量最新输出；阅读历史时不排版屏幕外持续增长的尾部。
+    // 最新正文仍由消息模型保存，重新滚入预取范围后直接挂载最新版本。
+    if pinnedToBottom, count > 0, !window.contains(count - 1) { indices.append(count - 1) }
+    return indices
+  }
+
   /// 滚动的逐像素坐标留在 AppKit 中；只有挂载范围或视口尺寸改变才更新 SwiftUI。
   /// 否则每个滚轮事件都会重建全部历史的 offsets，并重新求值消息子树。
   func requiresWindowUpdate(from previous: CGRect?, to current: CGRect) -> Bool {
@@ -94,7 +103,7 @@ private struct ConversationRowHeights: PreferenceKey {
   }
 }
 
-/// Only the viewport plus overscan and the live tail have expensive message views.
+/// Only the viewport plus overscan (and the live tail while following) have message views.
 /// Spacer heights are controlled by us, rather than LazyVStack's changing estimates.
 struct VirtualConversationStack<Row: View>: View {
   let ids: [String]
@@ -117,8 +126,7 @@ struct VirtualConversationStack<Row: View>: View {
 
   var body: some View {
     let layout = ConversationWindowLayout(ids: ids, heights: heights)
-    let window = layout.window(viewport: viewport)
-    let blocks = blocks(layout: layout, window: window)
+    let blocks = blocks(layout: layout)
 
     VStack(alignment: .leading, spacing: 0) {
       ForEach(blocks) { block in
@@ -177,12 +185,9 @@ struct VirtualConversationStack<Row: View>: View {
     .transaction { $0.animation = nil }
   }
 
-  private func blocks(layout: ConversationWindowLayout, window: Range<Int>) -> [Block] {
+  private func blocks(layout: ConversationWindowLayout) -> [Block] {
     guard !ids.isEmpty else { return [] }
-    // Keep the newest turn mounted even when reading history: streaming must never
-    // modify a recycled lazy row. It has the same identity when it becomes history.
-    var indices = Array(window)
-    if !window.contains(ids.count - 1) { indices.append(ids.count - 1) }
+    let indices = layout.mountedIndices(viewport: viewport, pinnedToBottom: pinnedToBottom)
     var result: [Block] = []
     var previousEnd: CGFloat = 0
     for index in indices {
@@ -194,6 +199,9 @@ struct VirtualConversationStack<Row: View>: View {
       let end = layout.offsets[index + 1]
       result.append(Block(id: "row-" + ids[index], index: index, height: end - start))
       previousEnd = end
+    }
+    if previousEnd < layout.height {
+      result.append(Block(id: "trailing-gap", index: nil, height: layout.height - previousEnd))
     }
     return result
   }
