@@ -35,8 +35,8 @@ struct TaskLogTests {
   @Test func neverGuessesRemotePathsOutputsOrShellExpansions() {
     for input in [
       "$ ssh host 'tail -30 tmp/deploy.log'", "$ echo tail tmp/deploy.log",
-      "$ tail $LOG", "$ tail $(pwd)/deploy.log", "$ tail tmp/a.log > tmp/b.log",
-      "$ cd $ROOT && tail a.log", "$ tail 'unterminated.log", "$ tail a.log | grep error",
+      "$ tail $LOG", "$ tail $(pwd)/deploy.log",
+      "$ cd $ROOT && tail a.log", "$ tail 'unterminated.log",
     ] {
       #expect(TaskLogSource.latest(in: [entry("bash", input)], root: root) == nil)
     }
@@ -48,6 +48,94 @@ struct TaskLogTests {
     var unrelated = entry("bash", "$ echo done")
     unrelated.text = "tmp/deploy.log"
     #expect(TaskLogSource.latest(in: [unrelated], root: root) == nil)
+  }
+
+  @Test func switchesFromDryRunToCommonLogOutputs() throws {
+    let older = entry("read", "tmp/backend-deploy/dry-run.log")
+    for command in [
+      "pnpm deploy:ubuntu > tmp/backend-deploy/deploy.log 2>&1",
+      "nohup pnpm deploy:ubuntu >>tmp/backend-deploy/deploy.log 2>&1 &",
+      "pnpm deploy:ubuntu &>tmp/backend-deploy/deploy.log",
+      "pnpm deploy:ubuntu &>>tmp/backend-deploy/deploy.log &",
+      "pnpm deploy:ubuntu 1>tmp/backend-deploy/deploy.log 2>/dev/null",
+      "pnpm deploy:ubuntu 2>tmp/backend-deploy/deploy.log",
+      "pnpm deploy:ubuntu 2>&1 | tee -a tmp/backend-deploy/deploy.log",
+      "pnpm deploy:ubuntu | /usr/bin/tee -- tmp/backend-deploy/deploy.log &",
+      "cd tmp/backend-deploy && pnpm deploy:ubuntu > deploy.log 2>&1 &",
+      "cd 'tmp/backend-deploy'; pnpm deploy:ubuntu >> 'deploy.log'",
+      "cd -- tmp/backend-deploy && pnpm deploy:ubuntu > deploy.log",
+      "LOG_LEVEL=info pnpm deploy:ubuntu > \"tmp/backend-deploy/deploy.log\"",
+      "pnpm deploy:ubuntu --token \"$TOKEN\" > tmp/backend-deploy/deploy.log",
+      "pnpm deploy:ubuntu > tmp/backend-deploy/deploy.log # > ignored.log",
+      "pnpm deploy:ubuntu \\\n > tmp/backend-deploy/deploy.log",
+    ] {
+      let source = try #require(
+        TaskLogSource.latest(in: [older, entry("bash", "$ " + command)], root: root))
+      #expect(
+        source.file.path == "/workspace/project/tmp/backend-deploy/deploy.log",
+        Comment(rawValue: command))
+    }
+  }
+
+  @Test func recognizesLiteralPathsAndPipelineReads() throws {
+    for (command, path) in [
+      ("tail tmp/old.log > tmp/new.log", "tmp/new.log"),
+      ("tail tmp/new.log | grep error", "tmp/new.log"),
+      ("cat tmp/new.log", "tmp/new.log"),
+      ("head -n 20 tmp/new.log", "tmp/new.log"),
+      ("run | tee 'tmp/a && b.log'", "tmp/a && b.log"),
+      ("run > 'tmp/$literal.log'", "tmp/$literal.log"),
+      ("run > tmp/a\\ b.log", "tmp/a b.log"),
+      ("run > tmp/first.log; run >> tmp/new.log", "tmp/new.log"),
+      ("ssh host 'run > remote.log' > tmp/local.log", "tmp/local.log"),
+    ] {
+      #expect(
+        TaskLogSource.latest(in: [entry("bash", command)], root: root)?.file.path
+          == root.appendingPathComponent(path).path)
+    }
+  }
+
+  @Test func doesNotGuessDynamicRemoteOrOutOfWorkspaceOutputs() {
+    let older = entry("read", "tmp/old.log")
+    for command in [
+      "run > $LOG", "run > \"$DIR/deploy.log\"", "run > ~/deploy.log",
+      "run > tmp/*.log", "run > $(pwd)/deploy.log", "run > `pwd`/deploy.log",
+      "ssh host 'run > tmp/remote.log'", "sh -c 'run > tmp/nested.log'",
+      "echo 'run > tmp/pretend.log'", "echo tee tmp/pretend.log",
+      "run > ../outside.log", "run > /workspace/project-other/outside.log",
+      "cd $ROOT && run > tmp/deploy.log", "(cd tmp; run > deploy.log)",
+      "if true; then run > tmp/deploy.log; fi", "run > 'tmp/unterminated.log",
+      "cd tmp | run > deploy.log", "run | cd tmp; run > deploy.log",
+      "cd tmp && run > deploy.log & run > next.log",
+      "cd -; run > deploy.log", "pushd tmp; run > deploy.log",
+    ] {
+      #expect(
+        TaskLogSource.latest(in: [older, entry("bash", command)], root: root)?.file
+          .lastPathComponent == "old.log", Comment(rawValue: command))
+    }
+  }
+
+  @Test func readsTheNewRedirectedFileThroughTheDetectedSource() async throws {
+    try await withFiles { base in
+      let previous = base.appendingPathComponent("dry-run.log")
+      try Data("old dry run\n".utf8).write(to: previous)
+      for output in ["> deploy.log 2>&1", "2>&1 | tee -a deploy.log"] {
+        let command = "printf 'real deployment\\n' " + output
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", command]
+        process.currentDirectoryURL = base
+        process.standardOutput = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+        let source = try #require(
+          TaskLogSource.latest(
+            in: [entry("read", previous.path), entry("bash", command)], root: base))
+        #expect(source.file.lastPathComponent == "deploy.log")
+        #expect(try await TaskLogReader().read(source).text.hasSuffix("real deployment\n"))
+      }
+    }
   }
 
   @Test func readsRealBackgroundWritesBeforeExitAndRetainsFailureLog() async throws {

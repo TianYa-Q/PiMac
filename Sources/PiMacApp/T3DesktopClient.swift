@@ -42,6 +42,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   private var shellRefreshTask: Task<Void, Error>?
   private var shellRefreshRequested = false
   private var generation = UUID()
+  private(set) var htmlRenderCacheScope = UUID()
   let skillCache = WorkspaceSkillCache()
   private var skillInterests: [UUID: WorkspaceSkillContext] = [:]
   private var hasLiveSkillShell = false
@@ -58,7 +59,6 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   }
   private var toolHydrationPositions: [String: ToolHydrationPosition] = [:]
   private var imageFailures: [String: Int] = [:]
-  private var htmlDocumentCache: [String: String] = [:]
   private var htmlRetryAfter: [String: Date] = [:]
   private var hasDeliveredShell = false
   private let sessionCatalog = SessionCatalogCache()
@@ -346,6 +346,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     hasLiveSkillShell = false
     skillCache.reset()
     generation = UUID()
+    htmlRenderCacheScope = UUID()
     loop?.cancel()
     loop = nil
     connectionLoop?.cancel()
@@ -379,7 +380,6 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     replyImageCache.removeAll()
     toolDetailCache.removeAll()
     toolHydrationPositions.removeAll()
-    htmlDocumentCache.removeAll()
     htmlRetryAfter.removeAll()
     imageFailures.removeAll()
     hasDeliveredShell = false
@@ -1383,30 +1383,31 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   func htmlRenderDocument(_ reference: T3HTMLRender) async throws -> String {
     guard let base = service?.serverURL else { throw ClientError.rejected }
     let current = generation
-    let key = "\(base.absoluteString)|\(reference.attachmentID)"
-    if let cached = htmlDocumentCache[key] { return cached }
-    let signed = try await rpc(
-      "assets.createUrl",
-      payload: [
-        "resource": [
-          "_tag": "attachment", "attachmentId": reference.attachmentID,
-          "mimeType": "text/html", "disposition": "inline",
-        ]
-      ])
-    guard let relative = signed["relativeUrl"] as? String, relative.hasPrefix("/api/assets/"),
-      let url = URL(string: base.absoluteString + relative), url.host == base.host,
-      url.port == base.port, url.scheme == base.scheme
-    else { throw ClientError.rejected }
-    let data = try await BoundedAssetDownload.data(
-      from: url, session: assetSession, limit: 8 * 1024 * 1024, mimeType: "text/html")
-    guard generation == current, !Task.isCancelled else { throw CancellationError() }
-    guard let html = String(data: data, encoding: .utf8), !html.isEmpty
-    else { throw ClientError.rejected }
-    // 附件不可变；缓存独立于虚拟列表视图的挂载周期，并限制总内存占用。
-    if htmlDocumentCache.values.reduce(0, { $0 + $1.utf8.count }) + data.count > 16 * 1024 * 1024 {
-      htmlDocumentCache.removeAll()
+    let namespace = service?.assetCacheNamespace ?? base.absoluteString
+    let key = "\(namespace)|\(reference.attachmentID)"
+    let html = try await T3HTMLDocumentCache.shared.document(key: key) { @MainActor [self] in
+      guard generation == current else { throw CancellationError() }
+      let signed = try await rpc(
+        "assets.createUrl",
+        payload: [
+          "resource": [
+            "_tag": "attachment", "attachmentId": reference.attachmentID,
+            "mimeType": "text/html", "disposition": "inline",
+          ]
+        ])
+      guard let relative = signed["relativeUrl"] as? String, relative.hasPrefix("/api/assets/"),
+        let url = URL(string: base.absoluteString + relative), url.host == base.host,
+        url.port == base.port, url.scheme == base.scheme
+      else { throw ClientError.rejected }
+      let data = try await BoundedAssetDownload.data(
+        from: url, session: assetSession, limit: T3HTMLDocumentCache.maxDocumentBytes,
+        mimeType: "text/html")
+      guard generation == current else { throw CancellationError() }
+      guard let html = String(data: data, encoding: .utf8), !html.isEmpty
+      else { throw ClientError.rejected }
+      return html
     }
-    htmlDocumentCache[key] = html
+    guard generation == current, !Task.isCancelled else { throw CancellationError() }
     var recovered = false
     for itemKey in Array(toolDetailCache.keys) {
       guard var item = toolDetailCache[itemKey],

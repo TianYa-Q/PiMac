@@ -38,6 +38,7 @@ struct HTMLRenderView: View {
         GeometryReader { geometry in
           HTMLRenderWebView(
             html: html, dark: colorScheme == .dark,
+            cacheIdentity: "\(workspace.server.htmlRenderCacheScope)|\(reference.attachmentID)",
             onHeight: { contentHeight = $0 }, onError: { error = $0 },
             onLink: { externalLink = $0 }, onImage: { previewImage = $0 }
           )
@@ -96,6 +97,7 @@ struct HTMLRenderView: View {
 struct HTMLRenderWebView: NSViewRepresentable {
   let html: String
   let dark: Bool
+  var cacheIdentity: String? = nil
   let onHeight: (Double) -> Void
   let onError: (String) -> Void
   let onLink: (URL) -> Void
@@ -105,6 +107,21 @@ struct HTMLRenderWebView: NSViewRepresentable {
   func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
   func makeNSView(context: Context) -> WKWebView {
+    if let key = context.coordinator.cacheKey,
+      let cached = HTMLRenderWebViewCache.shared.take(key: key)
+    {
+      let view = cached.view
+      view.configuration.userContentController.add(context.coordinator, name: "renderEvent")
+      view.navigationDelegate = context.coordinator
+      context.coordinator.contentHeight = cached.height
+      if cached.dark != dark {
+        view.evaluateJavaScript("window.setRenderTheme(\(Self.themeJSON(dark: dark)))")
+      }
+      if let height = cached.height {
+        DispatchQueue.main.async { onHeight(height) }
+      }
+      return view
+    }
     let configuration = WKWebViewConfiguration()
     configuration.websiteDataStore = .nonPersistent()
     configuration.userContentController.add(context.coordinator, name: "renderEvent")
@@ -118,8 +135,14 @@ struct HTMLRenderWebView: NSViewRepresentable {
 
   func updateNSView(_ view: WKWebView, context: Context) {
     context.coordinator.parent = self
-    if context.coordinator.html != html {
+    if context.coordinator.html != html || context.coordinator.cacheIdentity != cacheIdentity {
       context.coordinator.html = html
+      context.coordinator.cacheIdentity = cacheIdentity
+      context.coordinator.cacheKey = cacheIdentity.map {
+        $0 + "|" + T3HTMLDocumentCache.digest(html)
+      }
+      context.coordinator.reusable = true
+      context.coordinator.contentHeight = nil
       view.loadHTMLString(Self.document(html: html, dark: dark), baseURL: nil)
     } else if context.coordinator.dark != dark {
       view.evaluateJavaScript("window.setRenderTheme(\(Self.themeJSON(dark: dark)))")
@@ -128,9 +151,14 @@ struct HTMLRenderWebView: NSViewRepresentable {
   }
 
   static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
-    view.stopLoading()
     view.navigationDelegate = nil
     view.configuration.userContentController.removeScriptMessageHandler(forName: "renderEvent")
+    if let key = coordinator.cacheKey, coordinator.reusable, !view.isLoading {
+      HTMLRenderWebViewCache.shared.store(
+        view, key: key, dark: coordinator.dark, height: coordinator.contentHeight)
+    } else {
+      view.stopLoading()
+    }
   }
 
   private static func json(_ value: Any) -> String {
@@ -232,10 +260,16 @@ struct HTMLRenderWebView: NSViewRepresentable {
     var parent: HTMLRenderWebView
     var html: String
     var dark: Bool
+    var cacheIdentity: String?
+    var cacheKey: String?
+    var contentHeight: Double?
+    var reusable = true
     init(parent: HTMLRenderWebView) {
       self.parent = parent
       html = parent.html
       dark = parent.dark
+      cacheIdentity = parent.cacheIdentity
+      cacheKey = parent.cacheIdentity.map { $0 + "|" + T3HTMLDocumentCache.digest(parent.html) }
     }
 
     func userContentController(
@@ -245,9 +279,14 @@ struct HTMLRenderWebView: NSViewRepresentable {
       if let source = data["image"] as? String, let image = HTMLRenderImageSource(source) {
         parent.onImage(image)
       }
-      if data["imageError"] as? Bool == true { parent.onError("图片加载失败") }
+      if data["imageError"] as? Bool == true {
+        reusable = false
+        parent.onError("图片加载失败")
+      }
       if let height = data["height"] as? Double, height.isFinite, height > 0 {
-        parent.onHeight(min(2000, max(80, height)))
+        let bounded = min(2000, max(80, height))
+        contentHeight = bounded
+        parent.onHeight(bounded)
       }
       if let text = data["url"] as? String, text.count <= 8192, let url = URL(string: text),
         ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil
@@ -267,15 +306,18 @@ struct HTMLRenderWebView: NSViewRepresentable {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+      reusable = false
       parent.onError("HTML 页面显示失败")
     }
     func webView(
       _ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
       withError error: Error
     ) {
+      reusable = false
       parent.onError("HTML 页面显示失败")
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+      reusable = false
       parent.onError("HTML 页面进程已退出，请重试")
     }
   }

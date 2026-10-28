@@ -16,6 +16,7 @@ final class T3BridgeService: ObservableObject {
   private var stoppingPID: Int32?
   private var stoppingProcess: Process?
   @Published private(set) var serverURL: URL?
+  private(set) var assetCacheNamespace: String?
   @Published private(set) var lanEndpoint: T3NetworkEndpoint?
   @Published private(set) var lanBusy = false
   @Published private(set) var lanMessage = ""
@@ -161,6 +162,7 @@ final class T3BridgeService: ObservableObject {
     generation = UUID()
     adminToken = ""
     serverURL = nil
+    assetCacheNamespace = nil
     lanEndpoint = nil
     lanPairing = nil
     lanBusy = false
@@ -252,6 +254,16 @@ final class T3BridgeService: ObservableObject {
       startupWatchdog = nil
       self.port = port
       serverURL = URL(string: "http://127.0.0.1:\(serverPort)")
+      // 本机 Server 重启会更换端口；使用持久环境身份，让附件缓存跨重启仍然命中。
+      if let directory = childLockFile?.deletingLastPathComponent(),
+        let identity = try? String(
+          contentsOf: directory.appendingPathComponent("official-environment-id"), encoding: .utf8),
+        UUID(uuidString: identity) != nil
+      {
+        assetCacheNamespace = "local:\(directory.standardizedFileURL.path)|\(identity)"
+      } else {
+        assetCacheNamespace = serverURL?.absoluteString
+      }
       status = "本机 T3 Server 已启动（桌面统一使用 Server）"
       if let endpoint = T3ConnectionPreferences.startupEndpoint(from: defaults) {
         Task { [weak self] in
