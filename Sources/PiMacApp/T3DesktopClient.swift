@@ -28,15 +28,37 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   private var connectedServerURL: URL?
   private var loop: Task<Void, Never>?
   private var connectionLoop: Task<Void, Never>?
+  private var serviceReadiness: AnyCancellable?
   private var configurationLoop: Task<Void, Never>?
+  private var configurationRevision = UUID()
+  private var configurationMaintenance: Task<Void, Never>?
+  private var configurationMetadata: Task<Void, Never>?
+  private var serverDefaultModelSelection: JSON?
+  private var providerCatalogs: [String: [JSON]] = [:]
+  private lazy var rpcSession = T3RPCSession { [weak self] in
+    guard let self, let base = self.service?.serverURL else { throw ClientError.unavailable }
+    let ticket = try await self.request("/api/auth/websocket-ticket", method: "POST", body: [:])
+    guard self.service?.serverURL == base, let secret = ticket["ticket"] as? String else {
+      throw ClientError.unavailable
+    }
+    var url = URLComponents(url: base, resolvingAgainstBaseURL: false)!
+    url.scheme = "ws"
+    url.path = "/ws"
+    url.queryItems = [
+      .init(name: "orchestrationProtocol", value: "2"), .init(name: "wsTicket", value: secret),
+    ]
+    return T3WebSocketConnection(session: self.session, url: url.url!)
+  }
   private var connectionCheckRevision = UUID()
   enum RefreshArea: String, CaseIterable {
     case shell = "会话列表"
     case configuration = "模型配置"
+    case preferences = "默认模型同步"
+    case modelMetadata = "模型元数据"
   }
   private var refreshFailures: [RefreshArea: String] = [:]
   private var connectionFailure: String?
-  private var hasLoadedConfiguration = false
+  private(set) var hasLoadedConfiguration = false
   private let threadRefreshes = ThreadRefreshScheduler()
   private let assetRefreshes = ThreadRefreshScheduler()
   private var shellRefreshTask: Task<Void, Error>?
@@ -169,7 +191,10 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     stop()
     self.service = service
     let current = generation
-    resumeConnectionChecks()
+    // ready 事件立即唤醒连接检查；不能让首次连接继续等待下一轮两秒定时器。
+    serviceReadiness = service.$serverURL.removeDuplicates().sink { [weak self] _ in
+      self?.resumeConnectionChecks()
+    }
     loop = Task { [weak self] in
       while let self, !Task.isCancelled, self.generation == current {
         if self.isConnected {
@@ -199,31 +224,51 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
 
   private func resumeConfigurationRefreshes() {
     configurationLoop?.cancel()
+    configurationRevision = UUID()
+    let subscription = configurationRevision
     let current = generation
+    configurationMetadata?.cancel()
+    configurationMaintenance?.cancel()
     configurationLoop = Task { [weak self] in
       while let self, !Task.isCancelled, self.generation == current {
-        var succeeded = false
         if self.isConnected {
           let serverURL = self.connectedServerURL
           do {
-            try await self.syncDefaultModelPreference()
-            if !self.hasLoadedConfiguration {
-              try await self.loadConfig()
-            } else {
-              try await self.refreshModelVisibility()
+            // 与官方客户端相同，先订阅快照，再接增量；不以一次写设置作为配置读取前置条件。
+            _ = try await self.rpcSession.call(
+              "subscribeServerConfig", payload: ["workspaceSnapshotsOnDemand": true], stream: true
+            ) { [weak self] event in
+              guard let self, self.generation == current,
+                self.configurationRevision == subscription,
+                self.connectedServerURL == serverURL
+              else { return }
+              try self.applyConfigurationEvent(event)
             }
-            guard self.generation == current, !Task.isCancelled else { return }
-            guard self.connectedServerURL == serverURL else { continue }
-            self.recordRefreshResult(.configuration, error: nil)
-            succeeded = true
+            throw ClientError.unavailable  // 常驻流正常结束也必须重新订阅，不能保留假在线状态。
           } catch {
             guard self.generation == current, !Task.isCancelled else { return }
             if self.connectedServerURL == serverURL {
+              self.hasLoadedConfiguration = false
               self.recordRefreshResult(.configuration, error: error)
             }
           }
         }
-        // 配置不随每个 token 改变；与高频转录轮询分离，失败才短间隔重试。
+        try? await Task.sleep(for: .seconds(2))
+      }
+    }
+    configurationMaintenance = Task { [weak self] in
+      while let self, !Task.isCancelled, self.generation == current {
+        var succeeded = false
+        if self.isConnected, self.hasLoadedConfiguration {
+          do {
+            try await self.syncDefaultModelPreference()
+            self.recordRefreshResult(.preferences, error: nil)
+            succeeded = true
+          } catch {
+            guard self.generation == current, !Task.isCancelled else { return }
+            self.recordRefreshResult(.preferences, error: error)
+          }
+        }
         try? await Task.sleep(for: .seconds(succeeded ? 30 : 2))
       }
     }
@@ -252,6 +297,10 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     let revision = UUID()
     connectionCheckRevision = revision
     if serverURL != connectedServerURL {
+      rpcSession.close()
+      configurationMetadata?.cancel()
+      providerCatalogs = [:]
+      serverDefaultModelSelection = nil
       skillCache.reset()
       hasLiveSkillShell = false
       connectedServerURL = serverURL
@@ -317,7 +366,10 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
         return
       }
       isConnected = false
-      if (error as? ClientError) == .unauthorized { token = "" }
+      if (error as? ClientError) == .unauthorized {
+        token = ""
+        rpcSession.close(error: error)
+      }
       connectionFailure = Self.connectionFailureStatus(error, phase: phase)
       updateConnectionStatus()
     }
@@ -349,10 +401,20 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     htmlRenderCacheScope = UUID()
     loop?.cancel()
     loop = nil
+    serviceReadiness?.cancel()
+    serviceReadiness = nil
     connectionLoop?.cancel()
     connectionLoop = nil
     configurationLoop?.cancel()
     configurationLoop = nil
+    configurationRevision = UUID()
+    configurationMaintenance?.cancel()
+    configurationMaintenance = nil
+    configurationMetadata?.cancel()
+    configurationMetadata = nil
+    rpcSession.close()
+    providerCatalogs = [:]
+    serverDefaultModelSelection = nil
     connectionCheckRevision = UUID()
     connectionFailure = nil
     refreshFailures.removeAll()
@@ -802,14 +864,23 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   }
 
   func syncDefaultModelPreference() async throws {
-    let model = defaults.string(forKey: "defaultNewSessionModelID")
-    let selection: Any = model.map { ["instanceId": "pi", "model": $0] } ?? NSNull()
+    // 没有本地偏好不等于用户要求清空 Server 默认值；相同选择也不重复写盘/触发发现。
+    guard let model = defaults.string(forKey: "defaultNewSessionModelID"), !model.isEmpty else {
+      return
+    }
+    let selection: JSON = ["instanceId": "pi", "model": model]
+    if serverDefaultModelSelection?["instanceId"] as? String == "pi",
+      serverDefaultModelSelection?["model"] as? String == model
+    {
+      return
+    }
     let data = try JSONSerialization.data(withJSONObject: ["defaultModelSelection": selection])
     guard data != syncedDefaultModelPreference else { return }
-    let revision = modelVisibilityRevision
+    let current = generation
+    let base = connectedServerURL
     _ = try await rpc(
       "server.updateSettings", payload: ["patch": ["defaultModelSelection": selection]])
-    guard revision == modelVisibilityRevision else { throw CancellationError() }
+    guard generation == current, base == connectedServerURL else { throw CancellationError() }
     syncedDefaultModelPreference = data
   }
 
@@ -834,16 +905,6 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     guard next != hiddenModelIDs else { return }
     hiddenModelIDs = next
     onModelsChanged?()
-  }
-
-  private func refreshModelVisibility() async throws {
-    let revision = modelVisibilityRevision
-    let settings = try await rpc("server.getSettings")
-    // 读取开始后若发生写入或重连，迟到的快照不能覆盖新的显隐结果。
-    guard revision == modelVisibilityRevision else { return }
-    let previous = hiddenModelIDs
-    try applyModelVisibility(settings)
-    if previous != hiddenModelIDs { await updateTextGenerationModel(nil) }
   }
 
   func setModelVisible(_ visible: Bool, modelID: String) async throws {
@@ -873,29 +934,87 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     }
   }
 
+  // 仅供用户主动刷新目录；日常启动/更新使用常驻配置订阅，不再轮询 getConfig。
   func loadConfig() async throws {
+    let current = generation
     let revision = modelVisibilityRevision
-    let result = try await rpc("server.getConfig")
-    guard revision == modelVisibilityRevision else { return }
-    guard let settings = result["settings"] as? JSON,
-      let providers = result["providers"] as? [JSON]
-    else { throw ClientError.rejected }
-    try applyModelVisibility(settings)
-    let environment = result["environment"] as? JSON
-    let capabilities = environment?["capabilities"] as? JSON
-    supportsTitleRegeneration = capabilities?["threadTitleRegeneration"] as? Bool == true
-    let catalogs = try await service?.modelCatalog() ?? [:]
-    let contextSettings = try await service?.modelContextSettings() ?? .empty
-    guard revision == modelVisibilityRevision else { throw CancellationError() }
-    modelContextSettings = contextSettings
-    if let service {
-      await textGenerationModels.update(refresh: true) {
-        try await service.textGenerationModelSettings(modelID: nil)
+    let config = try await rpc("server.getConfig")
+    guard generation == current, revision == modelVisibilityRevision else {
+      throw CancellationError()
+    }
+    try applyConfigurationEvent(["version": 1, "type": "snapshot", "config": config])
+  }
+
+  func applyConfigurationEvent(_ event: JSON) throws {
+    guard event["version"] as? Int == 1, let type = event["type"] as? String else {
+      throw ClientError.rejected
+    }
+    switch type {
+    case "snapshot":
+      guard let config = event["config"] as? JSON,
+        let settings = config["settings"] as? JSON,
+        let values = config["providers"] as? [JSON],
+        let environment = config["environment"] as? JSON,
+        let capabilities = environment["capabilities"] as? JSON
+      else { throw ClientError.rejected }
+      try applyModelVisibility(settings)
+      serverDefaultModelSelection = settings["defaultModelSelection"] as? JSON
+      supportsTitleRegeneration = capabilities["threadTitleRegeneration"] as? Bool == true
+      applyProviderCatalog(values, modelCatalogs: providerCatalogs)
+      hasLoadedConfiguration = true
+      recordRefreshResult(.configuration, error: nil)
+      refreshConfigurationMetadata()
+    case "settingsUpdated":
+      guard hasLoadedConfiguration, let payload = event["payload"] as? JSON,
+        let settings = payload["settings"] as? JSON
+      else { throw ClientError.rejected }
+      try applyModelVisibility(settings)
+      serverDefaultModelSelection = settings["defaultModelSelection"] as? JSON
+    case "providerStatuses":
+      guard hasLoadedConfiguration, let payload = event["payload"] as? JSON,
+        let values = payload["providers"] as? [JSON]
+      else { throw ClientError.rejected }
+      applyProviderCatalog(values, modelCatalogs: providerCatalogs)
+    case "keybindingsUpdated", "environmentThemesUpdated", "usageLimitSourcesUpdated":
+      break  // 当前原生视图不消费这些官方事件；不能把合法扩展事件当作连接失败。
+    default: throw ClientError.rejected
+    }
+  }
+
+  private func refreshConfigurationMetadata() {
+    configurationMetadata?.cancel()
+    let current = generation
+    let base = connectedServerURL
+    configurationMetadata = Task { [weak self] in
+      while let self, let service = self.service, !Task.isCancelled, self.generation == current {
+        do {
+          // 原始目录用于模型显隐设置，宿主额外元数据不能再阻塞官方配置快照的可用性。
+          let catalogs = try await service.modelCatalog()
+          let context = try await service.modelContextSettings()
+          guard self.generation == current, self.connectedServerURL == base, !Task.isCancelled
+          else {
+            return
+          }
+          self.providerCatalogs = catalogs
+          self.modelContextSettings = context
+          self.applyProviderCatalog(self.providers, modelCatalogs: catalogs)
+          await self.updateTextGenerationModel(nil)
+          guard self.generation == current, self.connectedServerURL == base, !Task.isCancelled
+          else {
+            return
+          }
+          self.recordRefreshResult(.modelMetadata, error: nil)
+          return
+        } catch {
+          guard self.generation == current, self.connectedServerURL == base, !Task.isCancelled
+          else {
+            return
+          }
+          self.recordRefreshResult(.modelMetadata, error: error)
+          try? await Task.sleep(for: .seconds(2))
+        }
       }
     }
-    guard revision == modelVisibilityRevision else { throw CancellationError() }
-    hasLoadedConfiguration = true
-    applyProviderCatalog(providers, modelCatalogs: catalogs)
   }
 
   func applyProviderCatalog(_ values: [JSON], modelCatalogs: [String: [JSON]]) {
@@ -1081,75 +1200,14 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     receive: ((JSON) -> Void)? = nil
   ) async throws -> JSON {
     let current = generation
-    guard let base = service?.serverURL else { throw ClientError.unavailable }
-    let ticket = try await request("/api/auth/websocket-ticket", method: "POST", body: [:])
-    guard service?.serverURL == base, let secret = ticket["ticket"] as? String else {
-      throw ClientError.unavailable
+    let base = service?.serverURL
+    guard base != nil else { throw ClientError.unavailable }
+    let result = try await rpcSession.call(
+      method, payload: payload, timeout: .seconds(timeoutSeconds), receive: receive)
+    guard generation == current, service?.serverURL == base, !Task.isCancelled else {
+      throw CancellationError()
     }
-    var components = URLComponents(url: base, resolvingAgainstBaseURL: false)!
-    components.scheme = "ws"
-    components.path = "/ws"
-    components.queryItems = [
-      .init(name: "orchestrationProtocol", value: "2"), .init(name: "wsTicket", value: secret),
-    ]
-    let socket = session.webSocketTask(with: components.url!)
-    socket.maximumMessageSize = 16 * 1024 * 1024
-    socket.resume()
-    let timeout = Task {
-      try? await Task.sleep(for: .seconds(timeoutSeconds))
-      if !Task.isCancelled { socket.cancel(with: .goingAway, reason: nil) }
-    }
-    defer {
-      timeout.cancel()
-      socket.cancel(with: .normalClosure, reason: nil)
-    }
-    let id = UUID().uuidString
-    let encoded = try await ImmutableJSONSnapshot(value: [
-      "_tag": "Request", "id": id, "tag": method, "payload": payload, "headers": [],
-    ]).encode()
-    guard generation == current, !Task.isCancelled else { throw CancellationError() }
-    guard service?.serverURL == base else { throw CancellationError() }
-    try await socket.send(.string(String(decoding: encoded, as: UTF8.self)))
-    while true {
-      let frame = try await withTaskCancellationHandler {
-        try await socket.receive()
-      } onCancel: {
-        socket.cancel(with: .goingAway, reason: nil)
-      }
-      guard generation == current, service?.serverURL == base, !Task.isCancelled else {
-        throw CancellationError()
-      }
-      let data: Data
-      switch frame {
-      case .data(let value): data = value
-      case .string(let value): data = Data(value.utf8)
-      @unknown default: throw ClientError.rejected
-      }
-      let frames = try await ImmutableJSONSnapshot.frames(data)
-      guard generation == current, service?.serverURL == base, !Task.isCancelled else {
-        throw CancellationError()
-      }
-      for frame in frames {
-        let response = frame.value
-        if response["_tag"] as? String == "Ping" {
-          try await socket.send(.string(#"{"_tag":"Pong"}"#))
-          continue
-        }
-        guard response["requestId"] as? String == id else { continue }
-        if response["_tag"] as? String == "Chunk" {
-          for event in response["values"] as? [JSON] ?? [] { receive?(event) }
-          let ack: JSON = ["_tag": "Ack", "requestId": id]
-          try await socket.send(
-            .string(
-              String(decoding: try JSONSerialization.data(withJSONObject: ack), as: UTF8.self)))
-          continue
-        }
-        guard response["_tag"] as? String == "Exit", let exit = response["exit"] as? JSON
-        else { continue }
-        guard exit["_tag"] as? String == "Success" else { throw RPCFailure(exit: exit) }
-        return exit["value"] as? JSON ?? [:]
-      }
-    }
+    return result
   }
 
   /// Timeline snapshots omit tool output. Hydrate text and media through official

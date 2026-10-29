@@ -2,18 +2,29 @@
 
 ## Current upgrade
 
-- Repository: https://github.com/pingdotgg/t3code, release tag `v0.1.0` (not floating `main`).
-- Previous pin: `26fffe5aee22ea9bdd39c5b4c400f643c560b4a0` (2026-10-15 UTC).
-- New pin: `81493efb71e8e8244f95d3e9f71d8369654ab151` (`v0.1.0`, 2026-10-15 UTC).
-- The release adds six commits, including ACP malformed-session-update recovery
-  and HTML-render caching. The manifest includes the three new ACP fixture files;
-  existing host patches still match unchanged. Dependencies are unchanged.
-- The source fetcher's safe filename validation now accepts `@`, required by
-  the already-pinned native dependency patch filenames; traversal checks remain.
+- Repository: https://github.com/pingdotgg/t3code, stable release tag `v0.1.3` (not floating `main`).
+- Previous pin: `81493efb71e8e8244f95d3e9f71d8369654ab151` (`v0.1.0`).
+- New pin: `d2c440312e5f39d59827ed466838a623516454d6` (`v0.1.3`, published 2026-10-27 UTC).
+- The manifest includes 2,186 pristine files, including the new fx Provider,
+  shared source-control definitions, and checked-in GraphQL schemas required by
+  the new Server and GitHub implementation. Markdown math and document parser
+  dependencies are explicitly locked; no upstream capability is stubbed out.
+- Preserve upstream's new Muse process-exit hook and patched math tokenizer,
+  including its npm alias, nested dependency paths and default-export redirect.
+  Apply npm patches only to isolated copies used for staging/bundling.
+- Rebase host patch anchors onto upstream's Effect.fn/read-only-store refactors.
+  Keep upstream Pi model-inventory validation and authorized-client observation.
+  Remove the old Codex enabled-flag and review-worktree patches: upstream now
+  preserves the flag and validates registered Git worktrees in KnownWorkspaces.
+- Native desktop/pairing credentials now use upstream `AuthStandardClientScopes`,
+  which replaces the former administrative set. Existing grants are not expanded;
+  upstream authentication and per-request authorization remain authoritative.
+- The worktree RPC now requires `path: null` and chooses a managed location;
+  protocol fixtures exercise that contract rather than bypassing it.
 - The commit, pristine source hashes and dependency catalog are recorded in
   `sidecars/t3-server/upstream-pin.json`. Generated sources/bundles and installed
   dependencies are not source-controlled.
-- Effect and its Node platform dependencies advance together to `4.0.4`.
+- Effect and its Node platform dependencies advance together to `4.0.5`.
   Orchestration protocol remains 2.
 - Upstream extracted providers and source-control implementations into workspace
   packages. Local presentation/host patches follow those packages rather than
@@ -48,6 +59,11 @@ redemption credentials or implement unsupported account operations.
 
 - Native supervision, readiness, loopback/LAN/tunnel transport integration,
   credential-safe subprocess environment and private desktop administration.
+- A lazy dedicated read-only SQLite worker for credential lookups, independent
+  of the bulk-history reader. No identity caching or auth-policy change; existing
+  SQL transactions preserve their connection and visibility. Retain the official
+  worker fallback and scope cleanup when rebasing `nodeSqliteClient.ts` and
+  `AuthSessions.ts`. The HTTP regression uses real file-backed transactions.
 - Managed tunnel health/publication diagnostics; lifecycle and recovery remain
   upstream-owned, including the upstream readiness supervisor.
 - Desktop model visibility preferences and metadata discovery for model context
@@ -73,10 +89,10 @@ redemption credentials or implement unsupported account operations.
   Pi transport, cancellation, retry and compaction remain official.
 - Optional `piMetrics` wire projection and scalar latest-message timestamps for
   desktop presentation; no message bodies are added to the shell projection.
-- Enter's `deliveryIntent: steer` queues durably while a native `/compact` run
-  is active, resolved under the official thread dispatch lock. Explicit
-  `steer_active`/`restart_active` still use upstream validation; Provider compaction
-  execution and queue draining remain upstream-owned.
+- Native `/compact` follow-up queueing is now entirely upstream-owned. Upstream
+  queues both Enter's `deliveryIntent: steer` and explicit `steer_active` during
+  maintenance; the old host queueing patch is removed. Restart validation,
+  Provider compaction execution and queue draining remain upstream-owned.
 - Atomic parent/descendant settlement and bounded subtree identity lookup,
   retaining validation, cycle handling and archived/deleted-node exclusion.
 - Mobile first-message title compatibility for native drafts without titleSeed.
@@ -84,8 +100,8 @@ redemption credentials or implement unsupported account operations.
   Providers (for example `pi-antigravity`) remain available. Ephemeral sessions,
   disabled built-in tools and T3 MCP credential isolation are preserved. This
   does not sandbox user extension code; extensions retain normal Pi behavior.
-- Review of active externally bound worktrees, supplementing official root
-  validation because the host cwd is its private state directory.
+- Review root and registered external-worktree validation are now entirely
+  upstream-owned through KnownWorkspaces; no host path-authorization patch remains.
 - Pi quota sources for stock mobile Limits; usage history and image output now
   use upstream implementations rather than duplicated local patches.
 
@@ -96,13 +112,27 @@ validation, overwrite local changes, or restart an active production Server.
 
 ## Validation
 
-For the `v0.1.0` pin update, all 2,078 pristine source hashes and existing patch
-anchors pass, together with all six upstream-maintenance tests, JavaScript syntax
-checks, targeted TypeScript `--allowJs --checkJs --noEmit`, and `git diff --check`.
-The bundle/native-runtime check reports stale local generated runtime artifacts;
-no build, full bundled-Server test run, app restart or live-state migration was
-performed for this pin-only update. Regenerate and validate artifacts before
-publishing the release-pinned runtime.
+For the `v0.1.3` update, regenerated the Server bundle and darwin-arm64 native
+runtime (126 packages). All 2,186 pristine hashes and sequential patch anchors
+are checked. Protocol regressions cover the official managed-worktree RPC,
+standard client grants and full Provider/MCP catalog, including fx.
+A clean `npm ci --ignore-scripts` followed by `npm run check` reproduces the
+bundle/native runtime. The real bundler regression validates four math delimiters,
+literal prices/shell variables, display metadata and math inside table cells.
+Build/management JavaScript syntax, targeted TypeScript `--allowJs --checkJs
+--noEmit`, the new TypeScript test's typecheck and `git diff --check` pass.
+Final serial regressions: all **157** sidecar tests and all **73** selected Swift
+T3 integration/presentation tests pass (`swift test --jobs 1 --no-parallel --filter T3`).
+No running app/Server restart, live-state migration or production publication
+is part of this source/runtime preparation.
+
+Dependency audit remains a known upstream follow-up: `npm audit` reports 9
+package findings (3 low, 2 moderate, 4 high; no critical), including propagated
+Cursor SDK/Zod findings, body-parser, fast-uri, stream-json, undici and the math
+parser/KaTeX chain. Counts include transitive propagation, not nine independent
+exploits. No `npm audit fix` or out-of-release SDK upgrade was applied; these
+findings do not establish exploitability, but this update is not a security
+clearance. Audit output is retained with the task's temporary validation logs.
 
 ```sh
 ./scripts/prepare-t3-server.sh

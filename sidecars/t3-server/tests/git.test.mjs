@@ -66,9 +66,10 @@ test('native VCS status, refs, diff, selected-file commit stream, push, pull and
   assert.equal(pushed[0].kind, 'action_finished', JSON.stringify(pushed[0]));
   assert.equal((await rpc('vcs.pull', { cwd })).status, 'skipped_up_to_date');
   await rpc('vcs.switchRef', { cwd, refName: 'main' });
-  const path = join(directory, 'worktree');
-  const tree = await rpc('vcs.createWorktree', { cwd, refName: 'main', newRefName: 'feature/tree', path });
-  assert.equal(tree.worktree.path, path);
+  // 新版 RPC 只允许官方受管目录，不再接受客户端指定任意 worktree 路径。
+  const tree = await rpc('vcs.createWorktree', { cwd, refName: 'main', newRefName: 'feature/tree', path: null });
+  const path = tree.worktree.path;
+  assert.equal(typeof path, 'string');
   assert.equal((await rpc('vcs.refreshStatus', { cwd: path })).refName, 'feature/tree');
   await rpc('vcs.removeWorktree', { cwd, path });
 });

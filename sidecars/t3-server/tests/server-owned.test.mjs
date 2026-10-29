@@ -587,31 +587,33 @@ test('Enter during compaction queues once and resumes after compaction', async t
     item.type === 'compaction' && item.status === 'running'));
   const active = (await f.snapshot(threadId)).runs.find(run => run.status === 'running');
   assert(active);
-  // 仅将 Enter 的软意图降为排队；调用方显式要求 steering 时沿用官方拒绝语义。
-  await assert.rejects(f.dispatch(f.message(threadId, 'explicit steer', {
+  // 上游现将显式 steer 和 Enter 一并排队；宿主不再重复覆盖此决策。
+  const explicit = f.message(threadId, 'explicit steer', {
     dispatchMode: { type: 'steer_active', targetRunId: active.id },
-  })), error => error.detail?.includes('Wait for context compaction'));
+  });
+  await f.dispatch(explicit);
   const message = f.message(threadId, 'continue after compaction', {
     dispatchMode: { type: 'queue_after_active' }, deliveryIntent: 'steer',
   });
   await f.dispatch(message);
   await f.dispatch(message);
   const queued = await f.snapshot(threadId);
-  assert.equal(queued.runs.filter(run => run.status === 'queued').length, 1);
+  assert.equal(queued.runs.filter(run => run.status === 'queued').length, 2);
   let records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
-  assert(!records.some(record => record.message === message.text));
+  assert(!records.some(record => [message.text, explicit.text].includes(record.message)));
   await rename(barrier, barrier + '-released');
-  await eventually(async () => (await f.snapshot(threadId)).runs.filter(run => run.status === 'completed').length === 3);
+  await eventually(async () => (await f.snapshot(threadId)).runs.filter(run => run.status === 'completed').length === 4);
   const completed = await f.snapshot(threadId);
   assert.equal(completed.messages.filter(row => row.id === message.messageId).length, 1);
   assert(completed.visibleTurnItems.some(row => row.item.text === 'Reply: ' + message.text));
   records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(records.filter(record => record.message === message.text).length, 1);
+  assert.equal(records.filter(record => record.message === explicit.text).length, 1);
   // 压缩结束后的同一 Enter 意图仍应正常启动新一轮，不遗留本地等待状态。
   await f.dispatch(f.message(threadId, 'after compaction', {
     dispatchMode: { type: 'queue_after_active' }, deliveryIntent: 'steer',
   }));
-  await eventually(async () => (await f.snapshot(threadId)).runs.filter(run => run.status === 'completed').length === 4);
+  await eventually(async () => (await f.snapshot(threadId)).runs.filter(run => run.status === 'completed').length === 5);
 });
 
 test('Pi tool images survive lazy reads, signed downloads and server restart', async t => {

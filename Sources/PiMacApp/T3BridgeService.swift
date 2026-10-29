@@ -88,12 +88,14 @@ final class T3BridgeService: ObservableObject {
     writer = DispatchQueue(label: "pimac.t3.bridge.writer.\(current)")
     child.executableURL = URL(fileURLWithPath: "/bin/zsh")
     child.arguments = [
-      "-lc", "exec node \"$1\"", "pimac-t3",
+      "-ilc", "exec node \"$1\"", "pimac-t3",
       resource.appendingPathComponent("server-gateway.mjs").path,
     ]
     var environment = ProcessInfo.processInfo.environment
     environment["PIMAC_T3_BRIDGE_TOKEN"] = token
     environment["PIMAC_T3_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+    // 与官方环境探测使用同样的交互式登录 Shell，一次加载后不让 Server 再同步探测。
+    environment["PIMAC_T3_SHELL_PREPARED"] = "1"
     environment["PIMAC_PI_BINARY"] = defaults.string(forKey: "piPath") ?? AppModel.suggestedPiPath()
     // Do not inherit network exposure from a launching shell.
     environment.removeValue(forKey: "PIMAC_T3_PUBLIC_HOST")

@@ -4,7 +4,7 @@ import * as Option from 'effect/Option';
 import * as DateTime from 'effect/DateTime';
 import * as Fiber from 'effect/Fiber';
 import { HttpRouter, HttpServerRequest, HttpServerResponse, HttpServer } from 'effect/http';
-import { AuthAdministrativeScopes, ProviderInstanceId } from '@t3tools/contracts';
+import { AuthStandardClientScopes, ProviderInstanceId } from '@t3tools/contracts';
 import { EnvironmentAuth } from './upstream/apps/server/src/auth/EnvironmentAuth.ts';
 import { ServerSecretStore } from './upstream/apps/server/src/auth/ServerSecretStore.ts';
 import { CloudCliTokenManager } from './upstream/apps/server/src/cloud/CliTokenManager.ts';
@@ -69,7 +69,7 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
   const run = effect => Effect.runPromise(Effect.provide(effect, controlContext));
   const readSecret = name => secrets.get(name).pipe(Effect.map(value => Option.isSome(value) ? new TextDecoder().decode(value.value) : ''));
   const localRequest = async (pathname, method = 'GET', body) => {
-    if (!adminToken) adminToken = (await run(auth.issueSession({ subject: 'pimac-internal-administration', scopes: AuthAdministrativeScopes }))).token;
+    if (!adminToken) adminToken = (await run(auth.issueSession({ subject: 'pimac-internal-administration', scopes: AuthStandardClientScopes }))).token;
     const result = await fetch(localURL + pathname, { method, redirect: 'error', signal: AbortSignal.timeout(45000),
       headers: { authorization: `Bearer ${adminToken}`,
         ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
@@ -193,11 +193,11 @@ export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* ()
     },
     async desktopSession() {
       // 单用户桌面使用官方完整管理授权；仍由上游签发、验证和撤销凭据。
-      const session = await run(auth.issueSession({ subject: 'pimac-desktop', scopes: AuthAdministrativeScopes }));
+      const session = await run(auth.issueSession({ subject: 'pimac-desktop', scopes: AuthStandardClientScopes }));
       return { token: session.token };
     },
     // 仅影响用户主动创建的新配对，不静默扩权已有设备；手机需重新配对。
-    async pairing(input) { const result = await run(auth.issuePairingCredential({ label: input.label, scopes: AuthAdministrativeScopes }));
+    async pairing(input) { const result = await run(auth.issuePairingCredential({ label: input.label, scopes: AuthStandardClientScopes }));
       return { id: result.id, credential: result.credential, expiresAt: DateTime.formatIso(result.expiresAt) }; },
     async clients() { const sessions = await run(auth.listSessions()); return sessions.filter(s => !['pimac-internal-administration', 'pimac-desktop'].includes(s.subject)).map(s => ({
       ...s, issuedAt: DateTime.formatIso(s.issuedAt), expiresAt: DateTime.formatIso(s.expiresAt),

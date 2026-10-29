@@ -36,7 +36,7 @@ function identity(directory) {
   if (!state.isFile() || state.uid !== process.getuid() || (state.mode & 0o077) || state.size > 100) throw new Error('Unsafe environment identity');
   const id = fs.readFileSync(file, 'utf8'); if (!/^[0-9a-f-]{36}$/.test(id)) throw new Error('Invalid environment identity'); return id;
 }
-export async function createServerGateway({ token, directory, publicEndpoint, piConfig, onFailure, signal, accountRuntime }) {
+export async function createServerGateway({ token, directory, publicEndpoint, piConfig, onFailure, signal, accountRuntime, shellEnvironmentPrepared = false }) {
   if (!/^[a-f0-9]{64}$/.test(token ?? '')) throw new Error('Invalid supervisor token');
   const expected = Buffer.from('Bearer ' + token);
   let official, lan, closed = false;
@@ -92,7 +92,7 @@ export async function createServerGateway({ token, directory, publicEndpoint, pi
     if (closed) return; closed = true; server.close(); server.closeAllConnections(); await piAccounts.close(); await lan?.close(); await official?.close();
   };
   try {
-    official = await startPiServer({ directory: path.join(directory, 'server-owned'), environmentId: identity(directory), piConfig, signal, accounts: piAccounts,
+    official = await startPiServer({ directory: path.join(directory, 'server-owned'), environmentId: identity(directory), piConfig, signal, accounts: piAccounts, shellEnvironmentPrepared,
       onFailure: () => { void close(); onFailure?.(); } });
     piAccounts.start();
     lan = createLANListener({ localURL: official.localURL });
@@ -131,10 +131,12 @@ if (entry === fileURLToPath(import.meta.url)) {
   process.on('SIGTERM', () => void stop()); process.on('SIGINT', () => void stop());
   try {
     gateway = await createServerGateway({ token: process.env.PIMAC_T3_BRIDGE_TOKEN, directory: path.dirname(process.env.PIMAC_T3_AUTH_FILE),
-      piConfig: { binaryPath: process.env.PIMAC_PI_BINARY || 'pi' }, signal: startup.signal, onFailure: () => { process.exitCode = 1; void stop(); } });
+      piConfig: { binaryPath: process.env.PIMAC_PI_BINARY || 'pi' },
+      shellEnvironmentPrepared: process.env.PIMAC_T3_SHELL_PREPARED === '1', signal: startup.signal, onFailure: () => { process.exitCode = 1; void stop(); } });
     if (stopping) await gateway.close();
     else {
       await new Promise((resolve, reject) => { gateway.server.once('error', reject); gateway.server.listen(0, '127.0.0.1', resolve); });
+      gateway.official.broker.startup.record('supervisor.ready', 'success', null);
       send({ type: 'ready', port: gateway.server.address().port, serverPort: Number(new URL(gateway.serverURL).port) });
     }
   } catch { send({ type: 'startup_error', code: 'server_failed' }); await stop(); process.exitCode = 1; }

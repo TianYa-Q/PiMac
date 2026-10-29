@@ -22,59 +22,59 @@
     }
   ],
   "apps/server/src/orchestration-v2/ProjectionStore.ts": [
-{
-  "oldText": "  readonly getThreadsWithPullRequests: (",
-  "newText": "  readonly getSettlementThreadIds: (\n    threadId: ThreadId,\n  ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;\n  readonly getThreadsWithPullRequests: ("
-},
-{
-  "oldText": "    const getThreadsWithPullRequests: ProjectionStoreV2Shape[\"getThreadsWithPullRequests\"] = (",
-  "newText": "    // Settle 只需要子树 ID；不能为一次写入构建所有会话的 shell（运行、消息和工具投影）。\n    // UNION 按 ID 去重，损坏的 lineage 环也会终止；归档/删除节点不参与遍历。\n    const getSettlementThreadIds: ProjectionStoreV2Shape[\"getSettlementThreadIds\"] = (threadId) =>\n      Effect.gen(function* () {\n        const rows = yield* sql<{ readonly thread_id: string }>`\n          WITH RECURSIVE settlement_tree(thread_id) AS (\n            SELECT ${threadId}\n            UNION\n            SELECT child.thread_id\n            FROM orchestration_v2_projection_threads child\n            JOIN settlement_tree parent\n              ON json_extract(child.payload_json, '$.lineage.parentThreadId') = parent.thread_id\n            WHERE child.deleted_at IS NULL\n              AND json_extract(child.payload_json, '$.archivedAt') IS NULL\n          )\n          SELECT thread_id FROM settlement_tree\n        `;\n        return rows.map((row) => ThreadId.make(row.thread_id));\n      }).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));\n\n    const getThreadsWithPullRequests: ProjectionStoreV2Shape[\"getThreadsWithPullRequests\"] = ("
-},
-{
-  "oldText": "      getThreadsWithPullRequests,",
-  "newText": "      getSettlementThreadIds,\n      getThreadsWithPullRequests,"
-},
-{
-  "oldText": "      getThreadsWithPullRequests: (threadId) =>",
-  "newText": "      getSettlementThreadIds: (threadId) =>\n        Ref.get(replayState).pipe(Effect.map((state) => {\n          const children = new Map<ThreadId, ThreadId[]>();\n          for (const { thread } of state.projections.values()) {\n            const parent = thread.lineage.parentThreadId;\n            if (parent === null || thread.deletedAt !== null || thread.archivedAt !== null) continue;\n            const siblings = children.get(parent) ?? [];\n            siblings.push(thread.id);\n            children.set(parent, siblings);\n          }\n          const ids = [threadId];\n          const visited = new Set(ids);\n          for (let index = 0; index < ids.length; index++) {\n            for (const child of children.get(ids[index]!) ?? []) {\n              if (visited.has(child)) continue;\n              visited.add(child);\n              ids.push(child);\n            }\n          }\n          return ids;\n        })),\n      getThreadsWithPullRequests: (threadId) =>"
-},
-  {
-    "oldText": "  readonly latest_user_message_at: string | null;",
-    "newText": "  readonly latest_message_at: string | null;\n  readonly latest_user_message_at: string | null;"
-  },
-  {
-    "oldText": "  readonly latestUserMessageAt: DateTime.Utc | null;",
-    "newText": "  readonly latestMessageAt: DateTime.Utc | null;\n  readonly latestUserMessageAt: DateTime.Utc | null;"
-  },
-  {
-    "oldText": "              ) AS pending_secret_request_payload_json,\n              (",
-    "newText": "              ) AS pending_secret_request_payload_json,\n              -- 消息时间独立于线程生命周期；只投影标量，不把正文放回 shell。\n              (\n                SELECT MAX(message_time) FROM (\n                  SELECT COALESCE(json_extract(item.payload_json, '$.startedAt'), item.updated_at) AS message_time\n                  FROM orchestration_v2_projection_turn_items item\n                  WHERE item.thread_id = t.thread_id\n                    AND item.type IN ('user_message', 'assistant_message', 'reasoning', 'compaction')\n                  UNION ALL\n                  SELECT message.created_at AS message_time\n                  FROM orchestration_v2_projection_messages message\n                  WHERE message.thread_id = t.thread_id\n                )\n              ) AS latest_message_at,\n              ("
-  },
-  {
-    "oldText": "    latestVisibleMessage: null,\n    latestUserMessageAt: latestUserMessage?.updatedAt ?? null,",
-    "newText": "    latestVisibleMessage: null,\n    latestMessageAt: [\n      ...projection.messages.map((message) => message.createdAt),\n      ...projection.turnItems.filter((item) =>\n        ['user_message', 'assistant_message', 'reasoning', 'compaction'].includes(item.type)\n      ).map((item) => item.startedAt ?? item.updatedAt),\n    ].reduce<DateTime.Utc | null>((latest, date) =>\n      latest === null || DateTime.toEpochMillis(date) > DateTime.toEpochMillis(latest)\n        ? date : latest, null),\n    latestUserMessageAt: latestUserMessage?.updatedAt ?? null,"
-  },
-  {
-    "oldText": "    latestVisibleMessage: null,\n    latestUserMessageAt: input.state.latestUserMessageAt,",
-    "newText": "    latestVisibleMessage: null,\n    latestMessageAt: input.state.latestMessageAt,\n    latestUserMessageAt: input.state.latestUserMessageAt,"
-  },
-  {
-    "oldText": "          latestUserMessageAt:\n            row.latest_user_message_at === null",
-    "newText": "          latestMessageAt:\n            row.latest_message_at === null ? null : DateTime.makeUnsafe(row.latest_message_at),\n          latestUserMessageAt:\n            row.latest_user_message_at === null"
-  }
-],
+    {
+      "oldText": "  readonly getThreadsWithPullRequests: (",
+      "newText": "  readonly getSettlementThreadIds: (\n    threadId: ThreadId,\n  ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;\n  readonly getThreadsWithPullRequests: ("
+    },
+    {
+      "oldText": "    const getThreadsWithPullRequests: ProjectionStoreV2Shape[\"getThreadsWithPullRequests\"] =",
+      "newText": "    // Settle 只需要子树 ID；不能为一次写入构建所有会话的 shell（运行、消息和工具投影）。\n    // UNION 按 ID 去重，损坏的 lineage 环也会终止；归档/删除节点不参与遍历。\n    const getSettlementThreadIds: ProjectionStoreV2Shape[\"getSettlementThreadIds\"] = (threadId) =>\n      Effect.gen(function* () {\n        const rows = yield* sql<{ readonly thread_id: string }>`\n          WITH RECURSIVE settlement_tree(thread_id) AS (\n            SELECT ${threadId}\n            UNION\n            SELECT child.thread_id\n            FROM orchestration_v2_projection_threads child\n            JOIN settlement_tree parent\n              ON json_extract(child.payload_json, '$.lineage.parentThreadId') = parent.thread_id\n            WHERE child.deleted_at IS NULL\n              AND json_extract(child.payload_json, '$.archivedAt') IS NULL\n          )\n          SELECT thread_id FROM settlement_tree\n        `;\n        return rows.map((row) => ThreadId.make(row.thread_id));\n      }).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));\n\n    const getThreadsWithPullRequests: ProjectionStoreV2Shape[\"getThreadsWithPullRequests\"] ="
+    },
+    {
+      "oldText": "      getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),",
+      "newText": "      getSettlementThreadIds: readOnReader(getSettlementThreadIds),\n      getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),"
+    },
+    {
+      "oldText": "      getThreadsWithPullRequests: (threadId) =>",
+      "newText": "      getSettlementThreadIds: (threadId) =>\n        Ref.get(replayState).pipe(Effect.map((state) => {\n          const children = new Map<ThreadId, ThreadId[]>();\n          for (const { thread } of state.projections.values()) {\n            const parent = thread.lineage.parentThreadId;\n            if (parent === null || thread.deletedAt !== null || thread.archivedAt !== null) continue;\n            const siblings = children.get(parent) ?? [];\n            siblings.push(thread.id);\n            children.set(parent, siblings);\n          }\n          const ids = [threadId];\n          const visited = new Set(ids);\n          for (let index = 0; index < ids.length; index++) {\n            for (const child of children.get(ids[index]!) ?? []) {\n              if (visited.has(child)) continue;\n              visited.add(child);\n              ids.push(child);\n            }\n          }\n          return ids;\n        })),\n      getThreadsWithPullRequests: (threadId) =>"
+    },
+    {
+      "oldText": "  readonly latest_user_message_at: string | null;",
+      "newText": "  readonly latest_message_at: string | null;\n  readonly latest_user_message_at: string | null;"
+    },
+    {
+      "oldText": "  readonly latestUserMessageAt: DateTime.Utc | null;",
+      "newText": "  readonly latestMessageAt: DateTime.Utc | null;\n  readonly latestUserMessageAt: DateTime.Utc | null;"
+    },
+    {
+      "oldText": "              ) AS pending_secret_request_payload_json,\n              (",
+      "newText": "              ) AS pending_secret_request_payload_json,\n              -- 消息时间独立于线程生命周期；只投影标量，不把正文放回 shell。\n              (\n                SELECT MAX(message_time) FROM (\n                  SELECT COALESCE(json_extract(item.payload_json, '$.startedAt'), item.updated_at) AS message_time\n                  FROM orchestration_v2_projection_turn_items item\n                  WHERE item.thread_id = t.thread_id\n                    AND item.type IN ('user_message', 'assistant_message', 'reasoning', 'compaction')\n                  UNION ALL\n                  SELECT message.created_at AS message_time\n                  FROM orchestration_v2_projection_messages message\n                  WHERE message.thread_id = t.thread_id\n                )\n              ) AS latest_message_at,\n              ("
+    },
+    {
+      "oldText": "    latestVisibleMessage: null,\n    latestUserMessageAt: latestUserMessage?.updatedAt ?? null,",
+      "newText": "    latestVisibleMessage: null,\n    latestMessageAt: [\n      ...projection.messages.map((message) => message.createdAt),\n      ...projection.turnItems.filter((item) =>\n        ['user_message', 'assistant_message', 'reasoning', 'compaction'].includes(item.type)\n      ).map((item) => item.startedAt ?? item.updatedAt),\n    ].reduce<DateTime.Utc | null>((latest, date) =>\n      latest === null || DateTime.toEpochMillis(date) > DateTime.toEpochMillis(latest)\n        ? date : latest, null),\n    latestUserMessageAt: latestUserMessage?.updatedAt ?? null,"
+    },
+    {
+      "oldText": "    latestVisibleMessage: null,\n    latestUserMessageAt: input.state.latestUserMessageAt,",
+      "newText": "    latestVisibleMessage: null,\n    latestMessageAt: input.state.latestMessageAt,\n    latestUserMessageAt: input.state.latestUserMessageAt,"
+    },
+    {
+      "oldText": "          latestUserMessageAt:\n            row.latest_user_message_at === null",
+      "newText": "          latestMessageAt:\n            row.latest_message_at === null ? null : DateTime.makeUnsafe(row.latest_message_at),\n          latestUserMessageAt:\n            row.latest_user_message_at === null"
+    }
+  ],
   "packages/provider-pi/src/server/status.ts": [
     {
       "oldText": "import { causeErrorTag } from \"@t3tools/shared/observability\";",
       "newText": "import { createModelContextSettings } from \"pimac:model-context.mjs\";\nimport { loadPiThinkingDefaults, type PiThinkingDefaults } from \"pimac:pi-thinking-defaults.ts\";\nimport { causeErrorTag } from \"@t3tools/shared/observability\";"
     },
     {
-      "oldText": "    const discoveredModels = parseDiscoveredModels(modelsData, stateData);",
-      "newText": "    // 在官方模型投影丢弃元数据前保存权威上下文窗口，供桌面设置展示。\n    createModelContextSettings().recordModels(modelsData);\n    const thinkingDefaults = yield* Effect.tryPromise(() => loadPiThinkingDefaults(environment, cwd));\n    const discoveredModels = parseDiscoveredModels(modelsData, stateData, thinkingDefaults);"
+      "oldText": "  const discoveredModels = yield* Effect.fromResult(parseDiscoveredModels(modelsData, stateData));",
+      "newText": "  // 在官方投影丢弃元数据前保存权威窗口；解析失败仍沿用官方 Result 错误。\n  createModelContextSettings().recordModels(modelsData);\n  const thinkingDefaults = yield* Effect.tryPromise(() => loadPiThinkingDefaults(environment, cwd));\n  const discoveredModels = yield* Effect.fromResult(parseDiscoveredModels(modelsData, stateData, thinkingDefaults));"
     },
     {
-      "oldText": "function parseDiscoveredModels(data: unknown, state: unknown): ReadonlyArray<ServerProviderModel> {",
-      "newText": "function parseDiscoveredModels(data: unknown, state: unknown, defaults: PiThinkingDefaults): ReadonlyArray<ServerProviderModel> {"
+      "oldText": "function parseDiscoveredModels(\n  data: unknown,\n  state: unknown,\n): Result.Result<ReadonlyArray<ServerProviderModel>, PiRpcError> {",
+      "newText": "function parseDiscoveredModels(\n  data: unknown,\n  state: unknown,\n  defaults: PiThinkingDefaults,\n): Result.Result<ReadonlyArray<ServerProviderModel>, PiRpcError> {"
     },
     {
       "oldText": "        provider === activeProvider && id === activeModelId\n          ? recordString(state, \"thinkingLevel\")\n          : undefined,",
@@ -154,12 +154,8 @@
   ],
   "packages/provider-pi/src/server/textGeneration.ts": [
     {
-      "oldText": "        // No user is present to answer a text-generation extension dialog.\n        disableExtensions: true,",
+      "oldText": "        disableExtensions: true,",
       "newText": "        // Provider 也可能由用户扩展注册（如 pi-antigravity）；禁用扩展会让\n        // 前台可用的模型在后台消失。保留正常扩展加载，但不注入 T3 会话。\n        disableExtensions: false,"
-    },
-    {
-      "oldText": "        // Extensions and tools are disabled because no user is present to\n        // answer a dialog and background text generation is read-only. User\n        // model config and auth still apply.",
-      "newText": "        // 用户 Provider 扩展、模型配置和认证沿用正常 Pi 加载流程；\n        // 内置工具仍禁用，临时进程不持久化会话、不携带 T3 MCP 凭据。"
     }
   ],
   "packages/contracts/src/orchestrationV2.ts": [
@@ -179,12 +175,8 @@
 ],
   "apps/server/src/orchestration-v2/Orchestrator.ts": [
     {
-      "oldText": "        const target = projection.runs.find((run) => run.id === targetRunId);\n        const turn = latestProviderTurnForAttempt(",
-      "newText": "        const target = projection.runs.find((run) => run.id === targetRunId);\n        // Enter 表达优先插入的意图，而非强制 steering；原生压缩不接收插入消息。\n        // 在线程锁内改为持久队列，避免客户端快照滞后导致拒绝或提前执行。\n        // 显式 steer_active/restart_active 仍保留上游校验和错误语义。\n        if (command.deliveryIntent === \"steer\" && target !== undefined &&\n          projection.messages.some((message) => message.id === target.userMessageId &&\n            isNativeMaintenanceCommand(message) && message.text.trim().toLowerCase() === \"/compact\")) {\n          dispatchMode = { type: \"queue_after_active\" };\n        }\n        const turn = latestProviderTurnForAttempt("
-    },
-    {
-      "oldText": "((command.titleSeed !== undefined &&\n          (yield* projectionStore",
-      "newText": "(((command.titleSeed !== undefined ||\n          (command.createdBy === \"user\" &&\n            [\"\", \"新任务\", \"New thread\"].includes(projection.thread.title.trim()))) &&\n          (yield* projectionStore"
+      "oldText": "      ((command.titleSeed !== undefined &&\n        (yield* projectionStore",
+      "newText": "      (((command.titleSeed !== undefined ||\n                (command.createdBy === \"user\" &&\n                  [\"\", \"新任务\", \"New thread\"].includes(projection.thread.title.trim()))) &&\n                (yield* projectionStore"
     },
     {
       "oldText": "title: command.titleSeed ?? projection.thread.title,",
@@ -221,20 +213,6 @@
       "newText": "      yield* Ref.set(activeRef, connector);\n      getNative().tunnelHealth.start(Number(child.pid));"
     }
   ],
-  "apps/server/src/review/ReviewService.ts": [
-    {
-      "oldText": "import * as ProjectStore from \"../orchestration-v2/ProjectStore.ts\";",
-      "newText": "import * as ProjectStore from \"../orchestration-v2/ProjectStore.ts\";\nimport * as ProjectionStore from \"../orchestration-v2/ProjectionStore.ts\";"
-    },
-    {
-      "oldText": "  const projectStore = yield* ProjectStore.ProjectStoreV2;",
-      "newText": "  const projectStore = yield* ProjectStore.ProjectStoreV2;\n  const projections = yield* ProjectionStore.ProjectionStoreV2;"
-    },
-    {
-      "oldText": "    return yield* new VcsRepositoryDetectionError({\n      operation,\n      cwd,",
-      "newText": "    // 官方已校验项目和受管 worktree 根；只补充活跃线程绑定的外部 worktree。\n    // 主机 cwd 是私有状态目录，不能把未注册的任意路径放行；读取失败也不能当作空状态。\n    const active = yield* projections.getShellSnapshot({ location: \"active\" }).pipe(\n      Effect.mapError((cause) => new VcsRepositoryDetectionError({ operation, cwd, detail: \"Failed to validate active review worktrees.\", cause })),\n    );\n    for (const thread of active.threads) {\n      if (thread.worktreePath === null) continue;\n      if (isWithinRoot(candidate, yield* canonicalizePath(thread.worktreePath))) return;\n    }\n\n    return yield* new VcsRepositoryDetectionError({\n      operation,\n      cwd,"
-    }
-  ],
   "apps/server/src/usage/UsageLimitSources.ts": [
     {
       "oldText": "import * as Context from \"effect/Context\";",
@@ -261,38 +239,44 @@
       "count": 1
     },
     {
-      "oldText": "    if (!result.ok) {\n      yield* Effect.annotateCurrentSpan({",
-      "newText": "    if (!result.ok) {\n      PiNative.getNative().connectionDiagnostics.record(\"dpop-denied\", { reason: result.code, route: connectionRoute(input.request.url) ?? \"other\", method: input.request.method, transport: input.request.headers[\"x-forwarded-proto\"] === \"https\" ? \"https-tunnel\" : \"http-local\" });\n      yield* Effect.annotateCurrentSpan({",
+      "oldText": "  if (!result.ok) {\n    yield* Effect.annotateCurrentSpan({",
+      "newText": "  if (!result.ok) {\n    PiNative.getNative().connectionDiagnostics.record(\"dpop-denied\", { reason: result.code, route: connectionRoute(input.request.url) ?? \"other\", method: input.request.method, transport: input.request.headers[\"x-forwarded-proto\"] === \"https\" ? \"https-tunnel\" : \"http-local\" });\n    yield* Effect.annotateCurrentSpan({",
       "count": 1
     }
   ],
   "apps/server/src/serverRuntimeStartup.ts": [
     {
-      "oldText": "            const accessInfo = yield* issueHeadlessServeAccessInfo();\n            yield* runStartupPhase(\n              \"headless.output\",\n              Console.log(formatHeadlessServeOutput(accessInfo)),\n            );",
-      "newText": "            // Pi Mac supervises readiness privately; do not mint or print CLI administration credentials.\n            yield* Effect.void;",
+      "oldText": "          const accessInfo = yield* issueHeadlessServeAccessInfo();\n          yield* runStartupPhase(\n            \"headless.output\",\n            Console.log(formatHeadlessServeOutput(accessInfo)),\n          );",
+      "newText": "          // Pi Mac supervises readiness privately; do not mint or print CLI administration credentials.\n          yield* Effect.void;",
       "count": 1
-    }
-  ],
-  "apps/server/src/provider/Drivers/CodexManagedProvider.ts": [
+    },
     {
-      "oldText": "makePendingCodexProvider({ ...config, customModels: [] })",
-      "newText": "makePendingCodexProvider({ ...config, enabled, customModels: [] })"
+      "oldText": "import * as Effect from \"effect/Effect\";",
+      "newText": "import * as Effect from \"effect/Effect\";\nimport { getNative } from \"pimac:native.mjs\";\nimport { traceStartupPhase } from \"pimac:startup-diagnostics.ts\";"
+    },
+    {
+      "oldText": "const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>) =>\n  effect.pipe(",
+      "newText": "const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>) =>\n  traceStartupPhase(phase, effect, getNative().startup).pipe("
+    },
+    {
+      "oldText": "    yield* commandGate.signalCommandReady;",
+      "newText": "    yield* commandGate.signalCommandReady;\n    yield* Effect.sync(() => getNative().onCommandReady?.());"
     }
   ],
   "apps/server/src/provider/CodexInstallation.ts": [
-  {
-    "oldText": "  yield* Effect.gen(function* () {\n    // Clear staging directories left behind",
-    "newText": "  // 延迟到启用实例的订阅或显式安装操作；仅构造官方服务不应探测其他 Provider。\n  const initialize = yield* Effect.cached(Effect.gen(function* () {\n    // Clear staging directories left behind"
-  },
-  {
-    "oldText": "  );\n\n  return CodexInstallation.of({",
-    "newText": "  ));\n\n  return CodexInstallation.of({"
-  },
-  {
-    "oldText": "    resolve,\n    acquire,\n    start,\n    cancel,\n    state: SubscriptionRef.get(state),\n    changes: SubscriptionRef.changes(state),\n    remove,",
-    "newText": "    resolve: () => initialize.pipe(Effect.andThen(resolve())),\n    acquire: () => initialize.pipe(Effect.andThen(acquire())),\n    start: initialize.pipe(Effect.andThen(start)),\n    cancel: (operationId) => initialize.pipe(Effect.andThen(cancel(operationId))),\n    state: initialize.pipe(Effect.andThen(SubscriptionRef.get(state))),\n    changes: Stream.unwrap(initialize.pipe(Effect.as(SubscriptionRef.changes(state)))),\n    remove: (paths) => initialize.pipe(Effect.andThen(remove(paths))),"
-  }
-],
+    {
+      "oldText": "  yield* Effect.gen(function* () {\n    // Shared-home installs do not refresh parent mtimes; remove only staging directories far older than the 45-minute download cap.",
+      "newText": "  // 延迟到启用实例的订阅或显式管理操作，保留官方清理和失败状态。\n  const initialize = yield* Effect.cached(Effect.gen(function* () {\n    // Shared-home installs do not refresh parent mtimes; remove only staging directories far older than the 45-minute download cap."
+    },
+    {
+      "oldText": "  );\n\n  return CodexInstallation.of({",
+      "newText": "  ));\n\n  return CodexInstallation.of({"
+    },
+    {
+      "oldText": "    resolve,\n    acquire,\n    start,\n    cancel,\n    state: SubscriptionRef.get(state),\n    changes: SubscriptionRef.changes(state),\n    remove,",
+      "newText": "    resolve: () => initialize.pipe(Effect.andThen(resolve())),\n    acquire: () => initialize.pipe(Effect.andThen(acquire())),\n    start: initialize.pipe(Effect.andThen(start)),\n    cancel: (operationId) => initialize.pipe(Effect.andThen(cancel(operationId))),\n    state: initialize.pipe(Effect.andThen(SubscriptionRef.get(state))),\n    changes: Stream.unwrap(initialize.pipe(Effect.as(SubscriptionRef.changes(state)))),\n    remove: (paths) => initialize.pipe(Effect.andThen(remove(paths))),"
+    }
+  ],
   "apps/server/src/provider/AntigravityInstallation.ts": [
   {
     "oldText": "  yield* Effect.gen(function* () {\n    const canRemove = yield* fs.exists(managedDirectory);",
@@ -308,27 +292,23 @@
   }
 ],
   "apps/server/src/usage/UsageService.ts": [
-  {
-    "oldText": "  ProviderInstanceId,\n  USAGE_CONTRACT_VERSION,",
-    "newText": "  ProviderInstanceId,\n  resolveProviderInstanceEnabled,\n  USAGE_CONTRACT_VERSION,"
-  },
-  {
-    "oldText": "import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from \"../provider/builtInDrivers.ts\";",
-    "newText": "import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from \"../provider/builtInDrivers.ts\";\nimport { deriveProviderInstanceConfigMap } from \"../provider/ProviderInstanceRegistryHydration.ts\";"
-  },
-  {
-    "oldText": "   * not decode. Disabled accounts still have history. An unconfigured default\n   * slot runs with default config, just as it does in the provider registry.",
-    "newText": "   * not decode. Discovery follows official instance/project enablement, so\n   * disabled providers do not trigger transcript or remote account scans."
-  },
-  {
-    "oldText": "    > = Object.entries(settings.providerInstances)\n      .filter(([, instance]) => instance.driver === driver.driverKind)\n      .map(([id, instance]) => [ProviderInstanceId.make(id), instance, true] as const);\n    if (!Object.hasOwn(settings.providerInstances, driver.driverKind)) {\n      entries.push([ProviderInstanceId.make(driver.driverKind), {}, false]);\n    }",
-    "newText": "    > = Object.entries(deriveProviderInstanceConfigMap(settings))\n      .filter(([, instance]) => instance.driver === driver.driverKind && resolveProviderInstanceEnabled(instance))\n      .map(([id, instance]) => [ProviderInstanceId.make(id), instance, Object.hasOwn(settings.providerInstances, id)] as const);"
-  },
-  {
-    "oldText": "              reader.scan({ instances, settings, windowStartMs, retentionCutoffMs, awaitRefresh }),",
-    "newText": "              instances.length === 0 ? Effect.succeed([]) :\n                reader.scan({ instances, settings, windowStartMs, retentionCutoffMs, awaitRefresh }),"
-  }
-],
+    {
+      "oldText": "  ProviderInstanceId,\n  USAGE_CONTRACT_VERSION,",
+      "newText": "  ProviderInstanceId,\n  resolveProviderInstanceEnabled,\n  USAGE_CONTRACT_VERSION,"
+    },
+    {
+      "oldText": "import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from \"../provider/builtInDrivers.ts\";",
+      "newText": "import { BUILT_IN_USAGE_DRIVERS, type BuiltInUsageReadersEnv } from \"../provider/builtInDrivers.ts\";\nimport { deriveProviderInstanceConfigMap } from \"../provider/ProviderInstanceRegistryHydration.ts\";"
+    },
+    {
+      "oldText": "    > = Object.entries(settings.providerInstances)\n      .filter(([, instance]) => instance.driver === driver.driverKind)\n      .map(([id, instance]) => [ProviderInstanceId.make(id), instance, true] as const);\n    if (!Object.hasOwn(settings.providerInstances, driver.driverKind)) {\n      entries.push([ProviderInstanceId.make(driver.driverKind), {}, false]);\n    }",
+      "newText": "    > = Object.entries(deriveProviderInstanceConfigMap(settings))\n      .filter(([, instance]) => instance.driver === driver.driverKind && resolveProviderInstanceEnabled(instance))\n      .map(([id, instance]) => [ProviderInstanceId.make(id), instance, Object.hasOwn(settings.providerInstances, id)] as const);"
+    },
+    {
+      "oldText": "            reader.scan({ instances, settings, windowStartMs, retentionCutoffMs, awaitRefresh }),",
+      "newText": "            instances.length === 0 ? Effect.succeed([]) :\n              reader.scan({ instances, settings, windowStartMs, retentionCutoffMs, awaitRefresh }),"
+    }
+  ],
   "apps/server/src/orchestration-v2/runtimeLayer.ts": [
     {
       "oldText": "export const layer = Layer.mergeAll(",
@@ -337,8 +317,8 @@
   ],
   "apps/server/src/http.ts": [
     {
-      "oldText": "const authenticateRawRouteWithScope = (",
-      "newText": "import { makeSessionHtmlExportRoute } from \"pimac:session-html-route.ts\";\n\nconst authenticateRawRouteWithScope = ("
+      "oldText": "const authenticateRawRouteWithScope =",
+      "newText": "import { makeSessionHtmlExportRoute } from \"pimac:session-html-route.ts\";\n\nconst authenticateRawRouteWithScope ="
     },
     {
       "oldText": "export const layerOtlpTracesProxyRoute = HttpRouter.add(",
@@ -353,16 +333,16 @@
   ],
   "apps/server/src/server.ts": [
     {
+      "oldText": "    yield* fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared });",
+      "newText": "    yield* traceStartupPhase(\"path.hydration\", fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared }), PiNative.getNative().startup);"
+    },
+    {
       "oldText": "    ServerHttp.layerOtlpTracesProxyRoute,",
       "newText": "    ServerHttp.layerSessionHtmlExportRoute.pipe(HttpRouter.provideRequest(RuntimeLayer.layerSessionHtmlExportDependencies)),\n    ServerHttp.layerOtlpTracesProxyRoute,"
     },
-{
-  "oldText": "    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(",
-  "newText": "    // 先订阅再读快照，避免启用实例的变更丢失。只订阅已启用驱动的安装状态；\n    // 安装服务本身惰性初始化，显式安装/管理 API 仍保留完整官方行为。\n    const subscription = yield* instances.subscribeChanges;\n    yield* Stream.concat(Stream.make(undefined), Stream.fromSubscription(subscription)).pipe(\n      Stream.mapEffect(() => instances.listInstances),\n      Stream.map((entries) => ({\n        antigravity: entries.some((entry) => entry.enabled && entry.driverKind === \"antigravity\"),\n        codex: entries.some((entry) => entry.enabled && entry.driverKind === \"codex\"),\n      })),\n      Stream.changesWith((a, b) => a.antigravity === b.antigravity && a.codex === b.codex),\n      Stream.switchMap((enabled) => Stream.merge(\n        enabled.antigravity ? antigravity.changes.pipe(\n          Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n          Stream.drop(1),\n        ) : Stream.empty,\n        enabled.codex ? codex.changes.pipe(\n          Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n          Stream.drop(1),\n        ) : Stream.empty,\n      )),"
-},
     {
-      "oldText": "const layerReview = ReviewService.layer.pipe(\n  Layer.provide(ProjectStore.layer),",
-      "newText": "const layerReview = ReviewService.layer.pipe(\n  Layer.provide(Layer.merge(ProjectStore.layer, ProjectionStoreV2.layer)),"
+      "oldText": "    yield* Stream.merge(\n      antigravity.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n      codex.changes.pipe(\n        Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n        Stream.drop(1),\n      ),\n    ).pipe(",
+      "newText": "    // 先订阅再读快照，避免启用实例的变更丢失。只订阅已启用驱动的安装状态；\n    // 安装服务本身惰性初始化，显式安装/管理 API 仍保留完整官方行为。\n    const subscription = yield* instances.subscribeChanges;\n    yield* Stream.concat(Stream.make(undefined), Stream.fromSubscription(subscription)).pipe(\n      Stream.mapEffect(() => instances.listInstances),\n      Stream.map((entries) => ({\n        antigravity: entries.some((entry) => entry.enabled && entry.driverKind === \"antigravity\"),\n        codex: entries.some((entry) => entry.enabled && entry.driverKind === \"codex\"),\n      })),\n      Stream.changesWith((a, b) => a.antigravity === b.antigravity && a.codex === b.codex),\n      Stream.switchMap((enabled) => Stream.merge(\n        enabled.antigravity ? antigravity.changes.pipe(\n          Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n          Stream.drop(1),\n        ) : Stream.empty,\n        enabled.codex ? codex.changes.pipe(\n          Stream.changesWith((a, b) => a.installedVersion === b.installedVersion),\n          Stream.drop(1),\n        ) : Stream.empty,\n      )),"
     },
     {
       "oldText": "              cloudLink.registerManagedTunnelRecovery(localOrigin, {\n                retryRuntimeFailures: true,\n              }),",
@@ -378,7 +358,7 @@
     },
     {
       "oldText": "import * as NodeHttp from \"node:http\";",
-      "newText": "import * as NodeHttp from \"node:http\";\nimport * as PiNative from \"pimac:native.mjs\";\nimport { NativeManagementLayer, NativeHttpPolicy, oauthAwareCommandReadiness } from \"pimac:management.mjs\";",
+      "newText": "import * as NodeHttp from \"node:http\";\nimport * as PiNative from \"pimac:native.mjs\";\nimport { NativeManagementLayer, NativeHttpPolicy, oauthAwareCommandReadiness } from \"pimac:management.mjs\";\nimport { traceStartupPhase } from \"pimac:startup-diagnostics.ts\";",
       "count": 1
     },
     {
@@ -404,13 +384,13 @@
       "count": 1
     },
     {
-      "oldText": "            providers,\n            ...editorConfig,",
-      "newText": "            providers: visibleProviders(providers, settings),\n            ...editorConfig,",
+      "oldText": "          providers,\n          ...editorConfig,",
+      "newText": "          providers: visibleProviders(providers, settings),\n          ...editorConfig,",
       "count": 1
     },
     {
-      "oldText": "            return { providers };",
-      "newText": "            return { providers: visibleProviders(providers, yield* serverSettings.getSettings) };",
+      "oldText": "            if (input.workspaceSnapshotsOnDemand !== true) return { providers };",
+      "newText": "            providers = visibleProviders(providers, yield* serverSettings.getSettings);\n            if (input.workspaceSnapshotsOnDemand !== true) return { providers };",
       "count": 1
     },
     {
@@ -419,9 +399,35 @@
       "count": 1
     },
     {
-      "oldText": "                // Both sides replay their current value, so the first pairing normally",
-      "newText": "                Stream.mapEffect((providers) => serverSettings.getSettings.pipe(Effect.map((settings) => visibleProviders(providers, settings)))),\n                // Both sides replay their current value, so the first pairing normally",
+      "oldText": "                // Compare initial paired values with the snapshot; blindly dropping them loses changes between snapshot and subscription.",
+      "newText": "                Stream.mapEffect((providers) => serverSettings.getSettings.pipe(Effect.map((settings) => visibleProviders(providers, settings)))),\n                // Compare initial paired values with the snapshot; blindly dropping them loses changes between snapshot and subscription.",
       "count": 1
+    }
+  ],
+  "packages/shared/src/nodeSqliteClient.ts": [
+    {
+      "oldText": "interface Acquired {",
+      "newText": "// 凭证校验不能排在历史快照等长读事务后面；独立只读 lane 仍实时查询同一 WAL，\n// 不缓存身份、不绕过撤销；SqlClient 已有事务仍复用原连接，保持事务内可见性。\nconst CredentialRead = Context.Reference<boolean>(\n  \"pimac/nodeSqliteClient/CredentialRead\", { defaultValue: () => false },\n);\n\nexport const credentialReadOnly = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>\n  readOnly(Effect.provideService(effect, CredentialRead, true));\n\ninterface Acquired {"
+    },
+    {
+      "oldText": "  const readerSemaphore = yield* Semaphore.make(1);\n\n  const writer = { name: \"writer\" as const, lock: semaphore, connection };\n  let activeWriter: ConnectionOwner | undefined;\n  const route = Effect.withFiber((fiber) =>\n    acquireReader !== undefined && Context.get(fiber.context, ReadOnly)\n      ? Effect.map(acquireReader, (readerConnection) =>\n          readerConnection === undefined\n            ? writer\n            : { name: \"reader\" as const, lock: readerSemaphore, connection: readerConnection },\n        )\n      : Effect.succeed(writer),\n  );",
+      "newText": "  const readerSemaphore = yield* Semaphore.make(1);\n  // makeReader 本身不启动 worker；首次鉴权查询才打开独立只读连接，作用域结束统一回收。\n  const acquireCredentialReader =\n    options.readerWorker && isFileDatabase ? yield* makeReader(options) : undefined;\n  const credentialSemaphore = yield* Semaphore.make(1);\n\n  const writer = { name: \"writer\" as const, lock: semaphore, connection };\n  let activeWriter: ConnectionOwner | undefined;\n  const route = Effect.withFiber((fiber) => {\n    const credential = Context.get(fiber.context, CredentialRead);\n    const acquire = credential ? acquireCredentialReader : acquireReader;\n    return acquire !== undefined && Context.get(fiber.context, ReadOnly)\n      ? Effect.map(acquire, (readerConnection) =>\n          readerConnection === undefined\n            ? writer\n            : { name: \"reader\" as const, lock: credential ? credentialSemaphore : readerSemaphore, connection: readerConnection },\n        )\n      : Effect.succeed(writer);\n  });"
+    }
+  ],
+  "apps/server/src/persistence/AuthSessions.ts": [
+    {
+      "oldText": "    getSessionRowById(input).pipe(\n      NodeSqliteClient.readOnly,",
+      "newText": "    getSessionRowById(input).pipe(\n      NodeSqliteClient.credentialReadOnly,"
+    }
+  ],
+  "apps/server/src/auth/http.ts": [
+    {
+      "oldText": "import * as EnvironmentAuth from \"./EnvironmentAuth.ts\";",
+      "newText": "import * as EnvironmentAuth from \"./EnvironmentAuth.ts\";\nimport { getNative } from \"pimac:native.mjs\";\nimport { traceStartupPhase } from \"pimac:startup-diagnostics.ts\";"
+    },
+    {
+      "oldText": "            const result = yield* serverAuth.getSessionState(request);",
+      "newText": "            const result = yield* traceStartupPhase(\"auth.session.verify\", serverAuth.getSessionState(request), getNative().startup);"
     }
   ],
   "apps/server/src/auth/EnvironmentAuthPolicy.ts": [
@@ -438,8 +444,8 @@
       "count": 1
     },
     {
-      "oldText": "      launchBrowser(target).pipe(",
-      "newText": "      Effect.suspend(() => PiNative.browserAuthorization(target) ? Effect.void : launchBrowser(target)).pipe(",
+      "oldText": "        return yield* launchBrowser(target);",
+      "newText": "        return yield* Effect.suspend(() => PiNative.browserAuthorization(target) ? Effect.void : launchBrowser(target));",
       "count": 1
     }
   ],
@@ -450,8 +456,8 @@
       "count": 1
     },
     {
-      "oldText": "        yield* Effect.logInfo(\"agent activity publish completed\", {",
-      "newText": "        PiNative.recordPublish(response);\n        yield* Effect.logInfo(\"agent activity publish completed\", {",
+      "oldText": "      yield* Effect.logInfo(\"agent activity publish completed\", {",
+      "newText": "      PiNative.recordPublish(response);\n      yield* Effect.logInfo(\"agent activity publish completed\", {",
       "count": 1
     }
   ],
@@ -468,8 +474,8 @@
       "newText": "import { resolveTitleGenerationSelection } from \"pimac:text-generation-settings.mjs\";\nimport * as Context from \"effect/Context\";"
     },
     {
-      "oldText": "    generateThreadTitle: (input) =>\n      resolveInstance(registry, \"generateThreadTitle\", input.modelSelection.instanceId).pipe(",
-      "newText": "    generateThreadTitle: (input) =>\n      Effect.tryPromise({\n        try: () => resolveTitleGenerationSelection(),\n        catch: (cause) => new TextGenerationError({ operation: \"generateThreadTitle\", detail: String(cause) }),\n      }).pipe(\n        Effect.flatMap((modelSelection) => {\n          // 目录刷新可能刚切换了失效的默认模型，本次也使用已确认的官方 Pi 选择。\n          input = { ...input, modelSelection };\n          return resolveInstance(registry, \"generateThreadTitle\", modelSelection.instanceId);\n        }),"
+      "oldText": "      return resolveInstance(registry, \"generateThreadTitle\", input.modelSelection.instanceId).pipe(",
+      "newText": "      return Effect.tryPromise({\n        try: () => resolveTitleGenerationSelection(),\n        catch: (cause) => new TextGenerationError({ operation: \"generateThreadTitle\", detail: String(cause) }),\n      }).pipe(\n        Effect.flatMap((modelSelection) => {\n          // 使用桌面已校验选择；保留上游链接上下文和生成生命周期。\n          input = { ...input, modelSelection };\n          return resolveInstance(registry, \"generateThreadTitle\", modelSelection.instanceId);\n        }),"
     }
   ],
   "apps/server/src/auth/RpcAuthorization.ts": [
@@ -478,8 +484,8 @@
       "newText": "import * as Effect from \"effect/Effect\";\nimport { observeNativeRpc } from \"pimac:rpc-diagnostics.mjs\";"
     },
     {
-      "oldText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);\n    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));\n    return requiredScope === undefined ? effect : Effect.fail(rpcAuthorizationError(requiredScope));\n  });",
-      "newText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    // 诊断只观察结果；保留官方按 payload 计算的多 scope 授权。\n    const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);\n    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));\n    const authorized = requiredScope === undefined;\n    const command = rpc._tag === \"orchestration.dispatchCommand\" ? (payload as any) : undefined;\n    return observeNativeRpc(rpc._tag,\n      authorized ? effect : Effect.fail(rpcAuthorizationError(requiredScope)),\n      {\n        \"orchestration_v2.command_id\": command?.commandId,\n        \"orchestration_v2.command_type\": command?.type,\n        \"orchestration_v2.thread_id\": command?.threadId,\n        \"pimac.dispatch_mode\": command?.type === \"message.dispatch\" ? command.dispatchMode?.type : undefined,\n        \"pimac.delivery_intent\": command?.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n      }, { authorized });\n  });"
+      "oldText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);\n    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));\n    if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));\n    return onAuthorized === undefined\n      ? effect\n      : Effect.tap(effect, () => onAuthorized(rpc._tag, payload));\n  });",
+      "newText": "  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {\n    const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);\n    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));\n    // 诊断仅观察；官方多 scope 判定和成功回调（含客户端访问记录）保持不变。\n    const authorized = requiredScope === undefined;\n    const observed = !authorized\n      ? Effect.fail(rpcAuthorizationError(requiredScope))\n      : onAuthorized === undefined ? effect : Effect.tap(effect, () => onAuthorized(rpc._tag, payload));\n    const command = rpc._tag === \"orchestration.dispatchCommand\" ? (payload as any) : undefined;\n    return observeNativeRpc(rpc._tag, observed, {\n      \"orchestration_v2.command_id\": command?.commandId,\n      \"orchestration_v2.command_type\": command?.type,\n      \"orchestration_v2.thread_id\": command?.threadId,\n      \"pimac.dispatch_mode\": command?.type === \"message.dispatch\" ? command.dispatchMode?.type : undefined,\n      \"pimac.delivery_intent\": command?.type === \"message.dispatch\" ? command.deliveryIntent : undefined,\n    }, { authorized });\n  });"
     }
   ]
 }

@@ -1,6 +1,6 @@
 # Official T3 Server sidecar
 
-Pinned upstream: **v0.1.0 release**, `pingdotgg/t3code@81493efb71e8e8244f95d3e9f71d8369654ab151` (2026-10-15 UTC).
+Pinned upstream: **v0.1.3 stable release**, `pingdotgg/t3code@d2c440312e5f39d59827ed466838a623516454d6` (published 2026-10-27 UTC).
 This uses upstream orchestrator V2 and all official Provider drivers, including
 Pi's package-owned driver, adapter and RPC transport. A presentation-focused Pi adapter patch records per-message usage and
 model-response duration (excluding tools), exposing normalized turn usage and
@@ -30,7 +30,7 @@ LAN shares upstream authentication and the same environment identity; it never
 publishes administration routes or introduces another orchestration engine. The supervisor has no workspace/Pi command API.
 Provider subprocesses must not inherit supervisor secrets.
 For this single-user app, newly issued desktop sessions and explicit phone
-pairings use upstream `AuthAdministrativeScopes`, including access/relay
+pairings use upstream `AuthStandardClientScopes`, including access/relay
 management and all granular file/settings/diagnostic permissions. Existing
 phone grants are not silently expanded: create a fresh pairing after upgrading.
 Explicitly narrower OAuth scope requests remain narrower, as enforced upstream.
@@ -49,8 +49,9 @@ to load the updated Server; never interrupt active work just to publish it.
 ## Reproducible build
 
 Commit host sources, patches, tests, dependency locks, and `upstream-pin.json`.
-The manifest hashes 2,078 upstream files, including native dependency patches.
-Effect and its Node platform packages are pinned together at `4.0.4`.
+The manifest hashes 2,186 upstream files, including native dependency patches
+and checked-in GraphQL schemas. Effect and its Node platform packages are pinned
+together at `4.0.5`.
 `upstream/`, `node_modules/`, `generated/` and the app's generated
 `vendor/t3-server.mjs`, `vendor/node_modules/` and `vendor/native-runtime.json`
 are build artifacts.
@@ -74,7 +75,7 @@ When deliberately changing the pin, archive the existing cache first.
 ## Native providers, terminal and workspace search
 
 All official upstream drivers and usage readers remain registered (including
-Codex, Claude, Cursor, Grok, OpenCode, Antigravity, Pi, Muse and ACP registry).
+Codex, Claude, Cursor, fx, Grok, OpenCode, Antigravity, Pi, Muse and ACP registry).
 PiMac does not replace terminal spawning, indexed workspace search or SDK loading
 with disabled stubs. Provider **discovery defaults** are Pi-only: official default
 instance slots for other drivers are explicitly disabled in settings, and disabled
@@ -98,8 +99,11 @@ does not manufacture an installed CLI or an authenticated account.
 lock-verified runtime dependency closure into `vendor/node_modules`, beside the
 server bundle. SwiftPM's existing `.copy("Resources/t3-bridge")` includes it in
 the standalone app. No runtime dependency on this checkout's `node_modules` is
-required. The upstream pinned `fff-node` FFI fixes and `node-pty` helper fixes are
-applied only to staged copies, never to the pristine upstream/npm caches.
+required. The upstream pinned `fff-node` FFI fixes, `node-pty` helper fixes and Muse
+process-exit hook are applied only to staged copies, never to pristine caches.
+Upstream math parser npm patches (including the LLM tokenizer alias and its
+patched default entrypoint) are applied in isolated copies used by the bundler;
+installed dependencies stay pristine.
 Installation uses `npm ci --ignore-scripts`; platform binaries must already be
 present in the locked npm packages. Missing binaries fail the build rather than
 silently disabling functionality or downloading an unpinned fallback.
@@ -113,6 +117,39 @@ The application's Node runtime must use the same architecture as the build.
 addons, libraries and helpers before signing the outer bundle. The generated
 runtime is excluded from the development watcher's runtime-input fingerprints;
 editing/building it does not restart an active application.
+
+## Startup readiness diagnostics
+
+Supervisor `ready` is emitted only after both native management construction and
+upstream's command-ready gate, not after a successful environment-descriptor GET.
+The desktop observes that event immediately instead of waiting for its next
+connection poll. Native launch uses one interactive login shell and marks the
+inherited environment prepared, retaining upstream PATH hydration for other hosts.
+
+`server-owned/startup-diagnostics.log` records one launch ID, PID, wall-clock and
+monotonic timings for PATH hydration, settings, legacy-shell import, runtime and
+delegation recovery, worker startup, HTTP/activation barriers and final readiness.
+It logs phase starts as well as success/failure so unfinished stages remain visible.
+Files are private, rotate at 512 KB with one prior copy, and contain no session or
+authorization payloads. The first two minutes also time the official session
+verification handler, distinguishing post-ready auth stalls from startup recovery.
+Logging never changes official recovery or auth outcomes.
+
+Credential lookups use a separate lazy SQLite read-only worker, so background
+history/shell read transactions cannot block authentication on the shared reader.
+It reads the same WAL without identity caching; signatures, expiration, revocation
+and scopes remain upstream-owned. Existing transactions retain their original
+connection and uncommitted visibility. Unsupported reader environments keep the
+upstream writer fallback; this cannot promise contention isolation there.
+`tests/auth-startup-contention.test.ts` runs the actual official HTTP auth handler
+against a temporary file database with controlled reader/writer/both transactions,
+including first-use auth, revocation, corrupt rows and write-transaction rollback.
+Regression: `tests/startup-readiness.test.ts`, native `T3ConnectionRecoveryTests`,
+`T3DesktopTests` and `T3LifecycleTests`. Real-state cold-start timings still require
+a safe updated-app restart; isolated fixtures do not establish those timings.
+
+The Swift client's session/stream contract and official source references are
+recorded in [Native T3 client transport](../../docs/t3-client-transport.md).
 
 ## Protocol / upgrade
 

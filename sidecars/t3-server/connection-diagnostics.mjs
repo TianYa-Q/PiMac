@@ -8,7 +8,7 @@ export function connectionRoute(url) {
   const pathname = url.split('?')[0];
   return routes.has(pathname) ? pathname : null;
 }
-function appendPrivateLog(file, line, maxBytes) {
+export function appendPrivateLog(file, line, maxBytes) {
   if (!file) return;
   let fd;
   try {

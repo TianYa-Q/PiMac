@@ -47,16 +47,18 @@ test('every pinned upstream file is pristine and every host patch still matches'
 
 test('upstream owns Pi structured image output, history parsing and project review roots', async () => {
   const usageDiscovery = patches['apps/server/src/usage/UsageService.ts'];
-  assert.equal(usageDiscovery.length, 5);
+  assert.equal(usageDiscovery.length, 4);
   assert(usageDiscovery.some(entry => entry.newText.includes('resolveProviderInstanceEnabled(instance)')));
   assert(usageDiscovery.some(entry => entry.newText.includes('instances.length === 0 ? Effect.succeed([])')));
   assert(usageDiscovery.every(entry => !/parse|dedupe|readTranscriptRecords|fingerprint|provider ===/.test(entry.newText)),
     'Only gate usage discovery by official settings; keep parsing/aggregation driver-neutral and upstream-owned');
   assert(!Object.hasOwn(patches, 'packages/provider-pi/src/server/usage.ts'));
-  const [adapter, usage, review] = await Promise.all([
+  const [adapter, usage, review, workspaces, codex] = await Promise.all([
     'packages/provider-pi/src/server/adapter.ts',
     'packages/provider-pi/src/server/usage.ts',
     'apps/server/src/review/ReviewService.ts',
+    'apps/server/src/workspace/KnownWorkspaces.ts',
+    'apps/server/src/provider/Drivers/CodexManagedProvider.ts',
   ].map(file => readFile(new URL('upstream/' + file, root), 'utf8')));
   assert(adapter.includes('const output = piToolOutput(resultRecord, toolName);'));
   assert(adapter.includes('return {\n    content,\n    ...(structured === undefined ? {} : { structuredContent: structured }),\n  };'));
@@ -64,11 +66,14 @@ test('upstream owns Pi structured image output, history parsing and project revi
   assert(usage.includes('dedupeKey: JSON.stringify(["pi", entry.id, entry.timestamp, model])'));
   assert(!Object.hasOwn(patches, 'apps/server/src/provider/builtInDrivers.ts'),
     'Keep the official complete provider and usage driver registries untouched');
-  assert(review.includes('projectStore.listShells()'));
-  assert(review.includes('managedWorktreesDirectories('));
-  // 剩余 review 补丁只扩展外部活跃 worktree，不重复上游项目根查询。
-  assert(patches['apps/server/src/review/ReviewService.ts'].every(entry =>
-    !entry.newText.includes('projects.list()')));
+  // 上游已统一项目/受管路径和 Git 注册 worktree 校验，不再保留旧宿主放行逻辑。
+  assert(review.includes('knownWorkspaces.contains(candidate)'));
+  assert(workspaces.includes('projectStore.listShells()'));
+  assert(workspaces.includes('managedWorktreesDirectories('));
+  assert(workspaces.includes('git.listWorktreePaths(project.workspaceRoot)'));
+  assert(!Object.hasOwn(patches, 'apps/server/src/review/ReviewService.ts'));
+  assert(codex.includes('makePendingCodexProvider({ ...config, enabled, customModels: [] })'));
+  assert(!Object.hasOwn(patches, 'apps/server/src/provider/Drivers/CodexManagedProvider.ts'));
 });
 
 test('Pi lifecycle and image projection stay upstream-owned with bounded presentation and native export exceptions', () => {
@@ -117,6 +122,8 @@ test('Pi lifecycle and image projection stay upstream-owned with bounded present
   const authorization = patches['apps/server/src/auth/RpcAuthorization.ts'];
   assert(authorization.some(entry => entry.newText.includes('requiredScopesForRpcCall(rpc._tag, payload)')));
   assert(authorization.some(entry => entry.newText.includes('requiredScopes.find((scope) => !scopes.includes(scope))')));
+  assert(authorization.some(entry => entry.newText.includes('Effect.tap(effect, () => onAuthorized(rpc._tag, payload))')),
+    'Keep upstream authorized-client observation when adding diagnostics');
   for (const entry of patches['apps/server/src/ws.ts']) {
     assert(!entry.newText.includes('authorizeEffect(requiredScopeForRpcMethod'));
     assert(!entry.newText.includes('authorizeStream(requiredScopeForRpcMethod'));

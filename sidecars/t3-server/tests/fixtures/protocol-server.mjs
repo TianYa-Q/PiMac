@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const nativeDrivers = ['codex', 'claudeAgent', 'cursor', 'grok', 'opencode', 'antigravity', 'muse', 'acpRegistry'];
+export const nativeDrivers = ['codex', 'claudeAgent', 'cursor', 'grok', 'opencode', 'antigravity', 'muse', 'fx', 'acpRegistry'];
 const nativeExecutables = ['codex', 'claude', 'cursor', 'cursor-agent', 'agent', 'grok', 'opencode', 'antigravity', 'muse', 'pi'];
 const inheritedKeys = ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ', 'SystemRoot', 'WINDIR'];
 

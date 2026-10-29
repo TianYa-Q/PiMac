@@ -30,7 +30,7 @@ function checkPrivateTree(directory, toolsDirectory, inTools = false) {
   }
 }
 
-export async function startPiServer({ directory, environmentId, onFailure, piConfig = {}, signal, accounts }) {
+export async function startPiServer({ directory, environmentId, onFailure, piConfig = {}, signal, accounts, shellEnvironmentPrepared = false }) {
   process.umask(0o077);
   // Supervisor credentials have already been captured by the gateway. They
   // must not enter upstream's inherited environment or any provider subprocess.
@@ -40,10 +40,12 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   fs.mkdirSync(directory, { mode: 0o700, recursive: true });
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('Unsafe T3 Server directory');
-  checkPrivateTree(directory, path.join(directory, 'tools'));
   const broker = configureNative({ environmentId, directory, accounts });
   let binding;
   try {
+    broker.startup.record('state.permissions', 'start', null);
+    checkPrivateTree(directory, path.join(directory, 'tools'));
+    broker.startup.record('state.permissions', 'success', null);
     binding = await prepareServerPort(directory, broker.connectionDiagnostics);
   } catch (error) { broker.close(); throw error; }
   const configLayer = Layer.effect(ServerConfig, Effect.gen(function* () {
@@ -72,14 +74,16 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
       desktopBootstrapToken: undefined, desktopBootstrapSecret: undefined,
       desktopTelemetryFd: undefined, desktopTelemetryControlFd: undefined,
       desktopBrowserFd: undefined, desktopBrowserControlFd: undefined, resourceMonitorPath: undefined,
-      shellEnvironmentPrepared: false,
+      shellEnvironmentPrepared,
       staticDir: undefined, devUrl: undefined, devAuthToken: undefined, devAllowedOrigins: [], noBrowser: true, startupPresentation: 'headless',
       autoBootstrapProjectFromCwd: false, logWebSocketEvents: false, tailscaleServeEnabled: false, tailscaleServePort: 443,
     });
   })).pipe(Layer.provide(NodeServices.layer));
   const quietConsole = new Proxy({}, { get: () => () => {} });
   const controller = new AbortController();
-  let resolveManagement, rejectManagement, failed = false;
+  let resolveManagement, rejectManagement, management, commandReady = false;
+  // management layer/HTTP 监听可以早于恢复完成；必须同时等到官方 command gate 开放。
+  const publishReady = () => { if (management && commandReady) resolveManagement(management); };
   const ready = new Promise((resolve, reject) => { resolveManagement = resolve; rejectManagement = reject; });
   const cancel = () => {
     rejectManagement(new Error('T3 Server startup cancelled'));
@@ -87,32 +91,38 @@ export async function startPiServer({ directory, environmentId, onFailure, piCon
   };
   signal?.addEventListener('abort', cancel, { once: true });
   if (signal?.aborted) cancel();
-  broker.onManagementReady = management => {
+  broker.onManagementReady = value => {
     try {
-      binding.commit(Number(new URL(management.localURL).port));
-      resolveManagement(management);
+      binding.commit(Number(new URL(value.localURL).port));
+      broker.startup.record('management.available', 'success', null);
+      management = value;
+      publishReady();
     } catch (error) { rejectManagement(error); }
+  };
+  broker.onCommandReady = () => {
+    broker.startup.record('commands.ready', 'success', null);
+    commandReady = true;
+    publishReady();
   };
   // 新版 ProcessRunner 在构造外层服务时就获取 ChildProcessSpawner；仅在
   // configLayer 或上游内部提供平台层太晚，必须同时覆盖 runServer 的启动边界。
   const program = runServer.pipe(Effect.provide(configLayer), Effect.provide(NodeServices.layer), Effect.provide(Logger.layer([])),
     Effect.provideService(Console.Console, quietConsole));
+  broker.startup.record('runtime.launch', 'start', null);
   const completion = Effect.runPromise(program, { signal: controller.signal }).catch(error => {
     if (!controller.signal.aborted) {
       if (process.env.PIMAC_T3_TEST_LOG_ERRORS === '1') process.stderr.write(String(error) + '\n');
-      failed = true; rejectManagement(new Error('Official T3 Server failed')); onFailure?.();
+      rejectManagement(new Error('Official T3 Server failed')); onFailure?.();
     }
   });
   const timeout = setTimeout(() => rejectManagement(new Error('T3 Server startup timeout')), 60000);
   try {
     const management = await ready;
-    for (let n = 0; n < 300; n++) {
-      if (failed) throw new Error('Official T3 Server startup failed');
-      const response = await fetch(management.localURL + '/.well-known/t3/environment', { signal: AbortSignal.timeout(2000) }).catch(() => null);
-      if (response?.ok) return { management, broker, localURL: management.localURL, close: async () => { controller.abort(); await completion; broker.close(); } };
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-    throw new Error('T3 Server routes unavailable');
-  } catch (error) { controller.abort(); await completion; broker.close(); throw error; }
+    broker.startup.record('server.ready', 'success', null);
+    return { management, broker, localURL: management.localURL, close: async () => { controller.abort(); await completion; broker.close(); } };
+  } catch (error) {
+    broker.startup.record('server.ready', 'failure', null);
+    controller.abort(); await completion; broker.close(); throw error;
+  }
   finally { clearTimeout(timeout); signal?.removeEventListener('abort', cancel); }
 }

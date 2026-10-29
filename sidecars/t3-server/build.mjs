@@ -22,7 +22,55 @@ const runtimePackages = [
 const nativePatches = {
   '@ff-labs/fff-node': 'patches/@ff-labs__fff-node@0.11.0.patch',
   'node-pty': 'patches/node-pty@1.2.0-beta.15.patch',
+  '@muse-code/sdk': 'patches/@muse-code__sdk@1.4.6.patch',
 };
+const bundledPatches = {
+  'mdast-util-math': 'patches/mdast-util-math@3.0.0.patch',
+  'micromark-extension-math': 'patches/micromark-extension-llm-math@3.1.0.patch',
+  'micromark-extension-gfm-table': 'patches/micromark-extension-gfm-table@2.1.1.patch',
+};
+
+// 官方 npm 补丁也属于 release 契约；在隔离副本应用后仅替换打包输入，
+// 不改 npm 缓存/安装目录，也不让未打补丁的数学解析器静默替代上游行为。
+async function loadBundledPatches() {
+  const temporaryRoot = resolve(root, '../../tmp');
+  await mkdir(temporaryRoot, { recursive: true });
+  const stage = await mkdtemp(join(temporaryRoot, 't3-bundled-patches-'));
+  const sources = new Map();
+  const redirects = new Map();
+  const lock = JSON.parse(await readFile(join(root, 'package-lock.json'), 'utf8'));
+  try {
+    for (const [name, patch] of Object.entries(bundledPatches)) {
+      // npm override 可能形成嵌套布局；对 lock 中的所有实际副本应用，不能假设 hoist。
+      const paths = Object.keys(lock.packages).filter(path => path.endsWith('node_modules/' + name));
+      if (paths.length === 0) throw new Error(`Missing locked bundled dependency ${name}`);
+      for (const packagePath of paths) {
+        const source = join(root, packagePath);
+        const destination = join(stage, packagePath);
+        await cp(source, destination, { recursive: true });
+        execFileSync('git', ['apply', '--no-index', '--unsafe-paths', '--directory=' + destination, join(upstream, patch)], { cwd: '/' });
+        async function visit(directory) {
+          for (const entry of await readdir(directory, { withFileTypes: true })) {
+            const path = join(directory, entry.name);
+            if (entry.isDirectory()) await visit(path);
+            else if (entry.isFile() && entry.name.endsWith('.js')) {
+              sources.set(join(source, relative(destination, path)), await readFile(path, 'utf8'));
+            }
+          }
+        }
+        await visit(destination);
+        const original = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+        const patched = JSON.parse(await readFile(join(destination, 'package.json'), 'utf8'));
+        if (typeof original.exports?.default === 'string' && typeof patched.exports?.default === 'string' &&
+            original.exports.default !== patched.exports.default) {
+          redirects.set(resolve(source, original.exports.default), resolve(source, patched.exports.default));
+        }
+      }
+    }
+    return { sources, redirects };
+  } finally { execFileSync('trash', [stage]); }
+}
+const { sources: patchedJavaScript, redirects: patchedEntrypoints } = await loadBundledPatches();
 
 async function stageRuntime(vendor, check) {
   const lockText = await readFile(join(root, 'package-lock.json'), 'utf8');
@@ -125,6 +173,11 @@ async function stageRuntime(vendor, check) {
   }
 }
 export const plugin = { name: 'pimac-native-backend', setup(builder) {
+  builder.onResolve({ filter: /^(mdast-util-math|micromark-extension-math|micromark-extension-gfm-table)$/ }, args => {
+    // 官方 tokenizer 的 package.json 补丁把默认入口指向 dev，不能只替换 JS 内容。
+    const entry = require.resolve(args.path, { paths: [args.resolveDir] });
+    return { path: patchedEntrypoints.get(entry) ?? entry };
+  });
   builder.onResolve({ filter: /^@t3tools\// }, async args => {
     const [name, ...rest] = args.path.slice('@t3tools/'.length).split('/');
     const pkg = join(upstream, 'packages', name);
@@ -144,6 +197,10 @@ export const plugin = { name: 'pimac-native-backend', setup(builder) {
     ? { path: args.path, external: true } : undefined);
   builder.onResolve({ filter: /^@opencode\// }, args => ({ path: fileURLToPath(import.meta.resolve(args.path)) }));
   builder.onResolve({ filter: /^(effect|@effect\/[^/]+|jose|yaml|diff|proper-lockfile|stream-chain|stream-json|yauzl|@noble\/[^/]+)(\/.*)?$/ }, args => ({ path: require.resolve(args.path) }));
+  builder.onLoad({ filter: /\.js$/ }, args => {
+    const contents = patchedJavaScript.get(args.path);
+    return contents === undefined ? undefined : { contents, loader: 'js', resolveDir: dirname(args.path) };
+  });
   builder.onLoad({ filter: /\.ts$/ }, async args => {
     if (!args.path.startsWith(upstream)) return;
     const file = args.path.slice(upstream.length + 1);

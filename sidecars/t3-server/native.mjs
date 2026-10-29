@@ -1,5 +1,6 @@
 // Pi Mac host integration only. T3 owns the engine, permissions and runtime capabilities.
 import { createConnectionDiagnostics } from './connection-diagnostics.mjs';
+import { createStartupDiagnostics } from './startup-diagnostics.ts';
 import { createPiMobileUsage } from './pi-mobile-usage.mjs';
 import { createTunnelHealth } from './tunnel-health.mjs';
 import { createPiAccountSelections } from './pi-account-selection.mjs';
@@ -7,7 +8,9 @@ let host;
 export function configureNative({ environmentId, directory, accounts }) {
   if (host && !host.closed) throw new Error('Server host already owned');
   const connectionDiagnostics = createConnectionDiagnostics(directory);
-  host = { environmentId, directory, closed: false, accountSelections: createPiAccountSelections(), mobileUsage: createPiMobileUsage({ accounts }), connectionDiagnostics,
+  const startup = createStartupDiagnostics(directory);
+  startup.record('host.start', 'start', null);
+  host = { environmentId, directory, startup, closed: false, accountSelections: createPiAccountSelections(), mobileUsage: createPiMobileUsage({ accounts }), connectionDiagnostics,
     tunnelHealth: createTunnelHealth(connectionDiagnostics),
     diagnostics: { requests: 0, accepted: 0, queuedDeliveries: 0, successfulDeliveries: 0, failedDeliveries: 0 },
     message: '', browserURL: null, close() { this.closed = true; this.mobileUsage.close(); this.accountSelections.close(); } };

@@ -11,7 +11,9 @@ test('host does not replace official authorization or capability declarations', 
   assert.doesNotMatch(management, /httpAllowed|localControl/);
   const authorization = patches['apps/server/src/auth/RpcAuthorization.ts'];
   assert(authorization.every(entry => !/rpcAllowed|allowed &&|PiNative/.test(entry.newText)));
-  assert(authorization.some(entry => entry.newText.includes('authorized ? effect : Effect.fail(rpcAuthorizationError(requiredScope))')));
+  assert(authorization.some(entry => entry.newText.includes('const authorized = requiredScope === undefined;') &&
+    entry.newText.includes('Effect.fail(rpcAuthorizationError(requiredScope))') &&
+    entry.newText.includes('Effect.tap(effect, () => onAuthorized(rpc._tag, payload))')));
   assert(patches['apps/server/src/environment/ServerEnvironment.ts'].every(entry =>
     !/nativeCapabilities|capabilities: \{/.test(entry.newText)));
   const lan = await readFile(new URL('../../../Sources/PiMacApp/Resources/t3-bridge/lan-listener.mjs', import.meta.url), 'utf8');
