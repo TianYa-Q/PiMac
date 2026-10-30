@@ -53,7 +53,11 @@ struct MessageRecoveryTests {
     var uploadError: Error?
     var uploads = 0
     var uploadedImages = 0
+    var liveEnvironment: String?
+    var pauseUpload = false
+    var pendingUpload: CheckedContinuation<Void, Never>?
 
+    func liveDeliveryEnvironmentID(threadID: String, project: URL) -> String? { liveEnvironment }
     func recoveryEnvironmentID() async throws -> String {
       inspections += 1
       if pausePreflight { await withCheckedContinuation { pendingPreflight = $0 } }
@@ -88,6 +92,7 @@ struct MessageRecoveryTests {
     {
       uploads += 1
       uploadedImages += images.count
+      if pauseUpload { await withCheckedContinuation { pendingUpload = $0 } }
       if let uploadError { throw uploadError }
       return []
     }
@@ -118,6 +123,52 @@ struct MessageRecoveryTests {
       }
       return [:]
     }
+  }
+
+  @Test func freshLiveSendDoesNotDownloadTranscriptButUnknownRetryStillInspects() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    transport.exists = true
+    transport.liveEnvironment = "environment"
+    transport.dropDispatch = true
+    let record = try save(store, root: root, creates: false)
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    #expect(await coordinator.deliver(record.id) == false)
+    #expect(transport.inspections == 0)
+    #expect(transport.snapshots == 0)
+    #expect(store.message(record.id)?.state == .unknown)
+    #expect(store.message(record.id)?.environmentID == "environment")
+    transport.hideMessages = true
+    #expect(await coordinator.deliver(record.id))
+    #expect(transport.inspections == 1)
+    #expect(transport.snapshots == 1)
+    #expect(transport.commands.count == 2)
+    #expect(transport.commands[0].0 == transport.commands[1].0)
+    #expect(transport.commands[0].1 == transport.commands[1].1)
+    #expect(transport.runs == 1)
+  }
+
+  @Test func cancellingPreparationPreventsLateUploadFromDispatching() async throws {
+    let root = try directory()
+    let store = MessageOutboxStore()
+    let transport = Transport()
+    transport.liveEnvironment = "environment"
+    transport.pauseUpload = true
+    let record = try save(store, root: root, creates: false)
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    let task = Task { await coordinator.deliver(record.id, retryDelays: [.milliseconds(1)]) }
+    for _ in 0..<200 where transport.pendingUpload == nil {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    let pending = try #require(transport.pendingUpload)
+    task.cancel()
+    pending.resume()
+    #expect(await task.value == false)
+    #expect(transport.commands.isEmpty)
+    #expect(store.message(record.id)?.state == .unknown)
+    #expect(store.message(record.id)?.dispatchCommand == nil)
+    #expect(coordinator.activeThreads.isEmpty)
   }
 
   @Test func activeSubmissionAutomaticallyRecoversPreflightAndLostRepliesWithFrozenIdentity()

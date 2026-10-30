@@ -329,6 +329,7 @@ final class MessageOutboxStore: ObservableObject {
 
 @MainActor
 protocol MessageDeliveryTransport: AnyObject {
+  func liveDeliveryEnvironmentID(threadID: String, project: URL) -> String?
   func recoveryEnvironmentID() async throws -> String
   func recoverySnapshot(threadID: String) async throws -> [String: Any]
   func ensureProject(_ url: URL) async throws -> String
@@ -337,6 +338,10 @@ protocol MessageDeliveryTransport: AnyObject {
     -> [String: Any]
   func persistAttachments(_ images: [[String: Any]], threadID: String, messageID: String)
     async throws -> [[String: Any]]
+}
+
+extension MessageDeliveryTransport {
+  func liveDeliveryEnvironmentID(threadID: String, project: URL) -> String? { nil }
 }
 
 /// 历史输入恢复需用户确认；本次主动提交可在短暂故障后以冻结命令有限重试。
@@ -556,7 +561,19 @@ final class MessageRecoveryCoordinator: ObservableObject {
           $0.issue = "正在核对并提交已保存的输入"
         }
       }
-      let checked = try await inspect(id, attempt: &attempt)
+      let checked: Check
+      if let record = store.message(id), record.environmentID == nil,
+        !record.createsThread, record.createCommand == nil, record.dispatchCommand == nil,
+        let environment = transport.liveDeliveryEnvironmentID(
+          threadID: record.threadID, project: URL(fileURLWithPath: record.projectPath))
+      {
+        // 首次主动发送复用实时配置/列表，与官方一样不先下载完整转录。
+        // 绑定环境后任何重试仍走 inspect；未知结果只能以原命令身份恢复。
+        try store.update(id) { $0.environmentID = environment }
+        checked = .ready
+      } else {
+        checked = try await inspect(id, attempt: &attempt)
+      }
       if store.message(id)?.state.isConfirmed == true { return true }
       guard checked == .ready else { return false }
       guard var record = store.message(id), record.isVisible,
@@ -586,6 +603,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
           try store.update(id) { $0.createCommand = data }
           record = store.message(id)!
         }
+        try Task.checkCancellation()
         attempt.begin(.createThread)
         _ = try await transport.dispatch(
           Self.object(record.createCommand!), commandID: record.createCommandID, refreshAfter: true)
@@ -604,6 +622,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
           images.map(\.json), threadID: record.threadID, messageID: record.id)
         if store.message(id)?.state.isConfirmed == true { return true }
         guard store.message(id)?.state == .sending else { return false }
+        try Task.checkCancellation()
         let command: [String: Any] = [
           "type": "message.dispatch", "threadId": record.threadID, "messageId": record.id,
           "modelSelection": selection, "text": record.rpcText, "attachments": uploaded,
@@ -613,6 +632,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
         try store.update(id) { $0.dispatchCommand = data }
         record = store.message(id)!
       }
+      try Task.checkCancellation()
       attempt.begin(.dispatch)
       _ = try await transport.dispatch(
         Self.object(record.dispatchCommand!), commandID: record.dispatchCommandID,
@@ -628,7 +648,9 @@ final class MessageRecoveryCoordinator: ObservableObject {
       if store.message(id)?.state.isConfirmed == true { return true }
       let diagnostic = attempt.failure(error)
       try? store.update(id) {
-        if [.delivered, .accepted, .conflict, .migrated, .dismissed].contains($0.state) { return }
+        if [.delivered, .accepted, .conflict, .migrated, .dismissed, .draft].contains($0.state) {
+          return
+        }
         if let failure = error as? T3DesktopClient.RPCFailure {
           // RPC 错误提示会话缺失仍须由详情读取确认，不能直接给出迁移结论。
           $0.state = failure.threadMissing ? .unknown : .rejected

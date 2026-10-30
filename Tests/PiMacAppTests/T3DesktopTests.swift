@@ -47,6 +47,9 @@ struct T3DesktopTests {
     #expect(client.projects.count == 1)
     #expect(client.thread("thread-1") != nil)
     #expect(!client.isConnected)
+    #expect(
+      client.liveDeliveryEnvironmentID(
+        threadID: "thread-1", project: URL(fileURLWithPath: "/tmp/project")) == nil)
   }
 
   @Test func unchangedShellIsDeliveredOnlyOnceIncludingDiskCache() throws {
@@ -438,9 +441,12 @@ struct T3DesktopTests {
     try #require(model.canSubmitPrompt)
     model.composerText = "must-remain-queued"
     model.sendPrompt(delivery: .followUp)
-    for _ in 0..<200 where model.queuedPrompts.isEmpty {
+    // 停止前先确认消息已进入 Server 队列；仍在本地准备的提交现在会被停止操作中断。
+    for _ in 0..<200
+    where !model.queuedPrompts.contains(where: { $0.submissionState == .confirmed }) {
       try await Task.sleep(for: .milliseconds(50))
     }
+    try #require(model.queuedPrompts.contains { $0.submissionState == .confirmed })
     #expect(model.queuedPrompts.count == 1)
     model.abort()
     for _ in 0..<200 where model.isStreaming || !model.queueHeld {

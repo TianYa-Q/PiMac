@@ -59,6 +59,8 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   private var refreshFailures: [RefreshArea: String] = [:]
   private var connectionFailure: String?
   private(set) var hasLoadedConfiguration = false
+  private var configurationEnvironmentID: String?
+  private var supportsThreadStop = false
   private let threadRefreshes = ThreadRefreshScheduler()
   private let assetRefreshes = ThreadRefreshScheduler()
   private var shellRefreshTask: Task<Void, Error>?
@@ -199,12 +201,13 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       while let self, !Task.isCancelled, self.generation == current {
         if self.isConnected {
           let serverURL = self.connectedServerURL
+          // 会话正文/队列读取不排在全量列表后面；两者有独立连接与合并调度。
+          self.requestThreadRefreshes()
           do {
             try await self.refreshShell()
             guard self.generation == current, !Task.isCancelled else { return }
             guard self.connectedServerURL == serverURL else { continue }
             self.recordRefreshResult(.shell, error: nil)
-            self.requestThreadRefreshes()
             self.reconcileSkillWorkspaces(now: Date())
             self.onAccountPoll?()
           } catch {
@@ -260,13 +263,18 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       while let self, !Task.isCancelled, self.generation == current {
         var succeeded = false
         if self.isConnected, self.hasLoadedConfiguration {
+          let serverURL = self.connectedServerURL
           do {
             try await self.syncDefaultModelPreference()
+            guard self.generation == current, !Task.isCancelled else { return }
+            guard self.connectedServerURL == serverURL else { continue }
             self.recordRefreshResult(.preferences, error: nil)
             succeeded = true
           } catch {
             guard self.generation == current, !Task.isCancelled else { return }
-            self.recordRefreshResult(.preferences, error: error)
+            if self.connectedServerURL == serverURL {
+              self.recordRefreshResult(.preferences, error: error)
+            }
           }
         }
         try? await Task.sleep(for: .seconds(succeeded ? 30 : 2))
@@ -310,6 +318,8 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       hiddenModelIDs = []
       providers = []
       hasLoadedConfiguration = false
+      configurationEnvironmentID = nil
+      supportsThreadStop = false
       modelContextSettings = .empty
       textGenerationModels.reset()
       invalidateThreadSnapshots()
@@ -430,6 +440,8 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     connectedServerURL = nil
     providers = []
     hasLoadedConfiguration = false
+    configurationEnvironmentID = nil
+    supportsThreadStop = false
     supportsTitleRegeneration = false
     modelContextSettings = .empty
     textGenerationModels.reset()
@@ -561,10 +573,24 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     return attachments
   }
 
-  func interrupt(threadID: String, runID: String) async throws {
-    // thread.stop 是 Server 内部命令；公开接口用 run.interrupt，holdQueue 同时阻止排队消息继续执行。
+  func interrupt(threadID: String, runID: String? = nil) async throws {
+    // 与官方 interruptThreadTurn 相同：优先停止整个线程，不依赖分页/缓存中的旧 run ID。
+    if supportsThreadStop {
+      try await dispatch(["type": "thread.stop", "threadId": threadID])
+      return
+    }
+    var target = runID
+    if target == nil {
+      let snapshot = try await recoverySnapshot(threadID: threadID)
+      let projection = snapshot["projection"] as? JSON
+      target =
+        (projection?["runs"] as? [JSON])?.last(where: {
+          ["preparing", "starting", "running", "waiting"].contains($0["status"] as? String ?? "")
+        })?["id"] as? String
+    }
+    guard let target else { throw ClientError.rejected }
     try await dispatch([
-      "type": "run.interrupt", "threadId": threadID, "runId": runID, "holdQueue": true,
+      "type": "run.interrupt", "threadId": threadID, "runId": target, "holdQueue": true,
     ])
   }
 
@@ -612,7 +638,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
 
   @discardableResult
   private func requestThreadRefreshes() -> [Task<Void, Error>] {
-    Set(watches.values.map { $0.threadID }).filter { thread($0) != nil }.map { id in
+    Set(watches.values.map { $0.threadID }).map { id in
       threadRefreshes.request(id) { try await self.refreshThread(id) }
     }
   }
@@ -843,6 +869,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   }
 
   func requestRefresh(includeThreads: Bool = true) {
+    if includeThreads { requestThreadRefreshes() }
     let current = generation
     let serverURL = connectedServerURL
     Task { [weak self] in
@@ -853,7 +880,6 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
         guard self.generation == current, !Task.isCancelled else { return }
         guard self.connectedServerURL == serverURL else { return }
         self.recordRefreshResult(.shell, error: nil)
-        if includeThreads { self.requestThreadRefreshes() }
       } catch {
         // 后台读取失败由下一次轮询恢复，不重试任何写入命令。
         guard self.generation == current, !Task.isCancelled else { return }
@@ -959,6 +985,8 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       else { throw ClientError.rejected }
       try applyModelVisibility(settings)
       serverDefaultModelSelection = settings["defaultModelSelection"] as? JSON
+      configurationEnvironmentID = environment["environmentId"] as? String
+      supportsThreadStop = capabilities["threadStop"] as? Bool == true
       supportsTitleRegeneration = capabilities["threadTitleRegeneration"] as? Bool == true
       applyProviderCatalog(values, modelCatalogs: providerCatalogs)
       hasLoadedConfiguration = true
@@ -1021,7 +1049,17 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     providers = values.map { provider in
       var nativeProvider = provider
       if let id = provider["instanceId"] as? String, let models = modelCatalogs[id] {
-        nativeProvider["models"] = models
+        // 订阅是可见目录的事实来源。额外目录只补回被隐藏的模型，不能用旧缓存
+        // 覆盖实时模型能力、重新加入已移除模型，或让新模型等到下一次手动刷新。
+        let live = provider["models"] as? [JSON] ?? []
+        let slugs = Set(live.compactMap { $0["slug"] as? String })
+        let hidden = id == "pi" ? hiddenModelIDs : []
+        nativeProvider["models"] =
+          live
+          + models.filter {
+            guard let slug = $0["slug"] as? String else { return false }
+            return hidden.contains(slug) && !slugs.contains(slug)
+          }
       }
       return nativeProvider
     }
@@ -1665,7 +1703,20 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     return reason
   }
 
+  /// 只接受本次已认证连接取得的配置与列表；磁盘缓存永远不能授权首次投递。
+  func liveDeliveryEnvironmentID(threadID: String, project: URL) -> String? {
+    guard isConnected, hasLiveSkillShell, hasLoadedConfiguration,
+      let id = configurationEnvironmentID, !id.isEmpty,
+      let projectID = projectID(for: project),
+      thread(threadID)?["projectId"] as? String == projectID
+    else { return nil }
+    return id
+  }
+
   func recoveryEnvironmentID() async throws -> String {
+    if isConnected, hasLoadedConfiguration, let id = configurationEnvironmentID, !id.isEmpty {
+      return id
+    }
     let config = try await rpc("server.getConfig")
     guard let environment = config["environment"] as? JSON,
       let id = environment["environmentId"] as? String, !id.isEmpty

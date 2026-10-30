@@ -13,8 +13,13 @@ struct MessageRecoveryIntegrationTests {
     var dispatchIDs: [String] = []
     var snapshotFailures = 0
     var attachmentBatches = 0
+    var pauseEnvironment = false
+    var pendingEnvironment: CheckedContinuation<Void, Never>?
     init(client: T3DesktopClient) { self.client = client }
-    func recoveryEnvironmentID() async throws -> String { try await client.recoveryEnvironmentID() }
+    func recoveryEnvironmentID() async throws -> String {
+      if pauseEnvironment { await withCheckedContinuation { pendingEnvironment = $0 } }
+      return try await client.recoveryEnvironmentID()
+    }
     func recoveryProjectID(_ url: URL) async throws -> String? {
       try await client.recoveryProjectID(url)
     }
@@ -177,7 +182,8 @@ struct MessageRecoveryIntegrationTests {
       try JSONSerialization.jsonObject(with: Data($0.utf8)) as! [String: Any]
     }.filter {
       $0["command"] as? String == "prompt"
-        && $0["message"] as? String == "automatic recovery once"
+        && ($0["message"] as? String)?.components(separatedBy: "\n\n[Attached image ").first
+          == "automatic recovery once"
     }
     #expect(automaticPrompts.count == 1)
 
@@ -206,6 +212,111 @@ struct MessageRecoveryIntegrationTests {
     let migrated = try #require(targetProjection["messages"] as? [[String: Any]])
     #expect(migrated.contains { ($0["text"] as? String)?.contains("迁移这条原稿") == true })
     #expect(reloaded.message(orphan.id)?.migratedTo == target.id)
+  }
+
+  @Test(.timeLimit(.minutes(2)))
+  func stopAndQueueCancellationDoNotWaitForSuspendedDelivery() async throws {
+    let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .deletingLastPathComponent().deletingLastPathComponent()
+    let root = repository.appendingPathComponent(
+      "tmp/t3-session-controls/server-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let binary = root.appendingPathComponent("fixture-pi")
+    let fixture = repository.appendingPathComponent("sidecars/t3-server/tests/fixtures/pi.mjs")
+    try "#!/bin/sh\nexec node \"\(fixture.path)\" \"$@\"\n".write(
+      to: binary, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: binary.path)
+    let suite = "t3-controls-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defaults.set(false, forKey: T3ConnectionPreferences.enabledKey)
+    let workspace = WorkspaceModel(restoreUserState: false)
+    let service = T3BridgeService(defaults: defaults, stateDirectory: root)
+    let client = T3DesktopClient(defaults: defaults)
+    let model = AppModel(startupProjectURL: root, continueLastSession: false)
+    defer {
+      model.disconnect()
+      client.stop()
+      service.stop()
+      workspace.disconnectAll()
+      defaults.removePersistentDomain(forName: suite)
+    }
+    try startT3ProtocolFixture(
+      service: service, workspace: workspace, stateDirectory: root, binary: binary,
+      model: "test/model")
+    client.start(service: service)
+    try await client.waitUntilReady()
+    let projectID = try await client.ensureProject(root)
+    let threadID = UUID().uuidString
+    try await client.dispatch([
+      "type": "thread.create", "threadId": threadID, "projectId": projectID, "title": "Controls",
+      "modelSelection": ["instanceId": "pi", "model": "test/model"],
+      "runtimeMode": "full-access", "interactionMode": "default", "branch": NSNull(),
+      "worktreePath": NSNull(),
+    ])
+    func send(_ text: String) async throws {
+      try await client.dispatch([
+        "type": "message.dispatch", "threadId": threadID, "messageId": UUID().uuidString,
+        "text": text, "attachments": [], "dispatchMode": ["type": "queue_after_active"],
+        "modelSelection": ["instanceId": "pi", "model": "test/model"],
+      ])
+    }
+    try await send("wait")
+    try await client.refreshShell()
+    let transport = LostReplyTransport(client: client)
+    transport.loseReply = false
+    let store = MessageOutboxStore()
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    model.attach(to: client, deliveries: coordinator)
+    try await wait { model.canSubmitPrompt }
+    model.switchSession(path: "t3:\(threadID)", in: root)
+    try await wait { model.isStreaming && model.canSubmitPrompt }
+    #expect(client.liveDeliveryEnvironmentID(threadID: threadID, project: root) != nil)
+    #expect(
+      client.liveDeliveryEnvironmentID(
+        threadID: threadID, project: root.appendingPathComponent("other")) == nil)
+    try await send("queued to remove")
+    try await wait { model.queuedPrompts.contains { $0.text == "queued to remove" } }
+    let queued = try #require(model.queuedPrompts.first { $0.text == "queued to remove" })
+    try await send("queued to hold")
+    try await wait { model.queuedPrompts.contains { $0.text == "queued to hold" } }
+    transport.pauseEnvironment = true
+    model.composerText = "must not dispatch after stop"
+    model.sendPrompt(delivery: .followUp)
+    try await wait { transport.pendingEnvironment != nil }
+    let pending = try #require(transport.pendingEnvironment)
+    defer {
+      if transport.pendingEnvironment != nil {
+        pending.resume()
+        transport.pendingEnvironment = nil
+      }
+    }
+    let started = ContinuousClock.now
+    model.removeQueuedPrompt(id: queued.id)
+    try await wait { !model.queuedPrompts.contains { $0.id == queued.id } }
+    #expect(
+      coordinator.activeThreads.contains(threadID), "queue cancellation bypasses the held delivery")
+    model.abort()
+    try await wait { !model.isStopping && model.queueHeld && !model.isStreaming }
+    #expect(
+      coordinator.activeThreads.contains(threadID), "stop must finish before preflight is released")
+    print("Queue cancellation + stop while delivery is suspended: \(started.duration(to: .now))")
+    transport.pendingEnvironment = nil
+    pending.resume()
+    try await wait { coordinator.activeThreads.isEmpty }
+    #expect(transport.dispatchIDs.isEmpty)
+    #expect(store.messages.first?.dispatchCommand == nil)
+    #expect(store.messages.first?.state == .unknown)
+    let snapshot = try await client.recoverySnapshot(threadID: threadID)
+    let projection = try #require(snapshot["projection"] as? [String: Any])
+    let messages = try #require(projection["messages"] as? [[String: Any]])
+    #expect(!messages.contains { $0["text"] as? String == "must not dispatch after stop" })
+    let runs = try #require(projection["runs"] as? [[String: Any]])
+    #expect(runs.first { $0["id"] as? String == queued.id }?["status"] as? String == "cancelled")
+    let log = try String(
+      contentsOf: root.appendingPathComponent("server-owned/connection-diagnostics.log"),
+      encoding: .utf8)
+    #expect(log.contains("thread.stop"))
+    #expect(!log.contains(#""method":"server.getConfig""#))
   }
 
   private func wait(_ predicate: () async throws -> Bool) async throws {

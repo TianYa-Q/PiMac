@@ -106,6 +106,8 @@ final class AppModel: ObservableObject {
   private var connectTask: Task<Void, Never>?
   private var generation = UUID()
   @Published private var submitting = false
+  @Published private(set) var isStopping = false
+  @Published private(set) var pendingQueueCancellations: Set<String> = []
   private var submissionTask: Task<Void, Never>?
   private(set) var deliveryCoordinator: MessageRecoveryCoordinator?
   private var pendingSentMessages: [ChatEntry] {
@@ -152,7 +154,8 @@ final class AppModel: ObservableObject {
   var showsStatusProgress: Bool { isBusy || isLoadingConfiguration }
   var isProcessRunning: Bool { server?.isConnected == true && threadID != nil }
   var isBusy: Bool {
-    isStreaming || isCompacting || submitting || isCheckingDelivery
+    isStreaming || isCompacting || submitting || isStopping || isCheckingDelivery
+      || !pendingQueueCancellations.isEmpty
       || deliveryCoordinator?.activeThreads.contains(threadID ?? "") == true || awaitingAgentStart
       || pendingSelection != nil
       || codexRotationInFlight || isChangingFastMode || isManagingAccounts
@@ -179,6 +182,7 @@ final class AppModel: ObservableObject {
     }
     if isLoadingConfiguration { return "正在加载会话配置，请稍后发送" }
     guard connectionState == .connected else { return "会话尚未就绪，请重新打开聊天" }
+    if isStopping { return "正在停止当前任务，请稍后发送" }
     if isCompacting { return "正在压缩上下文，请完成后发送" }
     if codexRotationInFlight { return "正在切换账号，请稍后发送" }
     if submitting || deliveryCoordinator?.activeThreads.contains(threadID ?? "") == true {
@@ -306,6 +310,8 @@ final class AppModel: ObservableObject {
     recoveryChecked = false
     submissionTask = nil
     submitting = false
+    isStopping = false
+    pendingQueueCancellations = []
     awaitingAgentStart = false
     connectTask?.cancel()
     server?.unwatch(owner: observerID)
@@ -366,9 +372,11 @@ final class AppModel: ObservableObject {
         try Task.checkCancellation()
         self.refreshModels()
         if let path {
-          let projectID = try await server.ensureProject(project)
+          // waitUntilReady 已取得本次连接的实时列表；打开已有会话不再刷新全量列表，
+          // 也不创建项目。转录/附件在 watch 内独立核对，不阻塞输入。
           guard self.generation == current, !Task.isCancelled else { return }
-          guard let target = Self.threadID(from: path), let thread = server.thread(target),
+          guard let projectID = server.projectID(for: project),
+            let target = Self.threadID(from: path), let thread = server.thread(target),
             thread["projectId"] as? String == projectID
           else {
             throw T3DesktopClient.ClientError.rejected
@@ -733,21 +741,31 @@ final class AppModel: ObservableObject {
     } catch { statusText = MessageRecoveryCoordinator.issue(error) }
   }
 
+  var showsStopControl: Bool {
+    threadID != nil
+      && (isStreaming || isCompacting || submitting || awaitingAgentStart || isStopping
+        || threadID.flatMap { server?.thread($0)?["status"] as? String } == "running")
+  }
+
   func abort() {
-    guard let id = threadID, let runID = lastTurnID, let server else { return }
+    guard let id = threadID, let server, server.isConnected, !isStopping else { return }
     let current = generation
-    let pendingSubmission = submissionTask
+    // 停止本次本地准备/退避，禁止它在停止命令之后继续派发；已发出的结果仍按未知保留。
+    // 不等待上传、转录核对或投递回执，控制命令使用共享 RPC 的独立请求。
+    submissionTask?.cancel()
+    isStopping = true
+    statusText = "正在停止任务并暂停队列…"
     Task {
-      // 同一会话的排队提交必须先于 holdQueue，避免晚到的提交重新唤醒刚停止的队列。
-      // 只串行化这两个有因果关系的写入，不阻塞界面、列表或其他会话。
-      await pendingSubmission?.value
-      guard generation == current else { return }
       do {
-        try await server.interrupt(threadID: id, runID: runID)
-      } catch {
-        // 停止请求针对点击时的任务；切换会话后不把旧请求的错误写到新会话。
+        try await server.interrupt(threadID: id)
         guard generation == current else { return }
-        statusText = "取消未确认，请刷新状态。"
+        isStopping = false
+        awaitingAgentStart = false
+        statusText = "停止请求已确认，正在同步任务状态；已执行的操作不会撤销。"
+      } catch {
+        guard generation == current else { return }
+        isStopping = false
+        statusText = "停止未确认，请检查 Server 状态；不会自动重发。"
         server.requestRefresh()
       }
     }
@@ -1243,33 +1261,33 @@ final class AppModel: ObservableObject {
     }
   }
   func resumeQueue() { queueCommand(["type": "queue.resume"]) }
-  func removeQueuedPrompt(id: String) {
-    guard serverQueuedPrompts.contains(where: { $0.id == id }) else { return }
-    queueCommand(["type": "queued-run.cancel", "runId": id])
-  }
-  func editQueuedPrompt(id: String) {
+  func removeQueuedPrompt(id: String, restoreDraft: Bool = false) {
     guard let prompt = serverQueuedPrompts.first(where: { $0.id == id }),
-      let threadID, let server
+      let threadID, let server, !pendingQueueCancellations.contains(id)
     else { return }
-    guard !hasUnsubmittedInput else {
+    guard !restoreDraft || !hasUnsubmittedInput else {
       statusText = "请先发送或清空输入框，避免覆盖尚未提交的草稿。"
       return
     }
+    let current = generation
+    pendingQueueCancellations.insert(id)
+    statusText = "正在取消这条排队消息…"
     Task {
       do {
         try await server.dispatch([
           "type": "queued-run.cancel", "threadId": threadID, "runId": id,
         ])
-        guard self.threadID == threadID else { return }
-        guard !hasUnsubmittedInput else {
-          statusText = "已取消队列消息：\(prompt.text)"
-          return
+        guard generation == current else { return }
+        pendingQueueCancellations.remove(id)
+        if restoreDraft, !hasUnsubmittedInput {
+          composerText = prompt.text
+          attachments = prompt.attachments
         }
-        composerText = prompt.text
-        attachments = prompt.attachments
-        statusText = "Server 已取消这条排队消息，编辑后可重新发送。"
+        statusText = "Server 已取消这条排队消息。"
       } catch {
-        statusText = "取消未确认；原消息可能仍在 Server 队列中。"
+        guard generation == current else { return }
+        pendingQueueCancellations.remove(id)
+        statusText = "取消未确认；消息可能已经开始执行，请检查状态，必要时停止任务。"
       }
     }
   }

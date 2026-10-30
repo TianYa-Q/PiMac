@@ -1633,6 +1633,12 @@ struct ContentView: View {
           .keyboardShortcut(.return, modifiers: .command)
           .disabled(promptIsEmpty || !app.canSubmitPrompt)
           .help(app.promptSubmissionUnavailableReason ?? "发送（Enter）")
+          if app.threadID != nil {
+            stopButton
+              .opacity(app.showsStopControl ? 1 : 0)
+              .allowsHitTesting(app.showsStopControl)
+              .accessibilityHidden(!app.showsStopControl)
+          }
         }
       }
       .controlSize(.small)
@@ -1716,14 +1722,14 @@ struct ContentView: View {
       .accessibilityLabel("下移待发送消息")
 
       Button {
-        app.editQueuedPrompt(id: prompt.id)
+        app.removeQueuedPrompt(id: prompt.id, restoreDraft: true)
         composerFocused = true
       } label: {
         Image(systemName: "pencil")
       }
       .buttonStyle(.plain)
       .foregroundStyle(.secondary)
-      .help("重新编辑这条尚未发送的消息")
+      .help("取消排队并取回原稿")
 
       Button {
         app.removeQueuedPrompt(id: prompt.id)
@@ -1732,9 +1738,10 @@ struct ContentView: View {
       }
       .buttonStyle(.plain)
       .foregroundStyle(.secondary)
-      .help("删除这条尚未发送的消息")
+      .help(app.pendingQueueCancellations.contains(prompt.id) ? "正在取消…" : "取消这条排队消息")
     }
-    .disabled(prompt.submissionState != .confirmed)
+    .disabled(
+      prompt.submissionState != .confirmed || app.pendingQueueCancellations.contains(prompt.id))
   }
 
   @ViewBuilder
@@ -1824,7 +1831,8 @@ struct ContentView: View {
     .buttonStyle(.borderedProminent)
     .tint(.red)
     .clipShape(Circle())
-    .help(app.isCompacting ? "停止压缩" : "停止当前任务")
+    .disabled(app.isStopping || !app.isProcessRunning)
+    .help(app.isStopping ? "正在停止任务并暂停队列…" : app.isCompacting ? "停止压缩" : "停止当前任务并暂停队列")
   }
 
   private func sendPromptFollowingOutput(delivery: QueuedPromptDelivery) {

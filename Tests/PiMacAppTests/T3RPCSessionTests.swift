@@ -298,6 +298,25 @@ struct T3RPCSessionTests {
         ]
       ])
     try await until { client.hiddenModelIDs.contains("test/external") }
+    var externalSnapshot = false
+    let subscribed = Task {
+      try await external.call("subscribeServerConfig", stream: true) { event in
+        if event["type"] as? String == "snapshot" { externalSnapshot = true }
+      }
+    }
+    try await until { externalSnapshot }
+    subscribed.cancel()
+    do {
+      _ = try await subscribed.value
+      Issue.record("cancelled real stream succeeded")
+    } catch {
+      #expect(error is CancellationError)
+    }
+    _ = try await external.call("server.getSettings")
+    let afterCancellation = try String(contentsOf: log, encoding: .utf8)
+      .components(separatedBy: "\n")
+      .filter { $0.contains(#"request {"route":"/ws""#) }.count
+    #expect(afterCancellation == 2, "interrupting a stream must not close either client's socket")
     external.close()
     _ = try await client.scheduledTasksRPC("scheduledTasks.list")
     #expect(await service.stopAndWait())
@@ -337,6 +356,16 @@ struct T3RPCSessionTests {
       ],
     ])
     #expect(client.hiddenModelIDs == ["test/model"])
+    client.applyProviderCatalog(
+      [["instanceId": "pi", "models": [["slug": "test/new", "name": "Live"]]]],
+      modelCatalogs: [
+        "pi": [
+          ["slug": "test/new", "name": "Stale"], ["slug": "test/model"], ["slug": "test/removed"],
+        ]
+      ])
+    let models = try #require(client.providers.first?["models"] as? [[String: Any]])
+    #expect(models.compactMap { $0["slug"] as? String } == ["test/new", "test/model"])
+    #expect(models.first?["name"] as? String == "Live")
     #expect(throws: T3DesktopClient.ClientError.self) {
       try client.applyConfigurationEvent(["version": 1, "type": "snapshot", "config": [:]])
     }
