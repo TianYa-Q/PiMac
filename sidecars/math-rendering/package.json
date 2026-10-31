@@ -1,0 +1,17 @@
+{
+  "name": "pimac-math-rendering",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prepare-resources": "tsx prepare.ts",
+    "check": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext prepare.ts"
+  },
+  "dependencies": {
+    "katex": "0.18.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

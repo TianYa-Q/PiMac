@@ -666,6 +666,39 @@ else:
             source.write_text('b')  # same length, different contents
             self.assertNotEqual(dev.snapshot(), before)
 
+    def test_math_dependency_inputs_are_watched_but_generated_resources_are_not(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            before = dev.snapshot()
+            generated = dev.root / 'Sources/PiMacApp/Resources/KaTeX/katex.min.js'
+            generated.parent.mkdir(parents=True)
+            generated.write_text('generated')
+            self.assertEqual(dev.snapshot(), before)
+            for name in ['package.json', 'package-lock.json', 'prepare.ts']:
+                source = dev.root / 'sidecars/math-rendering' / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text('dependency input')
+                after = dev.snapshot()
+                self.assertNotEqual(after, before)
+                before = after
+
+    def test_math_resource_failure_blocks_swift_build_and_publication(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            dev.build_log = dev.root / '.build/dev-build.log'
+            with patch.object(dev, 'snapshot', return_value=()), \
+                    patch.object(dev, 'ensure_server_build', return_value=True), \
+                    patch.object(dev, 'run_build_command', return_value=(1, 'failed')) as command, \
+                    patch.object(dev, 'bundle_development_app') as bundle, \
+                    patch.object(dev, 'status'):
+                self.assertIsNone(dev.build())
+                self.assertEqual(command.call_args_list[0].args[0],
+                                 ['npm', '--prefix', 'sidecars/math-rendering', 'ci', '--ignore-scripts'])
+                self.assertEqual(command.call_count, 1)
+                bundle.assert_not_called()
+
     def test_edit_batches_are_independent_and_do_not_expire(self):
         dev = self.load_dev()
         with tempfile.TemporaryDirectory() as directory:

@@ -19,3 +19,6 @@ sidecars/*/node_modules/
 /Sources/PiMacApp/Resources/t3-bridge/vendor/t3-server.mjs
 /Sources/PiMacApp/Resources/t3-bridge/vendor/node_modules/
 /Sources/PiMacApp/Resources/t3-bridge/vendor/native-runtime.json
+
+# Generated from the locked npm dependency before native builds.
+/Sources/PiMacApp/Resources/KaTeX/

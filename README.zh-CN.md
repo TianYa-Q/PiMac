@@ -87,6 +87,8 @@ python3 scripts/dev.py
 
 Watcher 优先直接启动上次已发布的开发应用，不再每次启动先等待编译；仅首次没有可用产物时先构建。启动后核对源码指纹，有更新时构建独立的开发应用，仅在活动与编辑批次安全门通过后重载。**有任务运行时不要停止或重启 watcher**：停止它也会停止其应用及子服务。多步骤运行时代码修改前执行 `python3 scripts/dev.py --begin-edit --label 'task'`，保留 Token，验证完成后用 `--end-edit TOKEN` 仅关闭自己的批次。详见[开发重载安全机制](docs/development-reload.md)。
 
+准备脚本也会按 `sidecars/math-rendering` 的锁文件安装依赖，生成离线 KaTeX 资源；`Sources/PiMacApp/Resources/KaTeX/` 由 Git 忽略，不提交第三方文件本体。直接运行 Swift 构建／测试前若只需准备公式资源，执行 `npm --prefix sidecars/math-rendering ci --ignore-scripts && npm --prefix sidecars/math-rendering run prepare-resources`。
+
 验证入口：
 
 ```sh

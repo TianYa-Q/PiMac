@@ -37,9 +37,9 @@ final class SessionCatalogCache {
       Metadata(
         fields: [
           "id", "projectId", "title", "createdAt", "unsettledAt", "activeOrderKey",
-          "latestMessageAt", "settledOverride", "settledAt", "archivedAt", "autoSettleDisabledAt",
+          "latestUserMessageAt", "settledOverride", "settledAt", "archivedAt", "autoSettleDisabledAt",
         ].map { row[$0] as? String },
-        hasMessageTimestamp: row["latestMessageAt"] != nil && !(row["latestMessageAt"] is NSNull))
+        hasMessageTimestamp: row["latestUserMessageAt"] != nil && !(row["latestUserMessageAt"] is NSNull))
     }
     guard snapshot?.metadata != metadata else { return }
 

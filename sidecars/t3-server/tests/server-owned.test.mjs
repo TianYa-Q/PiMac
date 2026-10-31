@@ -57,25 +57,24 @@ test('settled threads can return to active and resume the preserved Pi conversat
   await f.dispatch(f.message(threadId, 'before settlement'));
   await eventually(async () => (await f.snapshot(threadId)).runs.some(r => r.status === 'completed'));
   const projection = await f.snapshot(threadId);
-  const lastMessageAt = [
-    ...projection.messages.map(message => message.createdAt),
-    ...projection.visibleTurnItems.map(row => row.item)
-      .filter(item => ['user_message', 'assistant_message', 'reasoning', 'compaction'].includes(item.type))
-      .map(item => item.startedAt ?? item.updatedAt),
-  ].sort().at(-1);
+  const lastMessageAt = projection.messages.filter(message => message.role === 'user')
+    .map(message => message.updatedAt).sort().at(-1);
+  assert(lastMessageAt);
   assert(projection.visibleTurnItems.some(row => row.item.type === 'assistant_message'));
   const shellRow = async () => (await f.get('/api/orchestration/shell')).threads.find(row => row.id === threadId);
-  assert.equal((await shellRow()).latestMessageAt, lastMessageAt);
+  const initialShell = await shellRow();
+  assert.equal(initialShell.latestUserMessageAt, lastMessageAt);
+  assert.equal(Object.hasOwn(initialShell, 'latestMessageAt'), false);
   await f.dispatch({ type: 'thread.settle', threadId });
   assert.equal((await f.snapshot(threadId)).thread.settledOverride, 'settled');
   const settledRow = await shellRow();
-  assert.equal(settledRow.latestMessageAt, lastMessageAt);
-  assert.notEqual(settledRow.latestMessageAt, settledRow.settledAt);
+  assert.equal(settledRow.latestUserMessageAt, lastMessageAt);
+  assert.notEqual(settledRow.latestUserMessageAt, settledRow.settledAt);
   await f.dispatch({ type: 'thread.unsettle', threadId, reason: 'user' });
   const reopened = (await f.snapshot(threadId)).thread;
   assert.equal(reopened.settledOverride, 'active');
   assert.equal(reopened.settledAt, null);
-  assert.equal((await shellRow()).latestMessageAt, lastMessageAt);
+  assert.equal((await shellRow()).latestUserMessageAt, lastMessageAt);
   await f.dispatch(f.message(threadId, 'after settlement'));
   await eventually(async () => (await f.snapshot(threadId)).runs.filter(r => r.status === 'completed').length === 2);
   const records = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);

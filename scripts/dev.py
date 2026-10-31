@@ -46,8 +46,8 @@ def changed_files(previous, current):
 def snapshot():
     """Fingerprint runtime inputs, not save times, tests or development tooling."""
     paths = [root / "Package.swift"]
-    excluded = {"node_modules", "upstream", "generated", "vendor", "__pycache__", "tests"}
-    for directory in ("Sources", "sidecars/t3-server", "extensions"):
+    excluded = {"node_modules", "upstream", "generated", "vendor", "KaTeX", "__pycache__", "tests"}
+    for directory in ("Sources", "sidecars/t3-server", "sidecars/math-rendering", "extensions"):
         # Prune before descending, not after rglob has traversed dependencies.
         for base, directories, files in os.walk(root / directory):
             directories[:] = [name for name in directories if name not in excluded]
@@ -467,6 +467,12 @@ def build():
     if not ensure_server_build():
         status(f"Build #{build_number} failed (Server); no restart. Details: {build_log.relative_to(root)}")
         return None
+    # npm 锁文件是输入；生成的公式资源不参与指纹，避免构建自身触发第二次重载。
+    for command in (["npm", "--prefix", "sidecars/math-rendering", "ci", "--ignore-scripts"],
+                    ["npm", "--prefix", "sidecars/math-rendering", "run", "prepare-resources"]):
+        if run_build_command(command)[0] != 0:
+            status(f"Build #{build_number} failed (math resources); no restart. Details: {build_log.relative_to(root)}")
+            return None
     if run_build_command(["swift", "build"])[0] != 0:
         status(f"Build #{build_number} failed (Swift); no restart. Details: {build_log.relative_to(root)}")
         return None

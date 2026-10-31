@@ -15,6 +15,7 @@ let package = Package(
       resources: [
         .process("Resources/AppIcon.png"),
         .copy("Resources/t3-client-state.js"),
+        .copy("Resources/KaTeX"),
         .copy("Resources/T3-CLIENT-LICENSE.txt"),
         .copy("Resources/t3-bridge"),
         .copy("Resources/ps5-gateway"),

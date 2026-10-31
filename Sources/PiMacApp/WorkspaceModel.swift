@@ -472,7 +472,8 @@ final class WorkspaceModel: ObservableObject {
         -> (id: String, anchorAt: Date, orderKey: String?, item: SessionItem)? in
       guard let id = thread["id"] as? String else { return nil }
       let createdAt = T3DesktopClient.date(thread["createdAt"])
-      let messageValue = thread["latestMessageAt"]
+      // 直接读取官方 shell 标量；不扩展 Server 协议，也不为侧栏读取转录。
+      let messageValue = thread["latestUserMessageAt"]
       let messageAt =
         messageValue == nil || messageValue is NSNull
         ? createdAt : T3DesktopClient.date(messageValue)

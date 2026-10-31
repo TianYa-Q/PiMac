@@ -42,7 +42,7 @@ struct SessionCatalogCacheTests {
     ]
     cache.update(threads: rows)
     rows[0]["activeOrderKey"] = "c"
-    rows[0]["latestMessageAt"] = "2026-02-01T00:00:00Z"
+    rows[0]["latestUserMessageAt"] = "2026-02-01T00:00:00Z"
     cache.update(threads: rows)
     #expect(cache.sessions(projectID: "p").map(\.path) == ["t3:two", "t3:one"])
     #expect(cache.rebuildCount == 2)
@@ -52,18 +52,20 @@ struct SessionCatalogCacheTests {
     let cache = SessionCatalogCache()
     var row: [String: Any] = [
       "id": "one", "projectId": "p", "createdAt": "2026-01-01T00:00:00Z",
-      "latestMessageAt": "2026-01-01T01:00:00Z",
+      "latestUserMessageAt": "2026-01-01T01:00:00Z",
     ]
     cache.update(threads: [row])
     row["updatedAt"] = "2026-01-02T00:00:00Z"
+    // 旧展示缓存中的扩展字段不再参与时间或缓存失效；实时官方字段才是事实来源。
+    row["latestMessageAt"] = "2099-01-01T00:00:00Z"
     cache.update(threads: [row])
     #expect(cache.rebuildCount == 1)
-    row["latestMessageAt"] = "2026-01-01T02:00:00Z"
+    row["latestUserMessageAt"] = "2026-01-01T02:00:00Z"
     cache.update(threads: [row])
     #expect(cache.rebuildCount == 2)
     #expect(
       cache.sessions(projectID: "p").first?.modifiedAt
-        == T3DesktopClient.date(row["latestMessageAt"]))
+        == T3DesktopClient.date(row["latestUserMessageAt"]))
   }
 
   @Test func globalOrderingAndSettlementProjectionsShareTheCatalogOrder() {
@@ -129,7 +131,7 @@ struct SessionCatalogCacheTests {
     rows[0]["projectId"] = "q"
     rows[0]["title"] = "After"
     rows[0]["unsettledAt"] = "2026-03-01T00:00:00Z"
-    rows[0]["latestMessageAt"] = "2026-04-01T00:00:00Z"
+    rows[0]["latestUserMessageAt"] = "2026-04-01T00:00:00Z"
     rows[1]["settledOverride"] = "settled"
     cache.update(threads: rows)
     #expect(cache.sessions(projectID: "p").isEmpty)
@@ -158,16 +160,16 @@ struct SessionCatalogCacheTests {
     let cache = SessionCatalogCache()
     var row: [String: Any] = [
       "id": "one", "projectId": "p", "createdAt": "2026-01-01T00:00:00Z",
-      "latestMessageAt": 123,
+      "latestUserMessageAt": 123,
     ]
     cache.update(threads: [row])
     #expect(cache.sessions(projectID: nil, settled: false).first?.modifiedAt == .distantPast)
-    row["latestMessageAt"] = NSNull()
+    row["latestUserMessageAt"] = NSNull()
     cache.update(threads: [row])
     #expect(
       cache.sessions(projectID: nil, settled: false).first?.modifiedAt
         == Date(timeIntervalSince1970: 1_767_225_600))
-    row["latestMessageAt"] = "invalid"
+    row["latestUserMessageAt"] = "invalid"
     cache.update(threads: [row])
     #expect(cache.sessions(projectID: "p").first?.modifiedAt == .distantPast)
   }

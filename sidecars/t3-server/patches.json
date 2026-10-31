@@ -37,30 +37,6 @@
     {
       "oldText": "      getThreadsWithPullRequests: (threadId) =>",
       "newText": "      getSettlementThreadIds: (threadId) =>\n        Ref.get(replayState).pipe(Effect.map((state) => {\n          const children = new Map<ThreadId, ThreadId[]>();\n          for (const { thread } of state.projections.values()) {\n            const parent = thread.lineage.parentThreadId;\n            if (parent === null || thread.deletedAt !== null || thread.archivedAt !== null) continue;\n            const siblings = children.get(parent) ?? [];\n            siblings.push(thread.id);\n            children.set(parent, siblings);\n          }\n          const ids = [threadId];\n          const visited = new Set(ids);\n          for (let index = 0; index < ids.length; index++) {\n            for (const child of children.get(ids[index]!) ?? []) {\n              if (visited.has(child)) continue;\n              visited.add(child);\n              ids.push(child);\n            }\n          }\n          return ids;\n        })),\n      getThreadsWithPullRequests: (threadId) =>"
-    },
-    {
-      "oldText": "  readonly latest_user_message_at: string | null;",
-      "newText": "  readonly latest_message_at: string | null;\n  readonly latest_user_message_at: string | null;"
-    },
-    {
-      "oldText": "  readonly latestUserMessageAt: DateTime.Utc | null;",
-      "newText": "  readonly latestMessageAt: DateTime.Utc | null;\n  readonly latestUserMessageAt: DateTime.Utc | null;"
-    },
-    {
-      "oldText": "              ) AS pending_secret_request_payload_json,\n              (",
-      "newText": "              ) AS pending_secret_request_payload_json,\n              -- 消息时间独立于线程生命周期；只投影标量，不把正文放回 shell。\n              (\n                SELECT MAX(message_time) FROM (\n                  SELECT COALESCE(json_extract(item.payload_json, '$.startedAt'), item.updated_at) AS message_time\n                  FROM orchestration_v2_projection_turn_items item\n                  WHERE item.thread_id = t.thread_id\n                    AND item.type IN ('user_message', 'assistant_message', 'reasoning', 'compaction')\n                  UNION ALL\n                  SELECT message.created_at AS message_time\n                  FROM orchestration_v2_projection_messages message\n                  WHERE message.thread_id = t.thread_id\n                )\n              ) AS latest_message_at,\n              ("
-    },
-    {
-      "oldText": "    latestVisibleMessage: null,\n    latestUserMessageAt: latestUserMessage?.updatedAt ?? null,",
-      "newText": "    latestVisibleMessage: null,\n    latestMessageAt: [\n      ...projection.messages.map((message) => message.createdAt),\n      ...projection.turnItems.filter((item) =>\n        ['user_message', 'assistant_message', 'reasoning', 'compaction'].includes(item.type)\n      ).map((item) => item.startedAt ?? item.updatedAt),\n    ].reduce<DateTime.Utc | null>((latest, date) =>\n      latest === null || DateTime.toEpochMillis(date) > DateTime.toEpochMillis(latest)\n        ? date : latest, null),\n    latestUserMessageAt: latestUserMessage?.updatedAt ?? null,"
-    },
-    {
-      "oldText": "    latestVisibleMessage: null,\n    latestUserMessageAt: input.state.latestUserMessageAt,",
-      "newText": "    latestVisibleMessage: null,\n    latestMessageAt: input.state.latestMessageAt,\n    latestUserMessageAt: input.state.latestUserMessageAt,"
-    },
-    {
-      "oldText": "          latestUserMessageAt:\n            row.latest_user_message_at === null",
-      "newText": "          latestMessageAt:\n            row.latest_message_at === null ? null : DateTime.makeUnsafe(row.latest_message_at),\n          latestUserMessageAt:\n            row.latest_user_message_at === null"
     }
   ],
   "packages/provider-pi/src/server/status.ts": [
@@ -159,15 +135,6 @@
     }
   ],
   "packages/contracts/src/orchestrationV2.ts": [
-{
-  "oldText": "  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),",
-  "newText": "  latestMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),\n  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),"
-},
-{
-  "oldText": "  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtcFromString),",
-  "newText": "  latestMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),\n  latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtcFromString),"
-},
-
   {
     "oldText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),",
     "newText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),\n  piMetrics: Schema.optional(Schema.Struct({\n    outputDurationMs: NonNegativeInt,\n    speedMethod: Schema.optional(Schema.Literal(\"aa-approx-v1\")),\n    speedTokens: Schema.optional(Schema.Number),\n    speedDurationMs: Schema.optional(NonNegativeInt),\n    totalCostUsd: Schema.optional(Schema.Number),\n  })),"

@@ -13,7 +13,7 @@
 ## Decision gates
 
 - SHA-256 content fingerprints, not mtimes: an identical save does nothing. Reverting all pending changes to the applied contents cancels the reload.
-- Watch `Package.swift`, `Sources`, runtime server files and extensions. Tests, docs, the watcher itself, dependencies and generated/vendor directories do not independently trigger a reload.
+- Watch `Package.swift`, `Sources`, runtime server files, math-rendering dependency manifests/lockfile/preparation script, and extensions. Generated `Resources/KaTeX` files are excluded; native builds prepare them from the locked npm dependency before Swift compilation. A preparation failure blocks publication. Tests, docs, the watcher itself, dependencies and generated/vendor directories do not independently trigger a reload.
 - Require a fresh `watching`-phase idle heartbeat belonging to the **current supervised app PID**. Existing desktop/Telegram queues, unconfirmed operations, Git, authorization and running server tasks remain blockers.
 - External project Swift builds/tests and `node --test` executions block a build/reload. Unrelated projects and old orphaned XCTest processes do not.
 - An unfinished explicit edit batch blocks reload indefinitely; it never expires just because the editor or coding agent went quiet. The app independently checks this barrier immediately before draining services.

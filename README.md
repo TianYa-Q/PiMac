@@ -87,6 +87,8 @@ python3 scripts/dev.py
 
 The watcher builds a separate development app and reloads only when activity and edit-batch safety gates permit. **Do not stop/restart it during active work:** stopping the watcher also stops its app and child services. Before multi-step runtime edits, open a batch with `python3 scripts/dev.py --begin-edit --label 'task'`, retain the token, and close only that batch with `--end-edit TOKEN` after validation. See [development reload safety](docs/development-reload.md).
 
+The preparation script also installs the locked `sidecars/math-rendering` dependency and generates offline KaTeX resources. Generated files under `Sources/PiMacApp/Resources/KaTeX/` are ignored by Git. To prepare only math resources before a direct Swift build/test, run `npm --prefix sidecars/math-rendering ci --ignore-scripts && npm --prefix sidecars/math-rendering run prepare-resources`.
+
 Validation entry points:
 
 ```sh

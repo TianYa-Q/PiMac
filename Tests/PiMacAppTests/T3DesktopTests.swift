@@ -158,7 +158,7 @@ struct T3DesktopTests {
     let initial = WorkspaceModel.sessionCatalog(threads: [older, newer], projectID: "project")
     #expect(initial.map(\.path) == ["t3:newer", "t3:older"])
     var updated = older
-    updated["latestMessageAt"] = "2026-10-04T00:00:00Z"
+    updated["latestUserMessageAt"] = "2026-10-04T00:00:00Z"
     updated["title"] = "Updated title"
     let refreshed = WorkspaceModel.sessionCatalog(threads: [newer, updated], projectID: "project")
     #expect(refreshed.map(\.path) == initial.map(\.path))

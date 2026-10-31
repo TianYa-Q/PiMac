@@ -398,8 +398,13 @@ struct MarkdownView: View, Equatable {
       ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
         switch section {
         case .text(let blocks):
-          SelectableMarkdownText(blocks: blocks, textStyle: textStyle)
-            .frame(maxWidth: .infinity, alignment: .leading)
+          if MarkdownMath.containsMath(blocks) {
+            MarkdownMathView(blocks: blocks, textStyle: textStyle)
+              .frame(maxWidth: .infinity, alignment: .leading)
+          } else {
+            SelectableMarkdownText(blocks: blocks, textStyle: textStyle)
+              .frame(maxWidth: .infinity, alignment: .leading)
+          }
         case .image(let attachment, let caption):
           InlineReplyImageView(attachment: attachment, caption: caption)
         case .table(let headers, let rows, let alignments):

@@ -41,19 +41,19 @@ struct ThreadSettlementPresentationTests {
   @Test func completedTimeUsesLastMessageNotSettlementOrMetadata() throws {
     var row: [String: Any] = [
       "id": "one", "createdAt": "2026-01-01T00:00:00Z",
-      "latestMessageAt": "2026-01-01T01:00:00Z",
+      "latestUserMessageAt": "2026-01-01T01:00:00Z",
       "updatedAt": "2026-01-02T00:00:00Z", "settledAt": "2026-01-02T00:00:00Z",
     ]
     let item = try #require(WorkspaceModel.sessionCatalog(threads: [row], projectID: nil).first)
-    #expect(item.modifiedAt == T3DesktopClient.date(row["latestMessageAt"]))
+    #expect(item.modifiedAt == T3DesktopClient.date(row["latestUserMessageAt"]))
     row["updatedAt"] = "2026-01-03T00:00:00Z"
     row["settledAt"] = "2026-01-03T00:00:00Z"
     #expect(WorkspaceModel.sessionCatalog(threads: [row], projectID: nil).first == item)
-    row["latestMessageAt"] = NSNull()
+    row["latestUserMessageAt"] = NSNull()
     #expect(
       WorkspaceModel.sessionCatalog(threads: [row], projectID: nil).first?.modifiedAt
         == T3DesktopClient.date(row["createdAt"]))
-    row.removeValue(forKey: "latestMessageAt")
+    row.removeValue(forKey: "latestUserMessageAt")
     #expect(
       WorkspaceModel.sessionCatalog(threads: [row], projectID: nil).first?.modifiedAt
         == T3DesktopClient.date(row["createdAt"]))
