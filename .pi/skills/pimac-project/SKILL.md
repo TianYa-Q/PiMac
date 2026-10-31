@@ -33,9 +33,15 @@ python3 scripts/dev.py --begin-edit --label 'short task description'
 - 活跃任务期间不重启 watcher 或正在运行的应用。修改 Python watcher 后，只有全部任务安全空闲时才能重启一次以加载新代码，不能顺手执行。
 - 涉及运行文件、原生构建/发布、应用重载或 watcher 时，先读 [开发重载安全门](../../../docs/development-reload.md)。仅调整 skill / 文档不因此启动编译或重启应用。
 
+## 目标架构：原生客户端，最大化复用 T3 Code 逻辑
+
+- 保留 PiMac 原生 SwiftUI/AppKit 客户端；用户明确不希望改用 T3 Code 的 Electron 客户端。复用逻辑以减少 bug，不等于替换客户端或必须采用官方 Web UI。
+- 复用边界按 [T3 Code 逻辑复用边界与验收](../../../docs/t3-code-full-reuse.md) 执行。此前“必须完整迁移官方 Electron”的解释已被用户纠正，不再作为实施依据。
+- 新需求先核实官方已有实现，优先复用 Server、Provider、协议契约及可解耦客户端逻辑；确需原生适配时保持薄层，用真实契约和回归验证，不另造平行业务状态机。官方升级和修复应能持续合入。
+
 ## T3 Server 集成边界
 
-- 本软件为单用户使用，主要在官方 T3 Server 上构建符合用户习惯的 UI。
+- 本软件为单用户使用；Swift 原生客户端继续保留，客户端适配不得重复实现上游 Server 已承担的业务。
 - 不额外限制 T3 Server 的模型、Provider、委派、工具或原生能力；权限和能力判定沿用上游，不添加 PiMac 专属白名单或模型锁。
 - 保留上游认证、凭据保护和必要宿主集成；不能因为 UI 尚未展示能力就禁用服务端能力。实际使用子代理仍遵守用户的全局事先询问要求。
 

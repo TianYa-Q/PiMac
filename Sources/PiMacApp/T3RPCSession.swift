@@ -56,6 +56,12 @@ final class T3RPCSession {
   init(open: @escaping () async throws -> any T3RPCConnection) { self.open = open }
 
   func close(error: Error = CancellationError()) {
+    SessionDiagnostics.record(
+      "rpc.connection.close", id: generation.uuidString,
+      fields: [
+        "error": SessionDiagnostics.errorFields(error), "pending": Array(pending.keys),
+        "waiters": Array(connectionWaiters.keys),
+      ])
     generation = UUID()
     connecting?.cancel()
     connecting = nil
@@ -143,6 +149,13 @@ final class T3RPCSession {
         Task { [weak self] in
           guard let self, current == self.generation, self.pending[id] != nil else { return }
           self.pending[id]?.sent = true
+          SessionDiagnostics.record(
+            "rpc.send", id: id,
+            fields: [
+              "connection": current.uuidString, "method": method,
+              "timeout": String(describing: timeout),
+              "frame": String(decoding: data, as: UTF8.self),
+            ])
           do { try await socket.send(String(decoding: data, as: UTF8.self)) } catch {
             if current == self.generation { self.close(error: error) }
           }
@@ -157,6 +170,14 @@ final class T3RPCSession {
 
   private func finish(_ id: String, result: Result<JSON, Error>, interrupt: Bool = false) {
     guard let request = pending.removeValue(forKey: id) else { return }
+    if case .failure(let error) = result {
+      SessionDiagnostics.record(
+        "rpc.failure", id: id,
+        fields: [
+          "connection": generation.uuidString, "sent": request.sent,
+          "interrupt": interrupt, "error": SessionDiagnostics.errorFields(error),
+        ])
+    }
     request.timeout?.cancel()
     if interrupt, request.sent, let socket = connection {
       let current = generation
@@ -176,6 +197,12 @@ final class T3RPCSession {
       do {
         while !Task.isCancelled {
           let data = try await socket.receive()
+          SessionDiagnostics.record(
+            "rpc.receive", id: current.uuidString,
+            fields: [
+              "bytes": data.count, "frameBase64": data.base64EncodedString(),
+              "frameUTF8": String(data: data, encoding: .utf8) ?? "",
+            ])
           let frames = try await ImmutableJSONSnapshot.frames(data)
           guard let self, current == self.generation, !Task.isCancelled else { return }
           for frame in frames {

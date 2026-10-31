@@ -85,7 +85,7 @@ cd PiMac
 python3 scripts/dev.py
 ```
 
-Watcher 构建独立的开发应用，仅在活动与编辑批次安全门通过后重载。**有任务运行时不要停止或重启 watcher**：停止它也会停止其应用及子服务。多步骤运行时代码修改前执行 `python3 scripts/dev.py --begin-edit --label 'task'`，保留 Token，验证完成后用 `--end-edit TOKEN` 仅关闭自己的批次。详见[开发重载安全机制](docs/development-reload.md)。
+Watcher 优先直接启动上次已发布的开发应用，不再每次启动先等待编译；仅首次没有可用产物时先构建。启动后核对源码指纹，有更新时构建独立的开发应用，仅在活动与编辑批次安全门通过后重载。**有任务运行时不要停止或重启 watcher**：停止它也会停止其应用及子服务。多步骤运行时代码修改前执行 `python3 scripts/dev.py --begin-edit --label 'task'`，保留 Token，验证完成后用 `--end-edit TOKEN` 仅关闭自己的批次。详见[开发重载安全机制](docs/development-reload.md)。
 
 验证入口：
 

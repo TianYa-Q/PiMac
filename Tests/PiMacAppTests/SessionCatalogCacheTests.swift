@@ -183,8 +183,4 @@ struct SessionCatalogCacheTests {
     withExtendedLifetime(observation) {}
   }
 
-  @Test func pollingUsesBoundedActiveAndIdleCadence() {
-    #expect(T3DesktopClient.pollIntervalMilliseconds(hasRunningThread: true) == 500)
-    #expect(T3DesktopClient.pollIntervalMilliseconds(hasRunningThread: false) == 2000)
-  }
 }

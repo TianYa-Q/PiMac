@@ -2052,6 +2052,8 @@ final class TelegramControl: ObservableObject {
 
   /// Observe for the model's lifetime, including stats responses that arrive after settlement.
   private func observeDesktopUpdates(in model: AppModel) {
+    let observationID = UUID()
+    model.setConversationConsumer(observationID, active: true)
     let updates = Publishers.MergeMany([
       model.$messages.map { _ in () }.eraseToAnyPublisher(),
       model.$stats.map { _ in () }.eraseToAnyPublisher(),
@@ -2060,6 +2062,9 @@ final class TelegramControl: ObservableObject {
     ])
     desktopObservations[ObjectIdentifier(model)] =
       updates
+      .handleEvents(receiveCancel: { [weak model] in
+        Task { @MainActor in model?.setConversationConsumer(observationID, active: false) }
+      })
       .throttle(for: .milliseconds(100), scheduler: DispatchQueue.main, latest: true)
       .receive(on: DispatchQueue.main)
       .sink { [weak self, weak model] _ in

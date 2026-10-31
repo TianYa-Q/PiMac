@@ -1,0 +1,23 @@
+{
+  "name": "pimac",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "tsx scripts/t3code.ts setup",
+    "dev": "tsx scripts/t3code.ts dev",
+    "build": "tsx scripts/t3code.ts build",
+    "check": "tsx scripts/t3code.ts check",
+    "test": "tsx --test --test-concurrency=1 Tests/T3Code/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "test:upstream": "tsx scripts/t3code.ts test",
+    "package:desktop": "tsx scripts/t3code.ts package",
+    "status": "tsx scripts/t3code.ts status"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.4",
+    "node": "26.12.1",
+    "pnpm": "12.14.0",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

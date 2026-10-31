@@ -47,8 +47,9 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     url.queryItems = [
       .init(name: "orchestrationProtocol", value: "2"), .init(name: "wsTicket", value: secret),
     ]
-    return T3WebSocketConnection(session: self.session, url: url.url!)
+    return self.rpcConnectionFactory(self.session, url.url!)
   }
+  private let rpcConnectionFactory: @MainActor (URLSession, URL) -> any T3RPCConnection
   private var connectionCheckRevision = UUID()
   enum RefreshArea: String, CaseIterable {
     case shell = "会话列表"
@@ -64,6 +65,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   private let threadRefreshes = ThreadRefreshScheduler()
   private let assetRefreshes = ThreadRefreshScheduler()
   private var shellRefreshTask: Task<Void, Error>?
+  private var shellRefreshID = UUID()
   private var shellRefreshRequested = false
   private var generation = UUID()
   private(set) var htmlRenderCacheScope = UUID()
@@ -73,6 +75,11 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   private let skillDiscovery:
     ((WorkspaceSkillCache.Key, Bool) async throws -> WorkspaceSkillCache.Success)?
   private var watches: [UUID: ThreadWatch] = [:]
+  private var threadStreams: [String: Task<Void, Never>] = [:]
+  private var threadStreamIDs: [String: UUID] = [:]
+  private var threadReducers: [String: T3StreamReducer] = [:]
+  private var presentedThreadSequences: [String: Int] = [:]
+  private var hasShellSubscription = false
   private var projectCreations: [String: Task<String, Error>] = [:]
   private var imageCache: [String: PromptAttachment] = [:]
   private var replyImageCache: [String: [PromptAttachment]] = [:]
@@ -92,6 +99,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     let threadID: String
     let receive: (JSON) -> Void
     let receiveUI: (JSON) -> Void
+    var isVisible = true
     private(set) var deliveredSnapshot: Data?
     private(set) var latestSnapshot: Data?
 
@@ -132,10 +140,6 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     for observer in watches.values { observer.invalidate() }
   }
 
-  static func pollIntervalMilliseconds(hasRunningThread: Bool) -> Int {
-    hasRunningThread ? 500 : 2000
-  }
-
   var sessionCatalogRevision: Int { sessionCatalog.rebuildCount }
 
   func sessions(projectID: String) -> [SessionItem] {
@@ -148,7 +152,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   private var syncedDefaultModelPreference: Data?
   // 分开连接池：即使下载占满连接，列表、凭据和命令仍有独立的网络通道。
   private let session = T3DesktopClient.makeSession(maxConnections: 4)
-  private let threadSession = T3DesktopClient.makeSession(maxConnections: 4)
+  private let threadSession: URLSession
   private let assetSession = T3DesktopClient.makeSession(maxConnections: 4)
   // 可用性检查不与配置 RPC、长时间运行的命令或附件争抢连接。
   private let connectionSession: URLSession
@@ -167,10 +171,16 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   init(
     defaults: UserDefaults = .standard,
     connectionSession: URLSession? = nil,
+    threadSession: URLSession? = nil,
+    rpcConnectionFactory: @escaping @MainActor (URLSession, URL) -> any T3RPCConnection = {
+      T3WebSocketConnection(session: $0, url: $1)
+    },
     skillDiscovery: ((WorkspaceSkillCache.Key, Bool) async throws -> WorkspaceSkillCache.Success)? =
       nil
   ) {
     self.defaults = defaults
+    self.rpcConnectionFactory = rpcConnectionFactory
+    self.threadSession = threadSession ?? Self.makeSession(maxConnections: 4)
     conversationCache = ConversationPresentationCache(defaults: defaults)
     let connectionConfiguration = URLSessionConfiguration.ephemeral
     connectionConfiguration.httpShouldSetCookies = false
@@ -199,27 +209,29 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     }
     loop = Task { [weak self] in
       while let self, !Task.isCancelled, self.generation == current {
-        if self.isConnected {
-          let serverURL = self.connectedServerURL
-          // 会话正文/队列读取不排在全量列表后面；两者有独立连接与合并调度。
-          self.requestThreadRefreshes()
-          do {
-            try await self.refreshShell()
-            guard self.generation == current, !Task.isCancelled else { return }
-            guard self.connectedServerURL == serverURL else { continue }
-            self.recordRefreshResult(.shell, error: nil)
-            self.reconcileSkillWorkspaces(now: Date())
-            self.onAccountPoll?()
-          } catch {
-            guard self.generation == current, !Task.isCancelled else { return }
-            if self.connectedServerURL == serverURL {
-              self.recordRefreshResult(.shell, error: error)
+        do {
+          while !self.isConnected {
+            try await Task.sleep(for: .milliseconds(200))
+            guard self.generation == current else { return }
+          }
+          let reducer = T3StreamReducer(kind: .shell)
+          try await self.consumeSubscription("orchestration.subscribeShell", payload: [:]) { item in
+            guard self.generation == current else { throw CancellationError() }
+            if try await reducer.apply(item) {
+              let native = try await reducer.snapshot()
+              guard self.generation == current else { throw CancellationError() }
+              self.applyShell(T3V2Presentation.shell(native.value))
+              self.hasShellSubscription = true
+              self.recordRefreshResult(.shell, error: nil)
+              self.reconcileThreadSubscriptions()
             }
           }
+        } catch {
+          guard self.generation == current, !Task.isCancelled else { return }
+          self.hasShellSubscription = false
+          self.recordRefreshResult(.shell, error: error)
         }
-        try? await Task.sleep(
-          for: .milliseconds(Self.pollIntervalMilliseconds(hasRunningThread: self.hasRunningThread))
-        )
+        try? await Task.sleep(for: .seconds(2))
       }
     }
     resumeConfigurationRefreshes()
@@ -266,6 +278,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
           let serverURL = self.connectedServerURL
           do {
             try await self.syncDefaultModelPreference()
+            self.onAccountPoll?()
             guard self.generation == current, !Task.isCancelled else { return }
             guard self.connectedServerURL == serverURL else { continue }
             self.recordRefreshResult(.preferences, error: nil)
@@ -411,6 +424,12 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     htmlRenderCacheScope = UUID()
     loop?.cancel()
     loop = nil
+    hasShellSubscription = false
+    for task in threadStreams.values { task.cancel() }
+    threadStreams.removeAll()
+    threadStreamIDs.removeAll()
+    threadReducers.removeAll()
+    presentedThreadSequences.removeAll()
     serviceReadiness?.cancel()
     serviceReadiness = nil
     connectionLoop?.cancel()
@@ -484,10 +503,13 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       as? String
   }
   func watch(
-    _ id: String, owner: UUID, receiveUI: @escaping (JSON) -> Void = { _ in },
+    _ id: String, owner: UUID, visible: Bool = true,
+    receiveUI: @escaping (JSON) -> Void = { _ in },
     receive: @escaping (JSON) -> Void
   ) {
-    watches[owner] = ThreadWatch(threadID: id, receive: receive, receiveUI: receiveUI)
+    let watch = ThreadWatch(threadID: id, receive: receive, receiveUI: receiveUI)
+    watch.isVisible = visible
+    watches[owner] = watch
     // Reopening a thread retries failed images without re-downloading successful ones.
     for key in imageFailures.keys {
       toolDetailCache.removeValue(forKey: key)
@@ -497,7 +519,65 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     htmlRetryAfter.removeAll()
     requestRefresh()
   }
-  func unwatch(owner: UUID) { watches.removeValue(forKey: owner) }
+  func unwatch(owner: UUID) {
+    watches.removeValue(forKey: owner)
+    reconcileThreadSubscriptions()
+  }
+
+  func setWatchVisibility(owner: UUID, visible: Bool) {
+    watches[owner]?.isVisible = visible
+    reconcileThreadSubscriptions()
+  }
+
+  /// 生命周期由真实观察者决定：隐藏标签没有正文订阅，也不会为了保活轮询历史。
+  private func reconcileThreadSubscriptions() {
+    let desired = Set(watches.values.filter(\.isVisible).map(\.threadID))
+    for id in Set(threadStreams.keys).subtracting(desired) {
+      threadStreams.removeValue(forKey: id)?.cancel()
+      threadStreamIDs.removeValue(forKey: id)
+      threadReducers.removeValue(forKey: id)
+      threadRefreshes.cancel(id)
+      assetRefreshes.cancel(id)
+    }
+    guard service != nil, isConnected else { return }
+    for id in desired where threadStreams[id] == nil {
+      let current = generation
+      let streamID = UUID()
+      threadStreamIDs[id] = streamID
+      threadStreams[id] = Task { [weak self] in
+        while let self, !Task.isCancelled, self.generation == current,
+          self.threadStreamIDs[id] == streamID
+        {
+          do {
+            let reducer = T3StreamReducer(kind: .thread)
+            try await self.consumeSubscription(
+              "orchestration.subscribeThread", payload: ["threadId": id]
+            ) { item in
+              guard self.generation == current, self.threadStreamIDs[id] == streamID else {
+                throw CancellationError()
+              }
+              if try await reducer.apply(item) {
+                try Task.checkCancellation()
+                guard self.generation == current, self.threadStreamIDs[id] == streamID else {
+                  throw CancellationError()
+                }
+                self.threadReducers[id] = reducer
+                self.requestThreadRefreshes(only: id)
+              }
+            }
+          } catch {
+            guard self.generation == current, !Task.isCancelled,
+              self.threadStreamIDs[id] == streamID
+            else { return }
+            SessionDiagnostics.record(
+              "thread.subscription.failure", id: id,
+              fields: ["error": Self.failureReason(error)])
+          }
+          try? await Task.sleep(for: .seconds(2))
+        }
+      }
+    }
+  }
 
   func waitUntilReady() async throws {
     for _ in 0..<300 {
@@ -520,25 +600,81 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     if let body { request.httpBody = try await ImmutableJSONSnapshot(value: body).encode() }
     guard generation == current, !Task.isCancelled else { throw CancellationError() }
     let transport = path.hasPrefix("/api/orchestration/threads/") ? threadSession : session
-    let (data, response) = try await transport.data(for: request)
-    guard generation == current, service?.serverURL == base else { throw CancellationError() }
-    guard let status = (response as? HTTPURLResponse)?.statusCode else {
-      throw ClientError.unavailable
+    let diagnosticID = UUID().uuidString
+    request.setValue(diagnosticID, forHTTPHeaderField: "x-pimac-request-id")
+    let started = Date()
+    SessionDiagnostics.record(
+      "http.start", id: diagnosticID,
+      fields: [
+        "url": request.url!.absoluteString, "method": method,
+        "headers": request.allHTTPHeaderFields ?? [:],
+        "bodyBase64": request.httpBody?.base64EncodedString() ?? "",
+        "generation": current.uuidString,
+        "pool": transport === threadSession ? "thread" : "general",
+        "requestTimeout": transport.configuration.timeoutIntervalForRequest,
+        "resourceTimeout": transport.configuration.timeoutIntervalForResource,
+        "maxConnections": transport.configuration.httpMaximumConnectionsPerHost,
+      ])
+    let data: Data
+    let response: URLResponse
+    do {
+      (data, response) = try await transport.data(
+        for: request, delegate: SessionRequestDiagnostics(id: diagnosticID))
+      SessionDiagnostics.record(
+        "http.response", id: diagnosticID,
+        fields: [
+          "elapsedSeconds": Date().timeIntervalSince(started),
+          "status": (response as? HTTPURLResponse)?.statusCode ?? -1,
+          "headers": (response as? HTTPURLResponse)?.allHeaderFields.reduce(
+            into: [String: String]()
+          ) {
+            $0[String(describing: $1.key)] = String(describing: $1.value)
+          } ?? [:],
+          "bytes": data.count, "bodyBase64": data.base64EncodedString(),
+          "bodyUTF8": String(data: data, encoding: .utf8) ?? "",
+          "generation": generation.uuidString, "cancelled": Task.isCancelled,
+        ])
+    } catch {
+      SessionDiagnostics.record(
+        "http.failure", id: diagnosticID,
+        fields: [
+          "elapsedSeconds": Date().timeIntervalSince(started),
+          "error": SessionDiagnostics.errorFields(error), "generation": generation.uuidString,
+          "cancelled": Task.isCancelled, "currentBaseURL": service?.serverURL?.absoluteString ?? "",
+        ])
+      throw error
     }
-    if status == 401 {
-      guard token == credential else { throw CancellationError() }
-      token = ""
-      connectionCheckRevision = UUID()
-      isConnected = false
-      connectionFailure = Self.connectionFailureStatus(ClientError.unauthorized, phase: "校验授权")
-      updateConnectionStatus()
-      throw ClientError.unauthorized
+    do {
+      guard generation == current, service?.serverURL == base else { throw CancellationError() }
+      guard let status = (response as? HTTPURLResponse)?.statusCode else {
+        throw ClientError.unavailable
+      }
+      if status == 401 {
+        guard token == credential else { throw CancellationError() }
+        token = ""
+        connectionCheckRevision = UUID()
+        isConnected = false
+        connectionFailure = Self.connectionFailureStatus(ClientError.unauthorized, phase: "校验授权")
+        updateConnectionStatus()
+        throw ClientError.unauthorized
+      }
+      guard status == 200 else { throw HTTPFailure(status: status) }
+      guard data.count <= 32 * 1024 * 1024 else { throw ClientError.rejected }
+      let snapshot = try await ImmutableJSONSnapshot.decode(data)
+      guard generation == current, service?.serverURL == base else { throw CancellationError() }
+      SessionDiagnostics.record(
+        "http.decoded", id: diagnosticID,
+        fields: ["elapsedSeconds": Date().timeIntervalSince(started)])
+      return snapshot.value
+    } catch {
+      SessionDiagnostics.record(
+        "http.processingFailure", id: diagnosticID,
+        fields: [
+          "error": SessionDiagnostics.errorFields(error),
+          "elapsedSeconds": Date().timeIntervalSince(started),
+        ])
+      throw error
     }
-    guard status == 200 else { throw HTTPFailure(status: status) }
-    guard data.count <= 32 * 1024 * 1024 else { throw ClientError.rejected }
-    let snapshot = try await ImmutableJSONSnapshot.decode(data)
-    guard generation == current, service?.serverURL == base else { throw CancellationError() }
-    return snapshot.value
   }
 
   @discardableResult
@@ -546,6 +682,20 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     _ fields: JSON, commandID: String = UUID().uuidString, refreshAfter: Bool = true
   ) async throws -> JSON {
     try await waitUntilReady()
+    let current = generation
+    // 全量转录和命令预检共享 Server 读取资源；写入前释放后台读事务，
+    // 等官方命令回执返回后再恢复，而不是让提交排在超时快照之后。
+    let threadPause = threadRefreshes.suspend()
+    let assetPause = assetRefreshes.suspend()
+    shellRefreshTask?.cancel()
+    shellRefreshTask = nil
+    shellRefreshID = UUID()
+    shellRefreshRequested = false
+    defer {
+      threadRefreshes.resume(threadPause)
+      assetRefreshes.resume(assetPause)
+      if generation == current, refreshAfter, !threadRefreshes.isSuspended { requestRefresh() }
+    }
     var command = fields
     command["commandId"] = commandID
     if command["type"] as? String == "thread.create"
@@ -558,7 +708,6 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     // outcome, never permission for the UI to replay or create another thread.
     let result = try await rpc(
       Self.mutationMethod(for: command["type"] as? String), payload: command)
-    if refreshAfter { requestRefresh() }
     return result
   }
 
@@ -630,16 +779,32 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
 
   func refresh() async throws {
     try await refreshShell()
-    let tasks = requestThreadRefreshes()
+    let tasks = requestThreadRefreshes(forceHTTP: true)
     // 显式刷新仍等待本次会话读取；日常轮询和命令回执只等待列表，不等图片。
     for task in tasks { try await task.value }
     try await assetRefreshes.waitForCurrent()
   }
 
   @discardableResult
-  private func requestThreadRefreshes() -> [Task<Void, Error>] {
-    Set(watches.values.map { $0.threadID }).map { id in
-      threadRefreshes.request(id) { try await self.refreshThread(id) }
+  private func requestThreadRefreshes(forceHTTP: Bool = false, only threadID: String? = nil)
+    -> [Task<Void, Error>]
+  {
+    guard !threadRefreshes.isSuspended else { return [] }
+    let current = generation
+    return Set(
+      watches.values.filter { $0.isVisible && (threadID == nil || $0.threadID == threadID) }
+        .map(\.threadID)
+    ).compactMap { id in
+      let reducer = threadReducers[id]
+      guard forceHTTP || reducer != nil else { return nil }
+      return threadRefreshes.request(id) {
+        // 连续增量合并成一帧原生展示；这里只读本机 reducer，不再轮询完整转录。
+        if !forceHTTP { try await Task.sleep(for: .milliseconds(150)) }
+        let snapshot = forceHTTP ? nil : try await reducer?.snapshot()
+        try Task.checkCancellation()
+        guard self.generation == current else { return }
+        try await self.refreshThread(id, snapshot: snapshot)
+      }
     }
   }
 
@@ -652,14 +817,22 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       return
     }
     let current = generation
+    let refreshID = UUID()
+    shellRefreshID = refreshID
     let task = Task {
       defer {
-        if self.generation == current { self.shellRefreshTask = nil }
+        if self.generation == current, self.shellRefreshID == refreshID {
+          self.shellRefreshTask = nil
+        }
       }
-      while self.generation == current, self.shellRefreshRequested {
+      while self.generation == current, self.shellRefreshID == refreshID,
+        self.shellRefreshRequested
+      {
         try Task.checkCancellation()
         self.shellRefreshRequested = false
         let next = try await self.request("/api/orchestration/shell")
+        try Task.checkCancellation()
+        guard self.generation == current, self.shellRefreshID == refreshID else { return }
         self.applyShell(T3V2Presentation.shell(next))
       }
     }
@@ -667,20 +840,46 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     try await task.value
   }
 
-  private func refreshThread(_ id: String) async throws {
+  private func refreshThread(_ id: String, snapshot: ImmutableJSONSnapshot?) async throws {
+    let refreshID = UUID().uuidString
+    let started = Date()
+    SessionDiagnostics.record("thread.refresh.start", id: refreshID, fields: ["threadID": id])
+    defer {
+      SessionDiagnostics.record(
+        "thread.refresh.exit", id: refreshID,
+        fields: [
+          "threadID": id, "elapsedSeconds": Date().timeIntervalSince(started),
+          "cancelled": Task.isCancelled,
+        ])
+    }
     let current = generation
-    guard watches.values.contains(where: { $0.threadID == id }) else { return }
-    let escaped = id.addingPercentEncoding(
-      withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
-    let nativeDetail = try await request("/api/orchestration/threads/\(escaped)")
+    guard watches.values.contains(where: { $0.threadID == id && $0.isVisible }) else { return }
+    let nativeDetail: JSON
+    if let snapshot {
+      nativeDetail = snapshot.value
+    } else {
+      // 仅保留显式刷新/恢复需要的权威 HTTP 路径，后台同步使用官方事件订阅。
+      nativeDetail = try await recoverySnapshot(threadID: id)
+    }
+    try Task.checkCancellation()
     guard generation == current else { return }
+    let sequence = nativeDetail["snapshotSequence"] as? Int
+    if let sequence, let presented = presentedThreadSequences[id], sequence < presented { return }
     // 快照含继承历史等跨线程派生数据，当前线程的事件序号不能完整代表内容。
     // 按实际载荷去重，且每个观察者独立确认，避免新订阅被旧订阅的缓存跳过。
     let fingerprint = try await ImmutableJSONSnapshot(value: nativeDetail).fingerprint()
+    try Task.checkCancellation()
     guard generation == current else { return }
     let observers = watches.filter {
-      $0.value.threadID == id && $0.value.deliveredSnapshot != fingerprint
+      $0.value.threadID == id && $0.value.isVisible
+        && $0.value.deliveredSnapshot != fingerprint
     }
+    SessionDiagnostics.record(
+      "thread.refresh.observers", id: refreshID,
+      fields: [
+        "threadID": id, "observers": observers.keys.map(\.uuidString),
+        "watchCount": watches.count, "fingerprint": fingerprint.base64EncodedString(),
+      ])
     if observers.isEmpty { return }
     guard let base = service?.serverURL else { return }
     // 先用现有缓存发布正文、队列和交互状态；首次下载不得阻塞这些轻量更新。
@@ -689,7 +888,11 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       nativeDetail, threadID: id, base: base,
       performRPC: { try await self.rpc($0, payload: $1) },
       loadHTML: { try await self.htmlRenderDocument($0) }, cachedOnly: true)
+    SessionDiagnostics.record(
+      "thread.refresh.toolsHydrated", id: refreshID,
+      fields: ["threadID": id, "elapsedSeconds": Date().timeIntervalSince(started)])
     let cachedDetail = try await ImmutableJSONSnapshot(value: cachedNative).presentedThread().value
+    try Task.checkCancellation()
     guard generation == current else { return }
     if let metrics = cachedDetail["sessionStats"] as? JSON,
       let data = try? JSONSerialization.data(withJSONObject: metrics)
@@ -699,12 +902,21 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     let (cachedReplies, cachedRepliesComplete) = await hydrateReplyImages(
       cachedDetail, threadID: id, cachedOnly: true)
     let (immediate, cachedImagesComplete) = await hydrateImages(cachedReplies, cachedOnly: true)
+    try Task.checkCancellation()
+    guard generation == current else { return }
     let cachedComplete = cachedToolsComplete && cachedRepliesComplete && cachedImagesComplete
+    if let sequence { presentedThreadSequences[id] = sequence }
     let ui = T3V2Presentation.requests(nativeDetail)
-    for (owner, observer) in observers where watches[owner] === observer {
+    for (owner, observer) in observers where watches[owner] === observer && observer.isVisible {
       observer.receiveUI(ui)
       observer.deliver(immediate, fingerprint: fingerprint, complete: cachedComplete)
     }
+    SessionDiagnostics.record(
+      "thread.refresh.published", id: refreshID,
+      fields: [
+        "threadID": id, "complete": cachedComplete,
+        "elapsedSeconds": Date().timeIntervalSince(started),
+      ])
     if cachedComplete { return }
     assetRefreshes.request(id) {
       await self.refreshAssets(
@@ -722,21 +934,27 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       performRPC: { try await self.rpc($0, payload: $1) },
       loadHTML: { try await self.htmlRenderDocument($0) })
     guard let detail = try? await ImmutableJSONSnapshot(value: richNative).presentedThread().value,
-      generation == current
+      generation == current, !Task.isCancelled
     else { return }
     let (withReplies, repliesComplete) = await hydrateReplyImages(detail, threadID: id)
     let (hydrated, complete) = await hydrateImages(withReplies)
-    guard generation == current else { return }
+    guard generation == current, !Task.isCancelled else { return }
     // 下载途中可能已经发布更新的正文；旧资源只能进入缓存，不能覆盖新快照。
-    for (owner, observer) in observers where watches[owner] === observer {
+    for (owner, observer) in observers where watches[owner] === observer && observer.isVisible {
       observer.deliverAssets(
         hydrated, fingerprint: fingerprint,
         complete: complete && repliesComplete && toolsComplete)
     }
   }
-  // Do not invalidate the entire desktop or rewrite its cache on identical polls.
+  // Do not invalidate the entire desktop or rewrite its cache on identical events.
   // The first live snapshot must still be delivered when loaded from disk.
   func applyShell(_ next: JSON) {
+    // 同一连接的手动 HTTP 刷新不能覆盖已经应用的较新订阅事件；磁盘缓存不参与比较。
+    if hasDeliveredShell, let old = shell["snapshotSequence"] as? Int,
+      let new = next["snapshotSequence"] as? Int, new < old
+    {
+      return
+    }
     hasLiveSkillShell = true
     guard !hasDeliveredShell || !NSDictionary(dictionary: shell).isEqual(to: next) else { return }
     hasDeliveredShell = true
@@ -869,11 +1087,14 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   }
 
   func requestRefresh(includeThreads: Bool = true) {
+    guard !threadRefreshes.isSuspended else { return }
+    reconcileThreadSubscriptions()
     if includeThreads { requestThreadRefreshes() }
+    guard !hasShellSubscription else { return }
     let current = generation
     let serverURL = connectedServerURL
     Task { [weak self] in
-      guard let self, self.generation == current else { return }
+      guard let self, self.generation == current, !self.threadRefreshes.isSuspended else { return }
       do {
         // 新建/Settle 的列表确认有独立通道，不排在任何会话的附件下载后面。
         try await self.refreshShell()
@@ -1231,6 +1452,27 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     socket.maximumMessageSize = 8 * 1024 * 1024
     socket.resume()
     return socket
+  }
+
+  /// RPC 的同步回调只入队不可变帧；按序在 actor 上解码，不能丢弃任何增量事件。
+  private func consumeSubscription(
+    _ method: String, payload: JSON,
+    receive: @escaping @MainActor (ImmutableJSONSnapshot) async throws -> Void
+  ) async throws {
+    let (items, continuation) = AsyncThrowingStream<ImmutableJSONSnapshot, Error>.makeStream()
+    let producer = Task {
+      do {
+        _ = try await self.rpcSession.call(method, payload: payload, stream: true) { value in
+          continuation.yield(ImmutableJSONSnapshot(value: value))
+        }
+        continuation.finish(throwing: ClientError.unavailable)
+      } catch { continuation.finish(throwing: error) }
+    }
+    defer { producer.cancel() }
+    for try await item in items {
+      try Task.checkCancellation()
+      try await receive(item)
+    }
   }
 
   private func rpc(

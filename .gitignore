@@ -1,9 +1,13 @@
 .build/
+/node_modules/
 /tmp/
 dist/
 .DS_Store
 .swiftpm/
 sidecars/*/node_modules/
+
+# Local upstream reference/build sources; keep provenance, not the full checkout.
+/third_party/t3code/
 
 # Rehydrated, hash-pinned T3 Server sources and generated test fixtures.
 # Keep adapters, patches, upstream-pin.json, lockfiles and license notices.

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 
 const routes = new Set(['/.well-known/t3/environment', '/oauth/token', '/ws',
@@ -6,7 +7,7 @@ const routes = new Set(['/.well-known/t3/environment', '/oauth/token', '/ws',
   '/api/connect/mint-credential', '/api/t3-connect/mint-credential']);
 export function connectionRoute(url) {
   const pathname = url.split('?')[0];
-  return routes.has(pathname) ? pathname : null;
+  return routes.has(pathname) || pathname.startsWith('/api/orchestration/threads/') ? pathname : null;
 }
 export function appendPrivateLog(file, line, maxBytes) {
   if (!file) return;
@@ -33,6 +34,20 @@ export function createConnectionDiagnostics(directory) {
   const connectorFile = directory && path.join(directory, 'tunnel-connector.log');
   return {
     get summary() { return entries.join('\n'); },
+    // 完整请求诊断独立于 UI 摘要，保留原始字段及错误，不做截断或脱敏。
+    recordDetail(event, fields) {
+      if (!directory) return;
+      const detailFile = path.join(directory, 'session-diagnostics.log');
+      const line = JSON.stringify({ timestamp: new Date().toISOString(), pid: process.pid, event, ...fields },
+        (_key, value) => typeof value === 'bigint' ? value.toString() : value) + '\n';
+      // 使用唯一归档名称，不覆盖之前的诊断证据。
+      try {
+        if (fs.lstatSync(detailFile).size + Buffer.byteLength(line) > 64 * 1024 * 1024) {
+          fs.renameSync(detailFile, detailFile + '.' + crypto.randomUUID());
+        }
+      } catch (error) { if (error.code !== 'ENOENT') console.error('Session diagnostics rotation failed', error); }
+      appendPrivateLog(detailFile, line, Infinity);
+    },
     recordConnectorOutput(pid, output) {
       if (!Number.isInteger(pid) || typeof output !== 'string') return;
       const line = `${new Date().toISOString()} cloudflared ${JSON.stringify({ pid, output: output.slice(0, 64 * 1024) })}\n`;

@@ -389,16 +389,82 @@ def run_build_command(command, capture=False):
         raise
 
 
+def server_build_fingerprint(generated=False):
+    """内容而非时间戳决定复用；原生依赖也校验，避免缺文件时复用半套 Server。"""
+    server = root / 'sidecars/t3-server'
+    vendor = root / 'Sources/PiMacApp/Resources/t3-bridge/vendor'
+    if generated:
+        paths = [vendor / name for name in
+                 ('t3-server.mjs', 'T3-SERVER-LICENSE.txt', 'native-runtime.json')]
+        native = vendor / 'node_modules'
+        if not native.is_dir() or any(not path.is_file() for path in paths):
+            return None
+        paths.extend(path for path in native.rglob('*') if path.is_file())
+    else:
+        # pin 及其真实文件都参与：只改 pin 或绕过 pin 改源码都不能命中旧缓存。
+        pin = json.loads((server / 'upstream-pin.json').read_text())
+        paths = [server / 'upstream' / path for path in pin['files']]
+        for base, directories, files in os.walk(server):
+            directories[:] = [name for name in directories
+                              if name not in {'node_modules', 'upstream', 'tests', 'generated', '.git'}]
+            paths.extend(Path(base) / name for name in files
+                         if Path(name).suffix in {'.mjs', '.js', '.ts', '.json', '.patch'})
+        # npm ci 的安装身份与锁文件一起控制依赖变化；不对整个 npm 缓存做昂贵扫描。
+        paths.append(server / 'node_modules/.package-lock.json')
+    digest = hashlib.sha256()
+    if not generated:
+        node = shutil.which('node')
+        if node is None:
+            raise RuntimeError('Node.js unavailable; cannot validate Server build inputs')
+        stat = Path(node).resolve().stat()
+        digest.update(json.dumps([sys.platform, os.uname().machine, str(Path(node).resolve()),
+                                  stat.st_size, stat.st_mtime_ns]).encode())
+    for path in sorted(set(paths)):
+        content = path.read_bytes()
+        digest.update(json.dumps([path.relative_to(root).as_posix(),
+                                  path.stat().st_mode & 0o777, len(content),
+                                  hashlib.sha256(content).hexdigest()]).encode())
+    return digest.hexdigest()
+
+
+def ensure_server_build():
+    receipt = root / '.build/dev-server-build.json'
+    try:
+        inputs = server_build_fingerprint()
+        cached = read_state(receipt)
+        if cached.get('version') == 1 and cached.get('inputs') == inputs:
+            outputs = server_build_fingerprint(generated=True)
+            if outputs is not None and cached.get('outputs') == outputs:
+                status('Server unchanged · reusing verified generated runtime')
+                return True
+        status('Server inputs changed or cache unavailable · building once')
+        if run_build_command(['npm', '--prefix', 'sidecars/t3-server', 'run', 'build'])[0] != 0:
+            return False
+        # 构建途中发生编辑时不认证混合版本，也不继续让 Swift 打包它。
+        if server_build_fingerprint() != inputs:
+            status('Server inputs changed during build · no cache or Swift build')
+            return False
+        outputs = server_build_fingerprint(generated=True)
+        if outputs is None:
+            status('Server build did not produce a complete runtime')
+            return False
+        atomic_write(receipt, json.dumps({'version': 1, 'inputs': inputs, 'outputs': outputs}))
+        return True
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+        status(f'Cannot validate Server build cache: {error}')
+        return False
+
+
 def build():
     global build_number
     build_number += 1
     started = time.monotonic()
+    inputs = snapshot()
     build_log.parent.mkdir(parents=True, exist_ok=True)
     build_log.write_text(f"Build #{build_number} — {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-    status(f"Build #{build_number} · Server → Swift…")
-    # Bundle the backend before Swift copies resources. Never signal a reload
-    # when either build fails, even if an old executable still exists.
-    if run_build_command(["npm", "--prefix", "sidecars/t3-server", "run", "build"])[0] != 0:
+    status(f"Build #{build_number} · Server cache → Swift…")
+    # Server 不随 Swift 修改重复构建；缓存必须同时匹配输入和完整生成产物。
+    if not ensure_server_build():
         status(f"Build #{build_number} failed (Server); no restart. Details: {build_log.relative_to(root)}")
         return None
     if run_build_command(["swift", "build"])[0] != 0:
@@ -413,7 +479,8 @@ def build():
         return None
     # Build into a staging bundle: a build can become obsolete while compiling.
     # Never replace the running application's resources until PendingBuild validates it.
-    binary = bundle_development_app(Path(output.strip()), root / '.build' / 'Pi Mac Dev Staged.app')
+    binary = bundle_development_app(
+        Path(output.strip()), root / '.build' / 'Pi Mac Dev Staged.app', inputs=inputs)
     if binary is None:
         status(f"Build #{build_number} failed (development app); no restart. Details: {build_log.relative_to(root)}")
         return None
@@ -448,7 +515,7 @@ def publish_artifact(binary):
     return live / 'Contents' / 'MacOS' / 'PiMac'
 
 
-def bundle_development_app(binary_dir, destination=None):
+def bundle_development_app(binary_dir, destination=None, inputs=None):
     """Give debug builds a real application identity for macOS notifications.
 
     Keep the executable path stable for DevelopmentReloader; replace the file
@@ -470,6 +537,9 @@ def bundle_development_app(binary_dir, destination=None):
         shutil.rmtree(resource_bundle)
     shutil.copytree(binary_dir / "PiMac_PiMacApp.bundle", resource_bundle)
     shutil.copy2(root / "Sources/PiMacApp/Resources/AppIcon.icns", resources / "AppIcon.icns")
+    if inputs is not None:
+        # 将构建开始时的指纹随产物一起签名、发布；不能拿启动时源码冒充已编译版本。
+        (resources / 'dev-inputs.json').write_text(json.dumps({'version': 1, 'inputs': inputs}))
     with (contents / "Info.plist").open("wb") as plist:
         plistlib.dump({
             "CFBundleDisplayName": "Pi Mac Dev",
@@ -593,10 +663,49 @@ def main():
                     signal.signal(sig, handler)
 
 
+def startup_artifact():
+    """优先启动已发布产物；构建移出热启动路径，但从不启动未发布的 staging。"""
+    contents = root / '.build' / 'Pi Mac Dev.app' / 'Contents'
+    binary = contents / 'MacOS' / 'PiMac'
+    resources = contents / 'Resources'
+    try:
+        with (contents / 'Info.plist').open('rb') as file:
+            info = plistlib.load(file)
+        reusable = (isinstance(info, dict)
+                    and info.get('CFBundleIdentifier') == 'com.jianfeng.pi-mac.dev'
+                    and info.get('CFBundleExecutable') == 'PiMac'
+                    and binary.is_file() and os.access(binary, os.X_OK)
+                    and (resources / 'PiMac_PiMacApp.bundle').is_dir()
+                    and (resources / 'AppIcon.icns').is_file())
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        reusable = False
+    if reusable:
+        status('Starting published development app · no startup build')
+    else:
+        status('No usable published development app · initial build required')
+        built = build()
+        if built is None:
+            sys.exit(1)
+        binary = publish_artifact(built)
+        if binary is None:
+            sys.exit(1)
+        resources = binary.parent.parent / 'Resources'
+    manifest = read_state(resources / 'dev-inputs.json')
+    inputs = manifest.get('inputs')
+    if (manifest.get('version') == 1 and isinstance(inputs, list) and inputs
+            and all(isinstance(item, list) and len(item) == 3
+                    and isinstance(item[0], str) and isinstance(item[1], str)
+                    and len(item[1]) == 64 and isinstance(item[2], int) and item[2] >= 0
+                    for item in inputs)):
+        applied = tuple(tuple(item) for item in inputs)
+    else:
+        # 旧版产物仍可启动，但来源未知必须安排更新，不能声称与当前源码一致。
+        status('Published source fingerprint unavailable · update queued for next safe idle')
+        applied = ()
+    return binary, applied
+
+
 def watch(app_groups):
-    binary = build()
-    if binary is None:
-        sys.exit(1)
     live_binary = root / '.build' / 'Pi Mac Dev.app' / 'Contents' / 'MacOS' / 'PiMac'
     existing = running_apps(live_binary)
     if existing:
@@ -605,9 +714,7 @@ def watch(app_groups):
             "Stopping this project's instances and services on exit; "
             "run the watcher again after cleanup."
         )
-    binary = publish_artifact(binary)
-    if binary is None:
-        sys.exit(1)
+    binary, applied = startup_artifact()
     env = os.environ.copy()
     env["PIMAC_DEV_EDIT_DIRECTORY"] = str(edit_directory())
     env["PIMAC_DEV_RELOAD_PATH"] = str(binary.resolve())
@@ -629,7 +736,7 @@ def watch(app_groups):
         status(f"Build log: {build_log.relative_to(root)} · App logs: terminal")
     else:
         status(f"Logs: {build_log.relative_to(root)} (latest build), {app_log.relative_to(root)} (app), .build/dev-watch.log (lifecycle)")
-    pending = PendingBuild(snapshot(), request, revision, supervisor.app.pid)
+    pending = PendingBuild(applied, request, revision, supervisor.app.pid)
     while True:
         time.sleep(1)
         supervisor.tick()

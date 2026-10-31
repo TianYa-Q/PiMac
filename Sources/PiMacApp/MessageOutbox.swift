@@ -376,15 +376,28 @@ final class MessageRecoveryCoordinator: ObservableObject {
 
   @MainActor
   private struct Attempt {
+    let messageID: String
     var stage: Stage = .environment
     var startedAt = ContinuousClock.now
 
     mutating func begin(_ stage: Stage) {
+      SessionDiagnostics.record(
+        "recovery.stage", id: messageID,
+        fields: [
+          "previousStage": self.stage.rawValue, "stage": stage.rawValue,
+          "previousElapsed": String(describing: startedAt.duration(to: .now)),
+        ])
       self.stage = stage
       startedAt = .now
     }
 
     func failure(_ cause: Error) -> AttemptFailure {
+      SessionDiagnostics.record(
+        "recovery.failure", id: messageID,
+        fields: [
+          "stage": stage.rawValue, "error": SessionDiagnostics.errorFields(cause),
+          "elapsed": String(describing: startedAt.duration(to: .now)),
+        ])
       let elapsed = startedAt.duration(to: .now).components
       return AttemptFailure(
         cause: cause,
@@ -415,7 +428,7 @@ final class MessageRecoveryCoordinator: ObservableObject {
     else { return .blocked }
     activeThreads.insert(record.threadID)
     defer { activeThreads.remove(record.threadID) }
-    var attempt = Attempt()
+    var attempt = Attempt(messageID: id)
     do { return try await inspect(id, attempt: &attempt) } catch {
       let state = store.message(id)?.state
       if state == .delivered || (state == .accepted && record.state != .accepted) {
@@ -433,6 +446,12 @@ final class MessageRecoveryCoordinator: ObservableObject {
 
   private func inspect(_ id: String, attempt: inout Attempt) async throws -> Check {
     guard var record = store.message(id) else { throw CocoaError(.fileReadNoSuchFile) }
+    SessionDiagnostics.record(
+      "recovery.inspect", id: id,
+      fields: [
+        "threadID": record.threadID, "state": record.state.rawValue,
+        "dispatchCommandID": record.dispatchCommandID,
+      ])
     guard record.isVisible, record.state != .conflict else { return .blocked }
     attempt.begin(.environment)
     let environment = try await transport.recoveryEnvironmentID()
@@ -552,8 +571,21 @@ final class MessageRecoveryCoordinator: ObservableObject {
   }
 
   private func deliverAttempt(_ id: String) async throws -> Bool {
-    var attempt = Attempt()
+    var attempt = Attempt(messageID: id)
     do {
+      if let record = store.message(id) {
+        do {
+          let data = try JSONEncoder().encode(record)
+          SessionDiagnostics.record(
+            "recovery.attempt", id: id,
+            fields: ["record": String(decoding: data, as: UTF8.self)])
+        } catch {
+          // 诊断序列化失败不改变真实投递结果，单独保留失败原因。
+          SessionDiagnostics.record(
+            "recovery.loggingFailure", id: id,
+            fields: ["error": SessionDiagnostics.errorFields(error)])
+        }
+      }
       try Task.checkCancellation()
       try store.update(id) {
         if [.saved, .unknown, .sending].contains($0.state) {

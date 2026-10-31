@@ -360,6 +360,59 @@ struct MessageRecoveryTests {
     #expect(transport.commands.isEmpty)
   }
 
+  @Test(arguments: [
+    OutboxMessage.State.saved, .unknown, .rejected, .missing, .conflict,
+  ])
+  func unresolvedInputDoesNotBlockOrReplayWhenSendingNewInput(_ state: OutboxMessage.State)
+    async throws
+  {
+    let root = try directory()
+    let suite = "nonblocking-recovery-\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    let client = T3DesktopClient(defaults: defaults)
+    let model = AppModel(restoreLastProjectOnLaunch: false)
+    defer {
+      model.disconnect()
+      client.stop()
+      defaults.removePersistentDomain(forName: suite)
+    }
+    let store = MessageOutboxStore(directory: root.appendingPathComponent("outbox"))
+    let transport = Transport()
+    transport.liveEnvironment = "environment"
+    let old = try save(store, root: root, creates: false)
+    try store.update(old.id) { $0.state = state }
+    let preserved = try #require(store.message(old.id))
+    let coordinator = MessageRecoveryCoordinator(store: store, transport: transport)
+    model.attach(to: client, deliveries: coordinator)
+    model.projectURL = root
+    model.currentSessionPath = "t3:\(old.threadID)"
+    client.didCompletePoll()
+    model.connectionState = .connected
+    model.composerText = "新的独立输入"
+    #expect(model.recoveryRecords.map(\.id) == [old.id])
+    #expect(model.canSubmitPrompt)
+    model.sendPrompt()
+    for _ in 0..<1000
+    where coordinator.activeThreads.count > 0 || store.messages.count < 2
+      || store.messages.last?.state != .accepted
+    { await Task.yield() }
+    #expect(model.composerText.isEmpty)
+    #expect(store.messages.count == 2)
+    let fresh = try #require(store.messages.last)
+    #expect(fresh.id != old.id)
+    #expect(fresh.state == .accepted)
+    #expect(fresh.text == "新的独立输入")
+    #expect(transport.received == [fresh.id])
+    #expect(transport.runs == 1)
+    #expect(store.message(old.id) == preserved)
+    #expect(
+      MessageOutboxStore(directory: root.appendingPathComponent("outbox")).message(old.id)
+        == preserved)
+    // 放开历史状态不意味着放开真实断线或损坏记录的安全门。
+    model.connectionState = .disconnected
+    #expect(!model.canSubmitPrompt)
+  }
+
   @Test func runningAgentAllowsCheckedRecoveryButNotConcurrentDeliveryOrCompaction() async throws {
     let root = try directory()
     let suite = "recovery-running-\(UUID().uuidString)"

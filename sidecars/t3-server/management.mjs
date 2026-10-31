@@ -1,4 +1,7 @@
 import * as Effect from 'effect/Effect';
+import * as Cause from 'effect/Cause';
+import * as Exit from 'effect/Exit';
+import crypto from 'node:crypto';
 import * as Layer from 'effect/Layer';
 import * as Option from 'effect/Option';
 import * as DateTime from 'effect/DateTime';
@@ -36,13 +39,41 @@ export const NativeHttpPolicy = HttpRouter.middleware(effect => Effect.flatMap(H
     origin: request.headers.origin === undefined ? 'absent' : 'present' };
   const record = (event, extra = {}) => { if (route) broker.connectionDiagnostics.record(event, { ...fields, ...extra }); };
   record('request');
+  const detailed = request.url.startsWith('/api/orchestration/threads/');
+  const requestId = request.headers['x-pimac-request-id'] ?? crypto.randomUUID();
+  const started = performance.now();
+  const detail = (event, extra = {}) => {
+    if (detailed) broker.connectionDiagnostics.recordDetail(event, {
+      requestId, url: request.url, method: request.method, elapsedMs: performance.now() - started, ...extra,
+    });
+  };
+  detail('http.server.start', { headers: request.headers });
   if (!originAllowed(request.method, request.url, request.headers)) {
     record('denied', { status: 403, reason: 'origin-policy' });
+    detail('http.server.denied', { status: 403, reason: 'origin-policy' });
     return Effect.succeed(HttpServerResponse.empty({ status: 403 }));
   }
   // 不再按接口名限制请求：路由存在性、凭据和 scope 全部由官方 T3 校验。
-  // 此处仅保留浏览器 Origin 防护及不含凭据的传输诊断。
-  return effect.pipe(Effect.tap(response => Effect.sync(() => record('response', { status: response.status }))));
+  // 等待事件区分“未到达服务端”和“路由已收到但仍未结束”；退出时始终释放计时器。
+  return Effect.suspend(() => {
+    const timer = detailed ? setInterval(() => detail('http.server.pending', {
+      memory: process.memoryUsage(), resources: process.getActiveResourcesInfo(),
+    }), 5000) : undefined;
+    timer?.unref();
+    return effect.pipe(
+      Effect.tap(response => Effect.sync(() => {
+        record('response', { status: response.status });
+        detail('http.server.response', { status: response.status, headers: response.headers });
+      })),
+      Effect.onExit(exit => Effect.sync(() => {
+        if (timer) clearInterval(timer);
+        detail('http.server.exit', {
+          outcome: Exit.isSuccess(exit) ? 'success' : 'failure',
+          cause: Exit.isSuccess(exit) ? null : Cause.pretty(exit.cause),
+        });
+      })),
+    );
+  });
 }), { global: true });
 
 export const NativeManagementLayer = Layer.effectDiscard(Effect.gen(function* () {

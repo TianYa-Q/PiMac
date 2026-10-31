@@ -97,6 +97,29 @@ final class AppModel: ObservableObject {
   private weak var server: T3DesktopClient?
   private var serverConnectionObservation: AnyCancellable?
   private let observerID = UUID()
+  private var isConversationVisible = true
+  private var conversationConsumers: Set<UUID> = []
+  private var needsConversationUpdates: Bool {
+    isConversationVisible || !conversationConsumers.isEmpty
+  }
+
+  func setConversationVisible(_ visible: Bool) {
+    isConversationVisible = visible
+    server?.setWatchVisibility(owner: observerID, visible: needsConversationUpdates)
+  }
+
+  /// Telegram 等真实消费者可独立持有观察租约；不能因隐藏桌面标签而丢失远程回复。
+  func setConversationConsumer(_ owner: UUID, active: Bool) {
+    if active { conversationConsumers.insert(owner) } else { conversationConsumers.remove(owner) }
+    server?.setWatchVisibility(owner: observerID, visible: needsConversationUpdates)
+  }
+
+  /// 隐藏标签只消费轻量 shell 状态，不能拿空正文覆盖已经显示的历史。
+  func applyBackgroundThreadState(_ thread: [String: Any]) {
+    guard !needsConversationUpdates, thread["id"] as? String == threadID else { return }
+    applyRunState(thread)
+    sessionName = thread["title"] as? String ?? sessionName
+  }
   private(set) var skillWorkspaceContext: WorkspaceSkillContext?
 
   func enterSkillWorkspace() {
@@ -191,9 +214,8 @@ final class AppModel: ObservableObject {
     if deliveryCoordinator?.store.isReadOnly == true {
       return "发件箱记录无法读取，请先处理保存错误；草稿已保留"
     }
-    if recoveryRecords.contains(where: { $0.state != .draft }) {
-      return "有待恢复的输入，请先检查并恢复；新草稿已保留"
-    }
+    // 历史待恢复输入只约束它自身的重试，不能锁住独立的新消息；
+    // 真实进行中的投递仍由上面的线程锁串行保护，旧记录不会随新提交自动重发。
     if awaitingAgentStart { return "正在等待 Server 确认任务启动，请稍后发送" }
     if pendingSelection != nil { return "正在保存模型设置，请稍后发送" }
     if isManagingAccounts { return "请先完成账号管理操作" }
@@ -414,7 +436,7 @@ final class AppModel: ObservableObject {
       enterSkillWorkspace()
     }
     server.watch(
-      id, owner: observerID,
+      id, owner: observerID, visible: needsConversationUpdates,
       receiveUI: { [weak self] snapshot in self?.applyExtensionUI(snapshot) },
       receive: { [weak self] detail in self?.apply(detail) })
   }
@@ -864,6 +886,34 @@ final class AppModel: ObservableObject {
   func updateCatalog(_ values: [SessionItem]) {
     if sessions != values { sessions = values }
   }
+  private func applyRunState(_ thread: [String: Any]) {
+    let turn = thread["latestTurn"] as? [String: Any]
+    let state = turn?["state"] as? String
+    let turnID = turn?["turnId"] as? String
+    let wasRunning = isStreaming
+    let sessionFailed = (thread["session"] as? [String: Any])?["status"] as? String == "error"
+    terminalStopReason =
+      state == "interrupted" ? "aborted" : (state == "error" || sessionFailed) ? "error" : nil
+    isStreaming =
+      state == "running"
+      || ["starting", "running"].contains(
+        (thread["session"] as? [String: Any])?["status"] as? String ?? "")
+    if isStreaming || (turnID != submittedFromTurnID && turnID != nil) || sessionFailed {
+      awaitingAgentStart = false
+    }
+    if turnID != lastTurnID, isStreaming {
+      speed.reset()
+      outputTokensPerSecond = nil
+      onTelegramLifecycleEvent?("agent_start")
+    }
+    if wasRunning, !isStreaming { onTelegramLifecycleEvent?("agent_end") }
+    if lastTurnState != state, !isStreaming, turnID != nil {
+      statusText = state == "error" ? "Pi 执行失败（Server 已记录）" : state == "interrupted" ? "任务已取消" : ""
+    }
+    lastTurnID = turnID
+    lastTurnState = state
+  }
+
   func apply(_ detail: [String: Any]) {
     guard let thread = detail["thread"] as? [String: Any], thread["id"] as? String == threadID
     else { return }
@@ -898,31 +948,9 @@ final class AppModel: ObservableObject {
         selectedThinkingLevel = thinking
       }
     }
-    let turn = thread["latestTurn"] as? [String: Any]
-    let state = turn?["state"] as? String
-    let turnID = turn?["turnId"] as? String
-    let wasRunning = isStreaming
-    let sessionFailed = (thread["session"] as? [String: Any])?["status"] as? String == "error"
-    terminalStopReason =
-      state == "interrupted" ? "aborted" : (state == "error" || sessionFailed) ? "error" : nil
-    isStreaming =
-      state == "running"
-      || ["starting", "running"].contains(
-        (thread["session"] as? [String: Any])?["status"] as? String ?? "")
-    if isStreaming || (turnID != submittedFromTurnID && turnID != nil)
-      || (thread["session"] as? [String: Any])?["status"] as? String == "error"
-    {
-      awaitingAgentStart = false
-    }
-    if turnID != lastTurnID, isStreaming {
-      speed.reset()
-      outputTokensPerSecond = nil
-      onTelegramLifecycleEvent?("agent_start")
-    }
-    if wasRunning, !isStreaming { onTelegramLifecycleEvent?("agent_end") }
-    if lastTurnState != state, !isStreaming, turnID != nil {
-      statusText = state == "error" ? "Pi 执行失败（Server 已记录）" : state == "interrupted" ? "任务已取消" : ""
-    }
+    applyRunState(thread)
+    let turnID = lastTurnID
+    let state = lastTurnState
     // Metrics arrive with the thread snapshot, independently of account/quota
     // extensions (which can be unavailable or fail).
     if let metrics = detail["sessionStats"] as? [String: Any],
@@ -933,8 +961,6 @@ final class AppModel: ObservableObject {
       outputTokensPerSecond = stats.outputTokensPerSecond
     }
     refreshCodexAccounts()
-    lastTurnID = turnID
-    lastTurnState = state
     var entries = (thread["messages"] as? [[String: Any]] ?? []).map { message -> ChatEntry in
       let role = message["role"] as? String ?? "assistant"
       return ChatEntry(

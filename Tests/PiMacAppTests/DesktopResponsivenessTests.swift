@@ -71,6 +71,58 @@ struct DesktopResponsivenessTests {
     #expect(count == 2)
   }
 
+  @Test(.timeLimit(.minutes(1)))
+  func foregroundWritesCancelSlowReadsAndNestedHoldsPreventPollRestart() async throws {
+    let scheduler = ThreadRefreshScheduler()
+    var started = false
+    var cancelled = false
+    var followUpReads = 0
+    let slow = scheduler.request("large-transcript") {
+      started = true
+      do { try await Task.sleep(for: .seconds(30)) } catch {
+        cancelled = true
+        throw error
+      }
+    }
+    for _ in 0..<1000 where !started { await Task.yield() }
+    try #require(started)
+    let firstWrite = scheduler.suspend()
+    let secondWrite = scheduler.suspend()
+    do {
+      try await slow.value
+      Issue.record("前台提交必须取消慢读取，不能等它自然超时")
+    } catch is CancellationError {} catch { Issue.record("非预期刷新错误：\(error)") }
+    #expect(cancelled)
+    for token in [firstWrite, secondWrite] {
+      // 模拟写入中定时轮询；取消不是刷新成功，且不能重新占住 Server。
+      let skipped = scheduler.request("large-transcript") { followUpReads += 1 }
+      do {
+        try await skipped.value
+        Issue.record("暂停期间不能伪报刷新成功")
+      } catch is CancellationError {} catch { Issue.record("非预期刷新错误：\(error)") }
+      #expect(followUpReads == 0)
+      scheduler.resume(token)
+    }
+    #expect(!scheduler.isSuspended)
+    try await scheduler.request("large-transcript") { followUpReads += 1 }.value
+    #expect(followUpReads == 1)
+  }
+
+  @Test func lateMutationCompletionCannotReleaseNewConnectionReadHold() async throws {
+    let scheduler = ThreadRefreshScheduler()
+    let old = scheduler.suspend()
+    scheduler.cancelAll()  // 断线/停止必须释放旧连接的暂停状态。
+    #expect(!scheduler.isSuspended)
+    let current = scheduler.suspend()
+    scheduler.resume(old)
+    #expect(scheduler.isSuspended)
+    scheduler.resume(current)
+    #expect(!scheduler.isSuspended)
+    var reads = 0
+    try await scheduler.request("new-connection") { reads += 1 }.value
+    #expect(reads == 1)
+  }
+
   private func submissionModel() -> (AppModel, T3DesktopClient) {
     let client = T3DesktopClient()
     let model = AppModel(restoreLastProjectOnLaunch: false)

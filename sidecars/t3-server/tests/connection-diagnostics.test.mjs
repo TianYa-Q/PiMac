@@ -21,7 +21,7 @@ test('diagnostics retain only bounded summaries and one private rotated log', as
   assert.equal((await readFile(file + '.1', 'utf8')).length, 256 * 1024 + 1);
   assert.ok((await stat(file)).size < 1024);
   assert.equal(connectionRoute('/ws?wsTicket=secret'), '/ws');
-  assert.equal(connectionRoute('/api/orchestration/threads/private-id'), null);
+  assert.equal(connectionRoute('/api/orchestration/threads/private-id'), '/api/orchestration/threads/private-id');
 });
 
 test('detailed connector logs retain exact network errors, separate from UI, with bounded rotation', async t => {
@@ -47,11 +47,31 @@ test('logs do not follow symlinks', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'pimac-log-symlink-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const target = join(directory, 'target'); await writeFile(target, 'untouched', { mode: 0o600 });
-  for (const file of ['tunnel-connector.log', 'connection-diagnostics.log']) await symlink(target, join(directory, file));
+  for (const file of ['tunnel-connector.log', 'connection-diagnostics.log', 'session-diagnostics.log']) await symlink(target, join(directory, file));
   const diagnostics = createConnectionDiagnostics(directory);
   diagnostics.record('tunnel-health', { reason: 'connecting' });
   diagnostics.recordConnectorOutput(123, 'error');
+  diagnostics.recordDetail('http.server.start', { requestId: 'test' });
   assert.equal(await readFile(target, 'utf8'), 'untouched');
+});
+
+test('full session diagnostics preserve payloads and correlate pending and failed requests outside UI summaries', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'pimac-session-log-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const diagnostics = createConnectionDiagnostics(directory);
+  const payload = '原始正文'.repeat(20000);
+  diagnostics.recordDetail('http.server.start', { requestId: 'same-id', headers: { authorization: 'Bearer original' }, payload });
+  diagnostics.recordDetail('http.server.pending', { requestId: 'same-id', elapsedMs: 5000 });
+  diagnostics.recordDetail('http.server.exit', { requestId: 'same-id', cause: 'raw original error', outcome: 'failure' });
+  const file = join(directory, 'session-diagnostics.log');
+  const entries = (await readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(entries.length, 3);
+  assert.equal(entries[0].payload, payload);
+  assert.equal(entries[0].headers.authorization, 'Bearer original');
+  assert.equal(entries[2].cause, 'raw original error');
+  assert(entries.every(entry => entry.requestId === 'same-id'));
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.equal(diagnostics.summary, '');
 });
 
 test('logging failures do not interrupt authentication', () => {

@@ -40,6 +40,182 @@ class DevWatcherTests(unittest.TestCase):
         supervisor.app.poll.return_value = code
         return supervisor
 
+    def startup_bundle(self, dev, inputs=None):
+        contents = dev.root / '.build/Pi Mac Dev.app/Contents'
+        binary = contents / 'MacOS/PiMac'
+        binary.parent.mkdir(parents=True)
+        binary.write_text('published executable')
+        binary.chmod(0o700)
+        resources = contents / 'Resources'
+        (resources / 'PiMac_PiMacApp.bundle').mkdir(parents=True)
+        (resources / 'AppIcon.icns').write_bytes(b'icon')
+        with (contents / 'Info.plist').open('wb') as file:
+            plistlib.dump({'CFBundleIdentifier': 'com.jianfeng.pi-mac.dev',
+                          'CFBundleExecutable': 'PiMac'}, file)
+        if inputs is not None:
+            (resources / 'dev-inputs.json').write_text(json.dumps({'version': 1, 'inputs': inputs}))
+        return binary
+
+    def test_warm_start_reuses_published_bundle_without_build_or_source_scan(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            inputs = ((str(dev.root / 'Package.swift'), 'a' * 64, 10),)
+            binary = self.startup_bundle(dev, inputs)
+            with patch.object(dev, 'build') as build, patch.object(dev, 'snapshot') as scan, \
+                    patch.object(dev, 'publish_artifact') as publish, patch.object(dev, 'status'):
+                self.assertEqual(dev.startup_artifact(), (binary, inputs))
+                build.assert_not_called()
+                scan.assert_not_called()
+                publish.assert_not_called()
+
+    def test_legacy_or_corrupt_fingerprint_starts_but_requires_safe_update(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            binary = self.startup_bundle(dev)
+            manifest = binary.parent.parent / 'Resources/dev-inputs.json'
+            for text in [None, '{broken', '{"version": 2, "inputs": []}',
+                         '{"version": 1, "inputs": [["path"]]}']:
+                if text is not None:
+                    manifest.write_text(text)
+                with self.subTest(text=text), patch.object(dev, 'build') as build, \
+                        patch.object(dev, 'status'):
+                    self.assertEqual(dev.startup_artifact(), (binary, ()))
+                    build.assert_not_called()
+            pending = dev.PendingBuild((), dev.root / 'request', dev.root / 'revision', 123)
+            current = ((str(dev.root / 'Package.swift'), 'b' * 64, 10),)
+            with patch.object(dev, 'snapshot', return_value=current), \
+                    patch.object(dev, 'development_blockers', return_value=[]), \
+                    patch.object(dev, 'app_is_idle', return_value=False), \
+                    patch.object(dev, 'build') as build, patch.object(dev, 'status'):
+                pending.tick(dev.root / 'state')
+                self.assertTrue(pending.dirty)
+                self.assertTrue(pending.request.exists())
+                build.assert_not_called()
+
+    def test_missing_or_incomplete_bundle_requires_successful_build_and_publication(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            staged = dev.root / '.build/Pi Mac Dev Staged.app/Contents/MacOS/PiMac'
+            with patch.object(dev, 'status'), patch.object(dev, 'build', return_value=staged) as build, \
+                    patch.object(dev, 'publish_artifact', return_value=staged) as publish:
+                self.assertEqual(dev.startup_artifact(), (staged, ()))
+                build.assert_called_once()
+                publish.assert_called_once_with(staged)
+            binary = self.startup_bundle(dev)
+            binary.chmod(0o600)
+            with patch.object(dev, 'status'), patch.object(dev, 'build', return_value=None), \
+                    patch.object(dev, 'publish_artifact') as publish:
+                with self.assertRaises(SystemExit):
+                    dev.startup_artifact()
+                publish.assert_not_called()
+            with patch.object(dev, 'status'), patch.object(dev, 'build', return_value=staged), \
+                    patch.object(dev, 'publish_artifact', return_value=None):
+                with self.assertRaises(SystemExit):
+                    dev.startup_artifact()
+
+    def test_watch_launches_before_scanning_and_retains_published_source_identity(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            inputs = ((str(dev.root / 'Package.swift'), 'a' * 64, 10),)
+            binary = self.startup_bundle(dev, inputs)
+            dev.build_log = dev.root / '.build/dev-build.log'
+            dev.app_log = dev.root / '.build/dev-app.log'
+            supervisor = Mock()
+            supervisor.app.pid = 123
+            with patch.object(dev, 'running_apps', return_value=[]), \
+                    patch.object(dev, 'AppSupervisor', return_value=supervisor), \
+                    patch.object(dev, 'PendingBuild') as pending, \
+                    patch.object(dev, 'snapshot') as scan, patch.object(dev, 'build') as build, \
+                    patch.object(dev.time, 'sleep', side_effect=InterruptedError), \
+                    patch.object(dev, 'status'):
+                with self.assertRaises(InterruptedError):
+                    dev.watch(set())
+                supervisor.launch.assert_called_once()
+                self.assertEqual(pending.call_args.args[0], inputs)
+                scan.assert_not_called()
+                build.assert_not_called()
+
+    def server_cache_fixture(self, dev):
+        server = dev.root / 'sidecars/t3-server'
+        (server / 'upstream').mkdir(parents=True)
+        (server / 'node_modules').mkdir()
+        for name in ['server.mjs', 'package.json', 'package-lock.json', 'upstream/source.ts',
+                     'node_modules/.package-lock.json']:
+            (server / name).write_text('{}')
+        (server / 'upstream-pin.json').write_text(json.dumps({'files': {'source.ts': 'pinned'}}))
+        vendor = dev.root / 'Sources/PiMacApp/Resources/t3-bridge/vendor'
+        (vendor / 'node_modules').mkdir(parents=True)
+        for name in ['t3-server.mjs', 'T3-SERVER-LICENSE.txt', 'native-runtime.json',
+                     'node_modules/native.node']:
+            (vendor / name).write_text('generated')
+        return server, vendor
+
+    def test_server_build_cache_skips_npm_for_swift_only_changes(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            self.server_cache_fixture(dev)
+            with patch.object(dev, 'run_build_command', return_value=(0, '')) as command, \
+                    patch.object(dev, 'status'):
+                self.assertTrue(dev.ensure_server_build())
+                self.assertEqual(command.call_count, 1)
+                (dev.root / 'Sources/PiMacApp/View.swift').write_text('new Swift UI')
+                self.assertTrue(dev.ensure_server_build())
+                self.assertEqual(command.call_count, 1)
+
+    def test_server_cache_invalidates_source_dependencies_version_and_corrupted_outputs(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            server, vendor = self.server_cache_fixture(dev)
+            with patch.object(dev, 'run_build_command', return_value=(0, '')) as command, \
+                    patch.object(dev, 'status'):
+                self.assertTrue(dev.ensure_server_build())
+                for path in [server / 'server.mjs', server / 'package-lock.json',
+                             server / 'upstream/source.ts', server / 'node_modules/.package-lock.json',
+                             vendor / 't3-server.mjs', vendor / 'node_modules/native.node']:
+                    with self.subTest(path=path):
+                        before = command.call_count
+                        path.write_text('changed')
+                        self.assertTrue(dev.ensure_server_build())
+                        self.assertEqual(command.call_count, before + 1)
+                        self.assertTrue(dev.ensure_server_build())
+                        self.assertEqual(command.call_count, before + 1)
+                before = command.call_count
+                (server / 'upstream-pin.json').write_text(
+                    json.dumps({'commit': 'new-version', 'files': {'source.ts': 'new-pin'}}))
+                self.assertTrue(dev.ensure_server_build())
+                self.assertEqual(command.call_count, before + 1)
+                (dev.root / '.build/dev-server-build.json').write_text('{corrupt')
+                self.assertTrue(dev.ensure_server_build())
+                self.assertEqual(command.call_count, before + 2)
+                missing = vendor / 'native-runtime.json'
+                missing.rename(vendor / 'retained-native-runtime.json')
+                self.assertFalse(dev.ensure_server_build())
+                self.assertEqual(command.call_count, before + 3)
+
+    def test_failed_or_racing_server_build_never_certifies_cache(self):
+        dev = self.load_dev()
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1] / 'tmp') as directory:
+            dev.root = Path(directory)
+            server, _ = self.server_cache_fixture(dev)
+            receipt = dev.root / '.build/dev-server-build.json'
+            with patch.object(dev, 'run_build_command', return_value=(1, 'failure')), \
+                    patch.object(dev, 'status'):
+                self.assertFalse(dev.ensure_server_build())
+                self.assertFalse(receipt.exists())
+            def changed_during_build(_):
+                (server / 'server.mjs').write_text('concurrent edit')
+                return 0, ''
+            with patch.object(dev, 'run_build_command', side_effect=changed_during_build), \
+                    patch.object(dev, 'status'):
+                self.assertFalse(dev.ensure_server_build())
+                self.assertFalse(receipt.exists())
+
     def test_restart_reaps_old_app_before_launching(self):
         dev = self.load_dev()
         with tempfile.TemporaryDirectory() as directory:
@@ -211,8 +387,12 @@ else:
             icon.parent.mkdir(parents=True)
             icon.write_bytes(b'icon')
             with patch.object(dev, 'run_build_command', return_value=(0, '')) as command:
-                binary = dev.bundle_development_app(binary_dir)
+                inputs = ((str(dev.root / 'Package.swift'), 'a' * 64, 10),)
+                binary = dev.bundle_development_app(binary_dir, inputs=inputs)
                 contents = binary.parent.parent
+                self.assertEqual(
+                    json.loads((contents / 'Resources/dev-inputs.json').read_text()),
+                    {'version': 1, 'inputs': [list(item) for item in inputs]})
                 self.assertEqual(binary.read_text(), 'executable')
                 self.assertTrue(os.access(binary, os.X_OK))
                 with (contents / 'Info.plist').open('rb') as file:

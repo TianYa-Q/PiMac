@@ -25,7 +25,11 @@ final class WorkspaceModel: ObservableObject {
   @Published private(set) var projects: [WorkspaceProject] = []
   @Published private(set) var loadingSessionCatalogs: Set<String> = []
   @Published private(set) var submittingTitleRegenerations: Set<String> = []
-  @Published var selectedTabID: UUID?
+  @Published var selectedTabID: UUID? {
+    didSet {
+      for tab in tabs { tab.model.setConversationVisible(tab.id == selectedTabID) }
+    }
+  }
   @Published private(set) var projectFilterPath: String?
 
   /// Sidebar selection filters the catalog; it never changes the active conversation.
@@ -248,6 +252,9 @@ final class WorkspaceModel: ObservableObject {
       sessionCatalogRevision = server.sessionCatalogRevision
     }
     for tab in tabs {
+      if let id = tab.model.threadID, let thread = server.thread(id) {
+        tab.model.applyBackgroundThreadState(thread)
+      }
       tab.model.refreshCodexAccounts()
       if let project = tab.model.projectURL { tab.model.updateCatalog(sessions(in: project)) }
       if let id = tab.model.threadID, server.thread(id) == nil, !tab.model.isLoadingConfiguration,
@@ -711,6 +718,7 @@ final class WorkspaceModel: ObservableObject {
       // Published 回调先于属性落地；延后读取，覆盖异步绑定到会话的情况。
       Task { @MainActor [weak self] in self?.acknowledgeSelectedCompletion() }
     }
+    model.setConversationVisible(select)
     model.attach(to: server, deliveries: deliveries)
     if persistsDraft, let draftDefaults {
       let sessionPath = path ?? (model.currentSessionPath.isEmpty ? nil : model.currentSessionPath)

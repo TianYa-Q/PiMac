@@ -2565,11 +2565,8 @@ private struct ActivityGroupView: View {
       RoundedRectangle(cornerRadius: 12)
         .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
     }
-    .onAppear {
-      if expansionStore?.values[expansionKey] == nil { expanded = shouldStayExpanded }
-    }
     .onChange(of: shouldStayExpanded) { wasRunning, running in
-      if running { expanded = true }
+      // 过程默认折叠，开始执行时不抢占用户的展开选择；结束后仍自动收起。
       if wasRunning && !running { expanded = false }
     }
   }
@@ -2744,9 +2741,7 @@ private struct ActivityEntryView: View {
     }
     .onAppear {
       if expansionStore?.values[expansionKey] == nil {
-        if entry.kind == .thinking {
-          expanded = true
-        } else if entry.kind == .tool {
+        if entry.kind == .tool {
           expanded = keepToolExpanded && entry.toolName != "bash" && entry.toolName != "read"
         }
       }
