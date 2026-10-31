@@ -8,6 +8,19 @@ struct ConversationTurn: Identifiable, Equatable {
   let htmlRenders: [ChatEntry]
   let activity: [ChatEntry]
   let supplementaryEntries: [ChatEntry]
+  let content: [Content]
+
+  enum Content: Identifiable, Equatable {
+    case activity([ChatEntry])
+    case entry(ChatEntry)
+
+    var id: String {
+      switch self {
+      case .activity(let entries): "activity-\(entries[0].id)"
+      case .entry(let entry): entry.id
+      }
+    }
+  }
 
   init(entries: [ChatEntry]) {
     self.entries = entries
@@ -16,11 +29,26 @@ struct ConversationTurn: Identifiable, Equatable {
     htmlRenders = entries.filter { $0.htmlRender != nil }
     let finalAssistant = entries.last(where: { $0.kind == .assistant && $0.htmlRender == nil })
     self.finalAssistant = finalAssistant
-    activity = entries.filter {
-      $0.kind == .thinking || $0.kind == .tool
-        || ($0.kind == .assistant && $0.htmlRender == nil && $0.id != finalAssistant?.id)
-    }
+    activity = entries.filter { $0.kind == .thinking || $0.kind == .tool }
     supplementaryEntries = entries.filter { $0.kind == .system || $0.kind == .compaction }
+
+    // 普通回复是可见的消息边界，不因后续工具调用或新回复降为推理过程。
+    // 只合并相邻的推理/工具，保留正文、HTML 和通知在原始时间线中的位置。
+    var content: [Content] = []
+    var pendingActivity: [ChatEntry] = []
+    for entry in entries where entry.kind != .user {
+      if entry.htmlRender == nil && (entry.kind == .thinking || entry.kind == .tool) {
+        pendingActivity.append(entry)
+      } else {
+        if !pendingActivity.isEmpty {
+          content.append(.activity(pendingActivity))
+          pendingActivity = []
+        }
+        content.append(.entry(entry))
+      }
+    }
+    if !pendingActivity.isEmpty { content.append(.activity(pendingActivity)) }
+    self.content = content
   }
 
   static func group(_ messages: [ChatEntry]) -> [ConversationTurn] {

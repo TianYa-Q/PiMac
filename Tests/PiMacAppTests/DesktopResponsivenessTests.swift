@@ -338,7 +338,7 @@ struct DesktopResponsivenessTests {
         ]
       ]
     ]
-    let (_, complete) = await client.hydrateToolImages(
+    let (_, complete, _) = await client.hydrateToolImages(
       snapshot, threadID: "thread", base: URL(string: "http://127.0.0.1:9999")!,
       performRPC: { _, _ in
         Issue.record("缓存阶段不能发起 RPC")
@@ -350,7 +350,7 @@ struct DesktopResponsivenessTests {
       }, cachedOnly: true)
     #expect(!complete)
     var calls = 0
-    let (_, hydrated) = await client.hydrateToolImages(
+    let (_, hydrated, _) = await client.hydrateToolImages(
       snapshot, threadID: "thread", base: URL(string: "http://127.0.0.1:9999")!,
       performRPC: { _, _ in
         calls += 1
@@ -358,7 +358,7 @@ struct DesktopResponsivenessTests {
       }, loadHTML: { _ in "" })
     #expect(hydrated)
     #expect(calls == 1)
-    let (_, cached) = await client.hydrateToolImages(
+    let (_, cached, _) = await client.hydrateToolImages(
       snapshot, threadID: "thread", base: URL(string: "http://127.0.0.1:9999")!,
       performRPC: { _, _ in
         Issue.record("完整缓存不能重复读取")

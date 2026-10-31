@@ -81,6 +81,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   private var presentedThreadSequences: [String: Int] = [:]
   private var hasShellSubscription = false
   private var projectCreations: [String: Task<String, Error>] = [:]
+  private let projectCommands = T3StreamReducer(kind: .shell)
   private var imageCache: [String: PromptAttachment] = [:]
   private var replyImageCache: [String: [PromptAttachment]] = [:]
   private var toolDetailCache: [String: JSON] = [:]
@@ -151,7 +152,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   }
   private var syncedDefaultModelPreference: Data?
   // 分开连接池：即使下载占满连接，列表、凭据和命令仍有独立的网络通道。
-  private let session = T3DesktopClient.makeSession(maxConnections: 4)
+  private let session: URLSession
   private let threadSession: URLSession
   private let assetSession = T3DesktopClient.makeSession(maxConnections: 4)
   // 可用性检查不与配置 RPC、长时间运行的命令或附件争抢连接。
@@ -172,6 +173,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     defaults: UserDefaults = .standard,
     connectionSession: URLSession? = nil,
     threadSession: URLSession? = nil,
+    session: URLSession? = nil,
     rpcConnectionFactory: @escaping @MainActor (URLSession, URL) -> any T3RPCConnection = {
       T3WebSocketConnection(session: $0, url: $1)
     },
@@ -180,6 +182,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   ) {
     self.defaults = defaults
     self.rpcConnectionFactory = rpcConnectionFactory
+    self.session = session ?? Self.makeSession(maxConnections: 4)
     self.threadSession = threadSession ?? Self.makeSession(maxConnections: 4)
     conversationCache = ConversationPresentationCache(defaults: defaults)
     let connectionConfiguration = URLSessionConfiguration.ephemeral
@@ -319,6 +322,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     connectionCheckRevision = revision
     if serverURL != connectedServerURL {
       rpcSession.close()
+      hasShellSubscription = false
       configurationMetadata?.cancel()
       providerCatalogs = [:]
       serverDefaultModelSelection = nil
@@ -749,40 +753,73 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   }
 
   func ensureProject(_ url: URL) async throws -> String {
-    let root = url.standardizedFileURL
-    let path = root.path
-    if let pending = projectCreations[path] { return try await pending.value }
+    try Task.checkCancellation()
+    let path = url.standardizedFileURL.path
+    if let pending = projectCreations[path] {
+      let id = try await pending.value
+      try Task.checkCancellation()
+      return id
+    }
     let current = generation
     let task = Task<String, Error> {
       try await self.waitUntilReady()
-      // 先读权威列表，避免启动缓存将已删除项目误判为存在；同目录并发请求共享本次任务。
-      try await self.refreshShell()
-      if let id = self.projectID(for: root) { return id }
-      // 删除后的项目 ID 是服务端墓碑；新的添加操作不能复用旧身份或旧命令回执。
-      let id = UUID().uuidString
-      try await self.dispatch(
-        [
-          "type": "project.create", "projectId": id,
-          "title": root.lastPathComponent, "workspaceRoot": path,
-        ], refreshAfter: false)
-      try await self.refreshShell()
-      guard let confirmedID = self.projectID(for: root) else { throw ClientError.rejected }
-      guard confirmedID == id else { throw ClientError.rejected }
-      return confirmedID
+      guard let serverURL = self.connectedServerURL else { throw ClientError.unavailable }
+      // 只使用本连接的权威订阅状态，不信任启动磁盘缓存，也不在发送前另拉完整列表。
+      try await self.waitForProjectShell(
+        projectID: nil, generation: current, serverURL: serverURL)
+      let input = ImmutableJSONSnapshot(value: [
+        "projects": self.projects, "workspaceRoot": path,
+        "projectId": UUID().uuidString, "commandId": UUID().uuidString,
+      ])
+      let prepared = try await self.projectCommands.prepareProject(input).value
+      try Task.checkCancellation()
+      guard self.generation == current, self.connectedServerURL == serverURL,
+        self.hasShellSubscription, let id = prepared["projectId"] as? String
+      else { throw ClientError.unavailable }
+      if let command = prepared["command"] as? JSON {
+        guard let commandID = command["commandId"] as? String else {
+          throw ClientError.rejected
+        }
+        try await self.dispatch(command, commandID: commandID, refreshAfter: false)
+        // 官方客户端等待项目进入 store 后再继续；原生宿主由同一 shell 流确认。
+        try await self.waitForProjectShell(
+          projectID: id, generation: current, serverURL: serverURL)
+      }
+      return id
     }
     projectCreations[path] = task
     defer {
       if generation == current { projectCreations.removeValue(forKey: path) }
     }
-    return try await task.value
+    let id = try await task.value
+    try Task.checkCancellation()
+    return id
+  }
+
+  private func waitForProjectShell(
+    projectID: String?, generation current: UUID, serverURL: URL
+  ) async throws {
+    let deadline = ContinuousClock.now + .seconds(10)
+    while true {
+      try Task.checkCancellation()
+      guard generation == current, connectedServerURL == serverURL else {
+        throw CancellationError()
+      }
+      if isConnected, hasShellSubscription,
+        projectID == nil || projects.contains(where: { $0["id"] as? String == projectID })
+      {
+        return
+      }
+      guard ContinuousClock.now < deadline else { throw ClientError.unavailable }
+      try await Task.sleep(for: .milliseconds(30))
+    }
   }
 
   func refresh() async throws {
     try await refreshShell()
     let tasks = requestThreadRefreshes(forceHTTP: true)
-    // 显式刷新仍等待本次会话读取；日常轮询和命令回执只等待列表，不等图片。
+    // 等待权威正文即可；资源失败会持续退避，不能把显式刷新挂在后台重试队列上。
     for task in tasks { try await task.value }
-    try await assetRefreshes.waitForCurrent()
   }
 
   @discardableResult
@@ -884,7 +921,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     guard let base = service?.serverURL else { return }
     // 先用现有缓存发布正文、队列和交互状态；首次下载不得阻塞这些轻量更新。
     // 缓存路径复用完整水合逻辑，避免新快照使已显示的图片和工具输出闪回占位。
-    let (cachedNative, cachedToolsComplete) = await hydrateToolImages(
+    let (cachedNative, cachedToolsComplete, _) = await hydrateToolImages(
       nativeDetail, threadID: id, base: base,
       performRPC: { try await self.rpc($0, payload: $1) },
       loadHTML: { try await self.htmlRenderDocument($0) }, cachedOnly: true)
@@ -907,6 +944,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     let cachedComplete = cachedToolsComplete && cachedRepliesComplete && cachedImagesComplete
     if let sequence { presentedThreadSequences[id] = sequence }
     let ui = T3V2Presentation.requests(nativeDetail)
+    let replacesAssetSnapshot = observers.values.contains { $0.latestSnapshot != fingerprint }
     for (owner, observer) in observers where watches[owner] === observer && observer.isVisible {
       observer.receiveUI(ui)
       observer.deliver(immediate, fingerprint: fingerprint, complete: cachedComplete)
@@ -917,6 +955,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
         "threadID": id, "complete": cachedComplete,
         "elapsedSeconds": Date().timeIntervalSince(started),
       ])
+    if replacesAssetSnapshot { assetRefreshes.cancel(id) }
     if cachedComplete { return }
     assetRefreshes.request(id) {
       await self.refreshAssets(
@@ -929,21 +968,35 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     observers: [UUID: ThreadWatch]
   ) async {
     let current = generation
-    let (richNative, toolsComplete) = await hydrateToolImages(
-      nativeDetail, threadID: id, base: base,
-      performRPC: { try await self.rpc($0, payload: $1) },
-      loadHTML: { try await self.htmlRenderDocument($0) })
-    guard let detail = try? await ImmutableJSONSnapshot(value: richNative).presentedThread().value,
-      generation == current, !Task.isCancelled
-    else { return }
-    let (withReplies, repliesComplete) = await hydrateReplyImages(detail, threadID: id)
-    let (hydrated, complete) = await hydrateImages(withReplies)
-    guard generation == current, !Task.isCancelled else { return }
-    // 下载途中可能已经发布更新的正文；旧资源只能进入缓存，不能覆盖新快照。
-    for (owner, observer) in observers where watches[owner] === observer && observer.isVisible {
-      observer.deliverAssets(
-        hydrated, fingerprint: fingerprint,
-        complete: complete && repliesComplete && toolsComplete)
+    // 完成会话不再产生增量事件，资源必须自行续批，不能依赖下一次正文刷新。
+    // 每批仍保留读取预算；失败使用具体资源的退避时间，不重新读取会话历史。
+    while generation == current, !Task.isCancelled,
+      observers.contains(where: {
+        watches[$0.key] === $0.value && $0.value.isVisible
+          && $0.value.latestSnapshot == fingerprint
+      })
+    {
+      let (richNative, toolsComplete, retryAt) = await hydrateToolImages(
+        nativeDetail, threadID: id, base: base,
+        performRPC: { try await self.rpc($0, payload: $1) },
+        loadHTML: { try await self.htmlRenderDocument($0) })
+      guard
+        let detail = try? await ImmutableJSONSnapshot(value: richNative).presentedThread().value,
+        generation == current, !Task.isCancelled
+      else { return }
+      let (withReplies, repliesComplete) = await hydrateReplyImages(detail, threadID: id)
+      let (hydrated, imagesComplete) = await hydrateImages(withReplies)
+      guard generation == current, !Task.isCancelled else { return }
+      let complete = toolsComplete && repliesComplete && imagesComplete
+      // 旧资源可进入缓存，但不能覆盖新正文，也不能确认已取消/重新建立的观察者。
+      for (owner, observer) in observers where watches[owner] === observer && observer.isVisible {
+        observer.deliverAssets(hydrated, fingerprint: fingerprint, complete: complete)
+      }
+      if complete { return }
+      let delay =
+        repliesComplete && imagesComplete
+        ? max(0.15, retryAt?.timeIntervalSinceNow ?? 0.15) : 0.15
+      do { try await Task.sleep(for: .seconds(delay)) } catch { return }
     }
   }
   // Do not invalidate the entire desktop or rewrite its cache on identical events.
@@ -1497,13 +1550,18 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     performRPC: (String, JSON) async throws -> JSON,
     loadHTML: (T3HTMLRender) async throws -> String,
     cachedOnly: Bool = false
-  ) async -> (JSON, Bool) {
+  ) async -> (JSON, Bool, Date?) {
     var native = native
     guard var projection = native["projection"] as? JSON,
       var rows = projection["visibleTurnItems"] as? [JSON]
-    else { return (native, true) }
+    else { return (native, true, nil) }
     let current = generation
     var complete = true
+    var nextRetryAt: Date?
+    func pending(until date: Date) {
+      complete = false
+      nextRetryAt = min(nextRetryAt ?? date, date)
+    }
     var reads = 0
     var downloads = 0
     let scope = "\(base.absoluteString)|\(threadID)"
@@ -1518,6 +1576,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       }.map { ($0 + 1) % rows.count } ?? 0
     let indices = Array(rows.indices.dropFirst(start)) + Array(rows.indices.prefix(start))
     itemLoop: for index in indices {
+      guard generation == current, !Task.isCancelled else { return (native, false, nil) }
       guard var item = rows[index]["item"] as? JSON,
         (item["type"] as? String == "dynamic_tool"
           && (!T3V2Presentation.active.contains(item["status"] as? String ?? "")
@@ -1534,12 +1593,12 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
         rows[index]["item"] = cached
         guard let retryAfter = htmlRetryAfter[key] else { continue }
         if retryAfter > Date() {
-          complete = false
+          pending(until: retryAfter)
           continue
         }
       }
       guard !cachedOnly, reads < 8 else {
-        complete = false
+        pending(until: Date())
         continue
       }
       reads += 1
@@ -1566,6 +1625,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
           guard let fetched = response["item"] as? JSON else { throw ClientError.rejected }
           detail = fetched
         }
+        guard generation == current, !Task.isCancelled else { return (native, false, nil) }
         // 已标记省略的输出必须从详情取回，不能把读取失败缓存成合法空输出。
         if item["outputOmitted"] as? Bool == true,
           detail["output"] == nil || detail["output"] is NSNull
@@ -1594,7 +1654,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
             continue
           }
           guard downloads < 8 else {
-            complete = false
+            pending(until: Date())
             item["localImages"] = images
             rows[index]["item"] = item
             continue itemLoop
@@ -1609,42 +1669,43 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
               ]
             ])
           let image = try await downloadReplyImage(signed, key: imageKey, mime: mime)
-          guard generation == current else { return (native, false) }
+          guard generation == current, !Task.isCancelled else { return (native, false, nil) }
           imageCache[imageKey] = image
           images.append(image)
         }
         item["localImages"] = images
       } catch {
+        guard generation == current, !Task.isCancelled else { return (native, false, nil) }
         item["localImages"] = images
         let attempts = (imageFailures[key] ?? 0) + 1
         imageFailures[key] = attempts
-        guard generation == current, !Task.isCancelled else { return (native, false) }
         if isHTML || item["outputOmitted"] as? Bool == true {
           // 详情失败不能提交 revision，否则当前打开会话永远不会恢复。
-          // 前三次随正常轮询重试，之后降频；每轮读取预算仍限制为八条。
-          complete = false
+          // 前三次随资源续批重试，之后退避十秒；每批读取预算仍限制为八条。
           if item["htmlRender"] is T3HTMLRender, attempts >= 3 {
             item["htmlRenderError"] = "HTML 页面加载失败"
           }
-          htmlRetryAfter[key] = Date().addingTimeInterval(attempts < 3 ? 0 : 10)
+          let retryAt = Date().addingTimeInterval(attempts < 3 ? 0 : 10)
+          htmlRetryAfter[key] = retryAt
+          pending(until: retryAt)
           toolDetailCache[key] = item
           rows[index]["item"] = item
           continue
         }
         if attempts < 3 {
-          complete = false
+          pending(until: Date())
           rows[index]["item"] = item
           continue
         }
       }
-      guard generation == current else { return (native, false) }
+      guard generation == current, !Task.isCancelled else { return (native, false, nil) }
       htmlRetryAfter.removeValue(forKey: key)
       toolDetailCache[key] = item
       rows[index]["item"] = item
     }
     projection["visibleTurnItems"] = rows
     native["projection"] = projection
-    return (native, complete)
+    return (native, complete, nextRetryAt)
   }
 
   /// Reply file links use the same official media assets as the iOS client.

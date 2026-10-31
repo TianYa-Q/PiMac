@@ -80,7 +80,10 @@ if (process.argv.includes('--check')) {
   const ts = await import('typescript');
   const paths: Record<string, string[]> = {
     effect: ['sidecars/t3-server/node_modules/effect/dist/index.d.ts'],
-    'effect/*': ['sidecars/t3-server/node_modules/effect/dist/*.d.ts'],
+    'effect/*': [
+      'sidecars/t3-server/node_modules/effect/dist/*.d.ts',
+      'sidecars/t3-server/node_modules/effect/dist/*/index.d.ts',
+    ],
     '*': ['sidecars/t3-server/node_modules/*', 'node_modules/*'],
   };
   for (const directory of await readdir(path.join(upstream, 'packages'), { withFileTypes: true })) {

@@ -180,6 +180,41 @@ struct T3SubscriptionIntegrationTests {
     client.unwatch(owner: secondOwner)
     let lastRequest = try #require(capture.subscriptions(second).last?["id"] as? String)
     try await wait { capture.interrupts.contains(lastRequest) }
+
+    // 已完成的历史会话没有后续正文事件：HTML 超过首批八条详情仍必须自行加载。
+    let resources = UUID().uuidString
+    try await client.dispatch([
+      "type": "thread.create", "threadId": resources, "projectId": projectID,
+      "title": "HTML batches",
+      "modelSelection": ["instanceId": "pi", "model": "test/model"],
+      "runtimeMode": "full-access", "interactionMode": "default", "branch": NSNull(),
+      "worktreePath": NSNull(),
+    ])
+    for prompt in ["tools-many", "html-render"] {
+      let previousRun = client.thread(resources)?["latestRunId"] as? String
+      try await send(resources, prompt)
+      try await wait {
+        let thread = client.thread(resources)
+        return thread?["latestRunId"] as? String != previousRun
+          && thread?["status"] as? String == "completed"
+      }
+    }
+    try await Task.sleep(for: .milliseconds(300))
+    let resourceOwner = UUID()
+    var htmlDocument: String?
+    client.watch(resources, owner: resourceOwner) { detail in
+      let messages = (detail["thread"] as? [String: Any])?["messages"] as? [[String: Any]] ?? []
+      htmlDocument = messages.compactMap { $0["htmlDocument"] as? String }.first
+    }
+    try await wait { htmlDocument?.contains("侧栏前后对比") == true }
+    #expect(capture.subscriptions(resources).count == 1)
+    #expect(
+      capture.requests.filter {
+        $0["tag"] as? String == "orchestration.getTurnItem"
+          && ($0["payload"] as? [String: Any])?["threadId"] as? String == resources
+      }.count > 8)
+    #expect(RecordingHTTP.lock.withLock { RecordingHTTP.paths.isEmpty })
+    client.unwatch(owner: resourceOwner)
   }
 
   private func wait(

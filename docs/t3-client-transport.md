@@ -40,6 +40,31 @@ rather than Electron's bootstrap channel. Public authentication, scopes and
 command readiness remain upstream-owned. Thread polling and media transport are
 separate concerns and are not replaced by this change.
 
+## Project preparation
+
+New-session project preparation imports the pinned official `findProjectByPath`
+(`state/projects.ts`) and `buildProjectCreateCommand` (`operations/projects.ts`)
+into `sidecars/t3-client-state/index.ts`. JavaScriptCore executes these functions;
+Swift does not copy their path normalization or project mutation construction.
+This is direct reuse of those pure functions, not the complete Effect/Atom command
+scheduler or the official UI.
+
+`ensureProject` waits for this connection's live shell subscription, passes its
+projects to the official lookup, and returns an existing ID without a shell HTTP
+read. Missing projects use the official create command through `projects.mutate`,
+then wait (bounded to ten seconds) for the same shell stream to publish the ID.
+Same-directory callers share preparation. Disk cache alone, stream failure,
+environment changes and malformed inputs cannot authorize a stale project or be
+interpreted as an empty project list. Swift retains only transport, cancellation
+and host lifecycle handling; message outbox command freezing/recovery is unchanged.
+
+`T3ProjectCommandReuseTests` exercises the actual bundled official functions and
+invalid-input recovery. `T3ProjectCommandIntegrationTests` uses an isolated real
+Server with shell HTTP deliberately failing after startup: existing/new projects,
+concurrent same-directory preparation, first-message completion, and deletion /
+re-add all work through mutations and live subscriptions with zero shell HTTP
+attempts. This does not establish timing in the running user's app.
+
 ## Session readiness and Stop
 
 Opening an existing session validates its project against the authenticated live

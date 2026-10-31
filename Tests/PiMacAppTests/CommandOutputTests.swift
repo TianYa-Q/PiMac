@@ -35,7 +35,7 @@ struct CommandOutputTests {
       ]
       var reads = 0
       for _ in 0..<2 {
-        let (hydrated, complete) = await client.hydrateToolImages(
+        let (hydrated, complete, _) = await client.hydrateToolImages(
           native, threadID: "thread", base: base,
           performRPC: { method, payload in
             #expect(method == "orchestration.getTurnItem")
@@ -72,7 +72,7 @@ struct CommandOutputTests {
       "toolName": "bash", "input": ["command": "printf fixture"],
       "updatedAt": "revision", "status": status, "outputOmitted": true,
     ]
-    let (hydrated, complete) = await client.hydrateToolImages(
+    let (hydrated, complete, _) = await client.hydrateToolImages(
       ["projection": ["thread": ["id": "thread"], "visibleTurnItems": [["item": item]]]],
       threadID: "thread", base: URL(string: "http://localhost:12345")!,
       performRPC: { _, _ in
@@ -109,7 +109,7 @@ struct CommandOutputTests {
         ]
       }
       var reads = 0
-      let (hydrated, complete) = await client.hydrateToolImages(
+      let (hydrated, complete, _) = await client.hydrateToolImages(
         [
           "projection": [
             "thread": ["id": "thread"], "visibleTurnItems": items.map { ["item": $0] },
@@ -154,7 +154,7 @@ struct CommandOutputTests {
         return item
       }
       var fetchedOwners = Set<String>()
-      let (hydrated, complete) = await client.hydrateToolImages(
+      let (hydrated, complete, _) = await client.hydrateToolImages(
         ["projection": ["visibleTurnItems": revisedItems.map { ["item": $0] }]],
         threadID: thread, base: URL(string: "http://localhost:\(port)")!,
         performRPC: { _, payload in
@@ -189,7 +189,7 @@ struct CommandOutputTests {
       "projection": ["thread": ["id": "thread"], "visibleTurnItems": [["item": item]]]
     ]
     for attempt in 0..<3 {
-      let (_, complete) = await client.hydrateToolImages(
+      let (_, complete, _) = await client.hydrateToolImages(
         native, threadID: "thread", base: URL(string: "http://localhost:12345")!,
         performRPC: { _, _ in
           if attempt == 0 { throw T3DesktopClient.ClientError.rejected }

@@ -1,7 +1,26 @@
-import { OrchestrationV2RpcSchemas } from '@t3tools/contracts';
+import { CommandId, OrchestrationV2RpcSchemas, ProjectId } from '@t3tools/contracts';
 import * as Schema from 'effect/Schema';
 import { applyOrchestrationV2ProjectionEvent } from '../../third_party/t3code/packages/client-runtime/src/state/orchestrationV2Projection.ts';
 import { applyShellStreamEvent, mergeShellSnapshotProjects } from '../../third_party/t3code/packages/client-runtime/src/state/shellReducer.ts';
+
+import { findProjectByPath } from '../../third_party/t3code/packages/client-runtime/src/state/projects.ts';
+import { buildProjectCreateCommand } from '../../third_party/t3code/packages/client-runtime/src/operations/projects.ts';
+
+const decodeProjectPreparation = Schema.decodeUnknownSync(Schema.Struct({
+  projects: Schema.Array(Schema.Struct({ id: ProjectId, workspaceRoot: Schema.String })),
+  workspaceRoot: Schema.String,
+  projectId: ProjectId,
+  commandId: CommandId,
+}));
+
+/** 项目决策直接调用官方函数；宿主只提供当前环境的订阅状态与一次性命令身份。 */
+export function prepareProject(json: string): string {
+  const input = decodeProjectPreparation(JSON.parse(json));
+  const existing = findProjectByPath(input.projects, input.workspaceRoot);
+  return JSON.stringify(existing
+    ? { projectId: existing.id }
+    : { projectId: input.projectId, command: buildProjectCreateCommand(input) });
+}
 
 type Kind = 'shell' | 'thread';
 type Shell = typeof OrchestrationV2RpcSchemas.subscribeShell.output.Type;

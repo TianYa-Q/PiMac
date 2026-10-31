@@ -42,7 +42,7 @@ struct ReplyAndDraftRegressionTests {
     #expect(model.conversationTurns.last?.activity.first?.toolName == "read")
   }
 
-  @Test func sameRunProgressStillFoldsWithoutHidingItsFinalReply() {
+  @Test func sameRunProgressStaysVisibleAlongsideItsFinalReply() {
     let progress = ChatEntry(
       id: "progress", kind: .assistant, title: "Pi", text: "正在检查", runID: "run")
     let thinking = ChatEntry(
@@ -51,8 +51,9 @@ struct ReplyAndDraftRegressionTests {
       id: "final", kind: .assistant, title: "Pi", text: "已完成", runID: "run")
     let turns = ConversationTurn.group([progress, thinking, final])
     #expect(turns.count == 1)
-    #expect(turns.first?.activity == [progress, thinking])
+    #expect(turns.first?.activity == [thinking])
     #expect(turns.first?.finalAssistant == final)
+    #expect(turns.first?.content == [.entry(progress), .activity([thinking]), .entry(final)])
   }
 
   @Test func clearedLegacyDraftDoesNotReappearBeforeConnection() throws {

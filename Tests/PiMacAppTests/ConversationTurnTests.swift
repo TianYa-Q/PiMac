@@ -108,6 +108,37 @@ struct ConversationTurnTests {
     #expect(ConversationTurn.group([error]).first?.supplementaryEntries == [error])
   }
 
+  @Test func onlyConsecutiveReasoningAndToolsCollapseAroundVisibleReplies() {
+    let user = ChatEntry(id: "user", kind: .user, title: "你", text: "继续")
+    let thinking = ChatEntry(id: "thinking", kind: .thinking, title: "思考", text: "推理")
+    let tool = ChatEntry(id: "tool", kind: .tool, title: "read", text: "内容")
+    let progress = ChatEntry(id: "progress", kind: .assistant, title: "Pi", text: "当前进度")
+    let failed = ChatEntry(
+      id: "failed", kind: .tool, title: "bash", text: "失败", isError: true)
+    let final = ChatEntry(id: "final", kind: .assistant, title: "Pi", text: "检查完成")
+    let running = ChatEntry(
+      id: "running", kind: .tool, title: "bash", text: "检查中", isRunning: true)
+    let entries = [user, thinking, tool, progress, failed, final, running]
+    let turn = ConversationTurn(entries: entries)
+    #expect(
+      turn.content == [
+        .activity([thinking, tool]), .entry(progress), .activity([failed]),
+        .entry(final), .activity([running]),
+      ])
+    #expect(turn.activity == [thinking, tool, failed, running])
+    #expect(turn.entries == entries)
+    // 流式追加新回复、完成工具时，已有正文与折叠组身份保持稳定。
+    var completed = entries
+    completed[6].isRunning = false
+    let reply = ChatEntry(id: "reply", kind: .assistant, title: "Pi", text: "全部完成")
+    let updated = ConversationTurn(entries: completed + [reply])
+    #expect(
+      Array(updated.content.map(\.id).prefix(turn.content.count)) == turn.content.map(\.id))
+    #expect(updated.content.last == .entry(reply))
+    #expect(
+      ConversationTurn(entries: [progress, final]).content == [.entry(progress), .entry(final)])
+  }
+
   @Test func preservesOtherMessages() {
     let prompt = ChatEntry(id: "prompt", kind: .user, title: "你", text: "解释 /accounts")
     let reply = ChatEntry(id: "reply", kind: .assistant, title: "Pi", text: "/accounts")

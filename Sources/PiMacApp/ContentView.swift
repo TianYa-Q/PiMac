@@ -2408,30 +2408,25 @@ struct ConversationTurnView: View, Equatable {
           .equatable()
           .id(user.id)
       }
-      if !turn.activity.isEmpty {
-        ActivityGroupView(entries: turn.activity, taskIsRunning: isActive)
-      }
-      ForEach(turn.htmlRenders) { entry in
-        if let reference = entry.htmlRender {
-          HTMLRenderView(
-            reference: reference, document: entry.htmlDocument, failure: entry.htmlRenderError
-          )
-          .id(entry.id)
-        }
-      }
-      if let assistant = turn.finalAssistant {
-        ChatEntryView(entry: assistant)
-          .equatable()
-          .id(assistant.id)
-      }
-      ForEach(turn.supplementaryEntries) { entry in
-        if entry.kind == .compaction {
-          CompactionEntryView(entry: entry)
+      ForEach(turn.content) { content in
+        switch content {
+        case .activity(let entries):
+          ActivityGroupView(
+            entries: entries, taskIsRunning: isActive && content.id == turn.content.last?.id)
+        case .entry(let entry):
+          if let reference = entry.htmlRender {
+            HTMLRenderView(
+              reference: reference, document: entry.htmlDocument, failure: entry.htmlRenderError
+            )
             .id(entry.id)
-        } else {
-          ChatEntryView(entry: entry)
-            .equatable()
-            .id(entry.id)
+          } else if entry.kind == .compaction {
+            CompactionEntryView(entry: entry)
+              .id(entry.id)
+          } else {
+            ChatEntryView(entry: entry)
+              .equatable()
+              .id(entry.id)
+          }
         }
       }
     }

@@ -214,6 +214,16 @@ process.stdin.on('data', chunk => {
             { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jL1cAAAAASUVORK5CYII=' },
           ] }, isError: false });
         }
+        if (command.message === 'tools-many') {
+          // 同一回合产生超过一批的独立工具，验证资源续读不依赖后续正文事件。
+          for (let index = 0; index < 9; index++) {
+            const toolCallId = `batch-read-${index}`;
+            send({ type: 'tool_execution_start', toolCallId, toolName: 'read', args: { path: `fixture-${index}.txt` } });
+            send({ type: 'tool_execution_end', toolCallId, toolName: 'read', result: {
+              content: [{ type: 'text', text: `fixture output ${index}` }]
+            }, isError: false });
+          }
+        }
         if (command.message === 'tools') {
           send({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'fixture.txt' } });
           send({ type: 'tool_execution_update', toolCallId: 'tool-1', toolName: 'read', partialResult: { content: [{ type: 'text', text: 'partial' }] } });

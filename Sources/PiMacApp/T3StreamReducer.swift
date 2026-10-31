@@ -1,7 +1,7 @@
 import Foundation
 import JavaScriptCore
 
-/// JavaScriptCore 只运行固定资源中的官方纯 reducer，不执行会话文字或工具代码。
+/// JavaScriptCore 只运行固定资源中的官方纯客户端逻辑，不执行会话文字或工具代码。
 /// 放在独立 actor 上，避免协议解码、投影合并和历史序列化阻塞主线程。
 actor T3StreamReducer {
   enum Kind: String { case shell, thread }
@@ -72,6 +72,20 @@ actor T3StreamReducer {
     let result = state.invokeMethod("apply", withArguments: [String(decoding: data, as: UTF8.self)])
     guard context.exception == nil, let result, result.isBoolean else { throw Failure.invalidFrame }
     return result.toBool()
+  }
+
+  func prepareProject(_ input: ImmutableJSONSnapshot) throws -> ImmutableJSONSnapshot {
+    let runtime = try runtime()
+    let context = runtime.context
+    let data = try JSONSerialization.data(withJSONObject: input.value)
+    context.exception = nil
+    guard
+      let text = context.objectForKeyedSubscript("T3NativeState")?.invokeMethod(
+        "prepareProject", withArguments: [String(decoding: data, as: UTF8.self)])?.toString(),
+      context.exception == nil,
+      let value = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+    else { throw Failure.invalidFrame }
+    return ImmutableJSONSnapshot(value: value)
   }
 
   func snapshot() throws -> ImmutableJSONSnapshot {
