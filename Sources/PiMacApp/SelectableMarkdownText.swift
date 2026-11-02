@@ -6,12 +6,14 @@ import SwiftUI
 struct SelectableMarkdownText: NSViewRepresentable {
   let blocks: [MarkdownBlock]
   let textStyle: NSFont.TextStyle
+  @Environment(\.openURL) private var openURL
 
   func makeNSView(context: Context) -> MarkdownTextView {
     MarkdownTextView()
   }
 
   func updateNSView(_ view: MarkdownTextView, context: Context) {
+    view.openLink = { openURL($0) }
     view.setContent(blocks: blocks, textStyle: textStyle)
   }
 
@@ -23,7 +25,8 @@ struct SelectableMarkdownText: NSViewRepresentable {
   }
 }
 
-final class MarkdownTextView: NSTextView {
+final class MarkdownTextView: NSTextView, NSTextViewDelegate {
+  var openLink: ((URL) -> Void)?
   private var renderedBlocks: [MarkdownBlock]?
   private var renderedStyle: NSFont.TextStyle?
   private var measuredSizes: [CGFloat: CGSize] = [:]
@@ -38,6 +41,7 @@ final class MarkdownTextView: NSTextView {
     container.widthTracksTextView = true
     container.heightTracksTextView = false
     super.init(frame: .zero, textContainer: container)
+    delegate = self
     isEditable = false
     isSelectable = true
     isRichText = true
@@ -51,6 +55,15 @@ final class MarkdownTextView: NSTextView {
   }
 
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+    guard let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)),
+      let openLink
+    else { return false }
+    // NSTextView 不会继承 SwiftUI 的链接行为，必须显式转接，否则相对路径会落入 Launch Services。
+    openLink(url)
+    return true
+  }
 
   func setContent(blocks: [MarkdownBlock], textStyle: NSFont.TextStyle) {
     // 流式尾部或滚动触发父视图更新时，已完成正文不再重建整份富文本。

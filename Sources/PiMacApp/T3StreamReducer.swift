@@ -5,6 +5,7 @@ import JavaScriptCore
 /// 放在独立 actor 上，避免协议解码、投影合并和历史序列化阻塞主线程。
 actor T3StreamReducer {
   enum Kind: String { case shell, thread }
+  enum Preparation: String { case prepareProject, prepareReplyDocument }
   enum Failure: Error { case missingResource, invalidRuntime, invalidFrame }
   private struct Runtime {
     let context: JSContext
@@ -74,14 +75,16 @@ actor T3StreamReducer {
     return result.toBool()
   }
 
-  func prepareProject(_ input: ImmutableJSONSnapshot) throws -> ImmutableJSONSnapshot {
+  func prepare(_ operation: Preparation, input: ImmutableJSONSnapshot) throws
+    -> ImmutableJSONSnapshot
+  {
     let runtime = try runtime()
     let context = runtime.context
     let data = try JSONSerialization.data(withJSONObject: input.value)
     context.exception = nil
     guard
       let text = context.objectForKeyedSubscript("T3NativeState")?.invokeMethod(
-        "prepareProject", withArguments: [String(decoding: data, as: UTF8.self)])?.toString(),
+        operation.rawValue, withArguments: [String(decoding: data, as: UTF8.self)])?.toString(),
       context.exception == nil,
       let value = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
     else { throw Failure.invalidFrame }

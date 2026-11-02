@@ -234,7 +234,7 @@ struct ContentView: View {
     .environment(
       \.openURL,
       OpenURLAction { url in
-        if T3ReplyDocumentLinks.path(for: url) != nil {
+        if T3ReplyImageLinks.path(for: url) == nil, T3ReplyDocumentLinks.href(for: url) != nil {
           Task { @MainActor in
             do {
               let documentURL = try await app.replyDocumentURL(for: url)

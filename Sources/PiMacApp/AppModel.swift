@@ -1337,10 +1337,10 @@ final class AppModel: ObservableObject {
   }
   func editMessage(_ text: String) { composerText = text }
   func replyDocumentURL(for url: URL) async throws -> URL {
-    guard let path = T3ReplyDocumentLinks.path(for: url), let id = threadID, let server else {
+    guard let href = T3ReplyDocumentLinks.href(for: url), let id = threadID, let server else {
       throw T3DesktopClient.ClientError.rejected
     }
-    let signed = try await server.replyDocumentURL(path: path, threadID: id)
+    let signed = try await server.replyDocumentURL(href: href, threadID: id)
     guard threadID == id else { throw CancellationError() }
     if let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?
       .percentEncodedFragment

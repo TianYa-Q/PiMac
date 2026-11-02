@@ -1,19 +1,17 @@
 import Foundation
 
-/// Documents are resolved by the server in the thread's workspace, not by Launch Services.
+/// 只适配原生 URL；路径解析、编码和文件类型由固定版本的 T3 Code 客户端模块处理。
 enum T3ReplyDocumentLinks {
-  static func path(for url: URL) -> String? {
+  static func href(for url: URL) -> String? {
     guard url.host == nil || url.host == "", url.query == nil,
       url.scheme == nil || url.scheme == "file"
     else { return nil }
-    // A fragment belongs to the viewer, not to the filesystem path.
-    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
-    components.fragment = nil
-    guard let fileURL = components.url else { return nil }
-    let path = fileURL.isFileURL ? fileURL.path : fileURL.relativeString.removingPercentEncoding ?? fileURL.relativeString
-    guard !path.isEmpty, path.utf8.count <= 1024, !path.contains("\0"),
-      ["html", "htm", "pdf"].contains((path as NSString).pathExtension.lowercased())
-    else { return nil }
-    return path
+    guard url.isFileURL else { return url.relativeString }
+    // JavaScriptCore 没有浏览器 URL 全局对象；Foundation 仅拆出编码路径，不能提前解码两次。
+    guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+      return nil
+    }
+    return components.percentEncodedPath
+      + (components.percentEncodedFragment.map { "#" + $0 } ?? "")
   }
 }

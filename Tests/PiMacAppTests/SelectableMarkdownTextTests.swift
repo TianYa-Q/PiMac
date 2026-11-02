@@ -100,6 +100,46 @@ struct SelectableMarkdownTextTests {
     #expect(view.measuredSize(width: 600).height < sizes[0].height)
   }
 
+  @Test func hostedLinkClicksUseSwiftUIHandlerInsteadOfLaunchServices() async throws {
+    let target = "tmp/security-129/处置报告-剑峰公司-129号-待上线核验稿.docx"
+    let source = "[下载已填写的处置报告](\(target)) 和 [网页](https://example.com)"
+    var opened: [URL] = []
+    let host = NSHostingView(
+      rootView: MarkdownView(source)
+        .environment(
+          \.openURL,
+          OpenURLAction { url in
+            opened.append(url)
+            return .handled
+          }
+        )
+        .frame(width: 600).fixedSize(horizontal: false, vertical: true))
+    host.setFrameSize(host.fittingSize)
+    let window = NSWindow(
+      contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.contentView = host
+    defer { window.contentView = nil }
+    try await Task.sleep(for: .milliseconds(100))
+    host.layoutSubtreeIfNeeded()
+    func findText(_ view: NSView) -> MarkdownTextView? {
+      if let text = view as? MarkdownTextView { return text }
+      return view.subviews.lazy.compactMap { findText($0) }.first
+    }
+    let view = try #require(findText(host))
+    let before = view.frame
+    #expect(view.delegate === view)
+    // 调用 AppKit 的真实链接入口，而不是绕过视图直接调用路径函数。
+    for label in ["下载已填写的处置报告", "网页"] {
+      let index = (view.string as NSString).range(of: label).location
+      let link = try #require(view.textStorage?.attribute(.link, at: index, effectiveRange: nil))
+      view.clicked(onLink: link, at: index)
+    }
+    #expect(opened.count == 2)
+    #expect(opened.first?.relativeString.removingPercentEncoding == target)
+    #expect(opened.last?.absoluteString == "https://example.com")
+    #expect(view.frame == before)
+  }
+
   @Test func hostedReplyKeepsItsHeightAndQuoteSelectionWhenFocused() async throws {
     let host = NSHostingView(
       rootView: MarkdownView(source).frame(width: 600).fixedSize(horizontal: false, vertical: true))

@@ -7,8 +7,9 @@ struct T3ProjectCommandReuseTests {
   @Test func officialProjectLookupAndCreationRunInsideNativeRuntime() async throws {
     let runtime = T3StreamReducer(kind: .shell)
     func prepare(_ projects: [[String: Any]], path: String) async throws -> [String: Any] {
-      try await runtime.prepareProject(
-        ImmutableJSONSnapshot(value: [
+      try await runtime.prepare(
+        .prepareProject,
+        input: ImmutableJSONSnapshot(value: [
           "projects": projects, "workspaceRoot": path,
           "projectId": "new-project", "commandId": "new-command",
         ])
@@ -29,8 +30,9 @@ struct T3ProjectCommandReuseTests {
     #expect(command["createWorkspaceRootIfMissing"] as? Bool == true)
     #expect(command["defaultModelSelection"] is NSNull)
     await #expect(throws: T3StreamReducer.Failure.self) {
-      try await runtime.prepareProject(
-        ImmutableJSONSnapshot(value: [
+      try await runtime.prepare(
+        .prepareProject,
+        input: ImmutableJSONSnapshot(value: [
           "projects": [["workspaceRoot": "/repo/broken"]], "workspaceRoot": "/repo/broken",
           "projectId": "new-project", "commandId": "new-command",
         ]))

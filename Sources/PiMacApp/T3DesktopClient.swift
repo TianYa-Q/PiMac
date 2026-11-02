@@ -771,7 +771,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
         "projects": self.projects, "workspaceRoot": path,
         "projectId": UUID().uuidString, "commandId": UUID().uuidString,
       ])
-      let prepared = try await self.projectCommands.prepareProject(input).value
+      let prepared = try await self.projectCommands.prepare(.prepareProject, input: input).value
       try Task.checkCancellation()
       guard self.generation == current, self.connectedServerURL == serverURL,
         self.hasShellSubscription, let id = prepared["projectId"] as? String
@@ -1827,12 +1827,15 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     return html
   }
 
-  func replyDocumentURL(path: String, threadID: String) async throws -> URL {
+  func replyDocumentURL(href: String, threadID: String) async throws -> URL {
     guard let base = service?.serverURL else { throw ClientError.rejected }
     let current = generation
-    let signed = try await rpc(
-      "assets.createUrl",
-      payload: ["resource": ["_tag": "media-file", "threadId": threadID, "path": path]])
+    let resource = try await projectCommands.prepare(
+      .prepareReplyDocument,
+      input: ImmutableJSONSnapshot(value: ["href": href, "threadId": threadID])
+    ).value
+    guard generation == current else { throw CancellationError() }
+    let signed = try await rpc("assets.createUrl", payload: ["resource": resource])
     guard generation == current else { throw CancellationError() }
     guard let relative = signed["relativeUrl"] as? String,
       relative.hasPrefix("/api/assets/"),

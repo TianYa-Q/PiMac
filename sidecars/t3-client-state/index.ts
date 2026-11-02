@@ -1,4 +1,6 @@
-import { CommandId, OrchestrationV2RpcSchemas, ProjectId } from '@t3tools/contracts';
+import { AssetResource, CommandId, OrchestrationV2RpcSchemas, ProjectId } from '@t3tools/contracts';
+import { parseMarkdownFileLink } from '../../third_party/t3code/packages/shared/src/markdownLinks.ts';
+import { filePreviewKind } from '../../third_party/t3code/packages/shared/src/filePreview.ts';
 import * as Schema from 'effect/Schema';
 import { applyOrchestrationV2ProjectionEvent } from '../../third_party/t3code/packages/client-runtime/src/state/orchestrationV2Projection.ts';
 import { applyShellStreamEvent, mergeShellSnapshotProjects } from '../../third_party/t3code/packages/client-runtime/src/state/shellReducer.ts';
@@ -20,6 +22,29 @@ export function prepareProject(json: string): string {
   return JSON.stringify(existing
     ? { projectId: existing.id }
     : { projectId: input.projectId, command: buildProjectCreateCommand(input) });
+}
+
+const decodeReplyDocument = Schema.decodeUnknownSync(Schema.Struct({
+  href: Schema.String, threadId: Schema.String,
+}));
+const decodeAssetResource = Schema.decodeUnknownSync(AssetResource);
+
+/** 原生端只转接显式本地链接；路径解析交给官方模块，工作区解析交给 Server。 */
+export function prepareReplyDocument(json: string): string {
+  const input = decodeReplyDocument(JSON.parse(json));
+  // 官方对裸相对路径有自动识别启发式；显式点击的链接用 ./ 表明本地路径，支持中文文件名。
+  const href = input.href.startsWith('/') || input.href.startsWith('~')
+    ? input.href : './' + input.href;
+  const target = parseMarkdownFileLink(href);
+  if (target === null) throw new Error('Invalid local file link');
+  const { path } = target;
+  if (path.includes('\0') || path.endsWith('/')) throw new Error('Invalid local file path');
+  const kind = filePreviewKind({ name: path });
+  const resource = decodeAssetResource({
+    _tag: 'media-file', threadId: input.threadId, path,
+    ...(kind === 'html' || kind === 'pdf' ? {} : { disposition: 'attachment' }),
+  });
+  return JSON.stringify(resource);
 }
 
 type Kind = 'shell' | 'thread';
