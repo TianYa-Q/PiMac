@@ -78,6 +78,7 @@ struct LidSleepSessionTests {
     ("inheritedDisabledBattery", "set:0\nset:0\n", "app_exited:ok", 0),
     ("externalDisableOnBattery", "set:0\nset:0\n", "app_exited:ok", 0),
     ("writeIgnored", "set:1\nset:0\n", "power_failed:ok", 1),
+    ("eventSourceFailed", "set:1\nset:0\n", "event_source_failed:ok", 1),
   ])
   func watchdogExecutesLifecycleWithoutRealPowerChanges(
     testCase: (String, String, String, Int32)
@@ -94,7 +95,7 @@ struct LidSleepSessionTests {
     try Data().write(to: commands)
     // 执行完整生成脚本，只替换系统边界；任何场景都不调用真实 pmset/sudo 或休眠。
     let watchdog = LidSleepController.watchdogScript(
-      directory: session.path, pid: 123, passwordless: true
+      directory: session.path, pid: 123, eventPID: 456, passwordless: true
     )
     .replacingOccurrences(of: "/usr/bin/sudo -n /usr/bin/pmset", with: "mock_pmset")
     .replacingOccurrences(of: "/usr/bin/pmset", with: "mock_pmset")
@@ -102,6 +103,7 @@ struct LidSleepSessionTests {
     .replacingOccurrences(of: "/bin/ps", with: "mock_ps")
     .replacingOccurrences(of: "/bin/kill", with: "mock_kill")
     .replacingOccurrences(of: "/bin/sleep", with: "mock_sleep")
+    .replacingOccurrences(of: "IFS= read -r -t 2 event <&3", with: "mock_event")
     let script = """
       scenario=\(scenario)
       testCommands=\(LidSleepController.shellQuote(commands.path))
@@ -114,6 +116,7 @@ struct LidSleepSessionTests {
       mock_pmset() {
         if [ "$1" = -g ]; then
           if [ "$2" = batt ]; then
+            printf 'query\\n' >> "$testCommands-queries"
             [ "$scenario" != powerSourceFailed ] || return 1
             if [ "$scenario" = inheritedDisabledBattery ] || [ "$scenario" = externalDisableOnBattery ] || { [ "$scenario" = battery ] && [ "$loops" -ge 2 ]; }; then
               echo "Now drawing from 'Battery Power'"
@@ -143,9 +146,19 @@ struct LidSleepSessionTests {
           echo originalIdentity
         fi
       }
-      mock_kill() { loops=$((loops + 1)); [ "$loops" -le 3 ]; }
+      mock_kill() {
+        if [ "$2" = 456 ]; then
+          [ "$scenario:$loops" != eventSourceFailed:2 ]; return $?
+        fi
+        loops=$((loops + 1)); [ "$loops" -le 3 ]
+      }
+      mock_event() {
+        mock_sleep
+        event=tick
+        if [ "$loops" = 1 ] || [ "$scenario" = battery ]; then event=power; fi
+      }
       mock_sleep() {
-        if [ "$loops" = 1 ]; then
+        if [ "$loops" = 2 ]; then
           [ "$scenario" != externalReset ] || systemPower=0
           [ "$scenario" != externalDisableOnBattery ] || systemPower=1
           [ "$scenario" != runtimeQueryFailed ] || systemPower=bad
@@ -180,6 +193,8 @@ struct LidSleepSessionTests {
       .trimmingCharacters(in: .whitespacesAndNewlines)
     #expect(exit == expectedExit)
     if scenario == "normal" {
+      // 维护 tick 不查询电源，只有初始 power 事件读取一次。
+      #expect(try String(contentsOfFile: commands.path + "-queries", encoding: .utf8) == "query\n")
       // 不存在 heartbeat，仍能连续运行；主线程无需每秒向 helper 证明自己活着。
       #expect(
         !FileManager.default.fileExists(atPath: session.appendingPathComponent("heartbeat").path))

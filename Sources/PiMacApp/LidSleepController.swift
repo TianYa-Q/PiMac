@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SwiftUI
 
@@ -28,6 +29,7 @@ final class LidSleepController: ObservableObject {
   private var sessionGeneration = UUID()
   private var directory: URL?
   private var timer: Timer?
+  private var powerEvents: Process?
   private var activationTask: Task<Void, Never>?
   private var recoveryTask: Task<Void, Never>?
   private var recoveryPolicy = LidSleepRecoveryPolicy()
@@ -176,15 +178,34 @@ final class LidSleepController: ObservableObject {
         attributes: [.posixPermissions: 0o700])
       directory = folder
       try Data().write(to: folder.appendingPathComponent("lease"))
+      guard mkfifo(folder.appendingPathComponent("events").path, 0o600) == 0 else {
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+      }
+      let events = Process()
+      events.executableURL = Bundle.main.executableURL
+      events.arguments = [
+        LidSleepPowerEvents.argument, folder.path,
+        String(ProcessInfo.processInfo.processIdentifier),
+      ]
+      events.standardOutput = FileHandle.nullDevice
+      events.standardError = FileHandle.nullDevice
+      try events.run()
+      powerEvents = events
     } catch {
       stop()
       status = "无法创建守护会话：\(error.localizedDescription)"
       return
     }
+    guard let powerEvents else {
+      stop()
+      status = "无法启动电源事件监听"
+      return
+    }
     startMonitoring()
     let script = Self.watchdogScript(
       directory: folder.path,
-      pid: ProcessInfo.processInfo.processIdentifier, passwordless: passwordless)
+      pid: ProcessInfo.processInfo.processIdentifier,
+      eventPID: powerEvents.processIdentifier, passwordless: passwordless)
     let command = "/bin/sh -c \(Self.shellQuote(script)) </dev/null >/dev/null 2>&1 & echo $!"
     let appleScript =
       "do shell script \(Self.appleScriptQuote(command)) with administrator privileges"
@@ -263,6 +284,8 @@ final class LidSleepController: ObservableObject {
     launchRestoreTask = nil
     timer?.invalidate()
     timer = nil
+    if let powerEvents, powerEvents.isRunning { powerEvents.terminate() }
+    powerEvents = nil
     if let directory {
       // 删除失败时保留会话引用，禁止新会话覆盖旧 helper；再次关闭仍可重试清理。
       do {
@@ -440,6 +463,31 @@ final class LidSleepController: ObservableObject {
     fi
     """
 
+  /// 解除禁用不会重放已被拒绝的合盖事件；仅在本次解除后补发睡眠请求。
+  /// 临近请求时再次核实租约、电源与盖子，避免开盖/重新插电后误睡眠。
+  nonisolated static let batterySleepScript = """
+    if [ "$desired" = 0 ] && [ "$wasDisabled" = 1 ]; then
+      power=$(/usr/bin/pmset -g batt) || { reason=power_query_failed; publish error; exit 1; }
+      case "$power" in
+        *"Now drawing from 'Battery Power'"*)
+          lid=$(/usr/sbin/ioreg -r -k AppleClamshellState -d 1 | /usr/bin/awk '
+            $1 == "\\"AppleClamshellState\\"" && $2 == "=" {print $3; exit}')
+          case "$lid" in
+            Yes)
+              if [ -f "$dir/lease" ]; then
+                if ! /usr/bin/pmset sleepnow 2>"$stateDir/command-error"; then
+                  reason=power_failed; publish error; exit 1
+                fi
+              fi ;;
+            No) : ;;
+            *) reason=power_query_failed; publish error; exit 1 ;;
+          esac ;;
+        *"Now drawing from 'AC Power'"*) : ;;
+        *) reason=power_query_failed; publish error; exit 1 ;;
+      esac
+    fi
+    """
+
   /// 租约表达会话意愿，不表达 UI 调度速度；退出/崩溃由 PID 与进程启动时间兜底。
   nonisolated static let watchdogLeaseScript = """
     [ -f "$dir/lease" ] || { reason=lease_removed; break; }
@@ -447,9 +495,9 @@ final class LidSleepController: ObservableObject {
     [ -n "$appStart" ] && [ "$appNow" = "$appStart" ] || { reason=app_exited; break; }
     """
 
-  nonisolated static func watchdogScript(directory: String, pid: Int32, passwordless: Bool = false)
-    -> String
-  {
+  nonisolated static func watchdogScript(
+    directory: String, pid: Int32, eventPID: Int32, passwordless: Bool = false
+  ) -> String {
     // 免密码 helper 不提权；仅两个精确的 pmset 命令使用 sudo。
     // 旧授权模式的脚本以内联代码交付，绝不由 root 读取用户可写的脚本。
     let stateDirectory =
@@ -461,6 +509,7 @@ final class LidSleepController: ObservableObject {
       dir=\(shellQuote(directory))
       stateDir=\(shellQuote(stateDirectory))
       appPID=\(pid)
+      eventPID=\(eventPID)
       umask 022
       \(passwordless ? ":" : "/bin/mkdir -m 755 \"$stateDir\" || exit 1")
       publish() {
@@ -515,21 +564,36 @@ final class LidSleepController: ObservableObject {
       : > "$stateDir/owned" || exit 1
       owned=1
       reason=app_exited
+      # FIFO 由未提权的原生监听进程写入。事件不可信，所有电源事实在此重新读取。
+      exec 3<> "$dir/events" || exit 1
+      desired=
       while /bin/kill -0 "$appPID" 2>/dev/null; do
         \(watchdogLeaseScript)
-        desired=0
-        state=battery
-        power=$(/usr/bin/pmset -g batt) || { reason=power_query_failed; publish error; exit 1; }
-        case "$power" in
-          *"Now drawing from 'AC Power'"*) desired=1; state=ac ;;
-          *"Now drawing from 'Battery Power'"*) : ;;
+        /bin/kill -0 "$eventPID" 2>/dev/null || {
+          reason=event_source_failed; publish error; exit 1;
+        }
+        # macOS /bin/sh 的定时 read：超时只执行安全维护，不读取电源。
+        if ! IFS= read -r -t 2 event <&3; then event=tick; fi
+        \(watchdogLeaseScript)
+        case "$event" in
+          power)
+            power=$(/usr/bin/pmset -g batt) || { reason=power_query_failed; publish error; exit 1; }
+            case "$power" in
+              *"Now drawing from 'AC Power'"*) desired=1 ;;
+              *"Now drawing from 'Battery Power'"*) desired=0 ;;
+              *) reason=power_query_failed; publish error; exit 1 ;;
+            esac ;;
+          tick) [ -n "$desired" ] || continue ;;
           *) reason=power_query_failed; publish error; exit 1 ;;
         esac
+        state=battery
+        [ "$desired" != 1 ] || state=ac
         # 每轮重新读取真实系统值，避免唤醒或外部改动后仍相信旧缓存。
         actual=$(readSetting) || { reason=power_query_failed; publish error; exit 1; }
         [ "$actual" = 0 ] || [ "$actual" = 1 ] || {
           reason=power_query_failed; publish error; exit 1;
         }
+        wasDisabled=$actual
         if [ "$desired" != "$actual" ]; then
           if ! \(powerCommand) -a disablesleep "$desired" 2>"$stateDir/command-error"; then
             reason=power_failed
@@ -540,9 +604,9 @@ final class LidSleepController: ObservableObject {
         # 命令成功不等于设置生效；必须读回确认后才能发布健康状态。
         actual=$(readSetting) || { reason=power_query_failed; publish error; exit 1; }
         [ "$actual" = "$desired" ] || { reason=power_failed; publish error; exit 1; }
+        \(batterySleepScript)
         \(displaySleepScript)
         publish "$state" || { reason=state_write_failed; exit 1; }
-        /bin/sleep 2
       done
       """
   }

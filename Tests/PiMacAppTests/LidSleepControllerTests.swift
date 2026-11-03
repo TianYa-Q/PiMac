@@ -19,7 +19,8 @@ struct LidSleepControllerTests {
   }
 
   @Test func watchdogHasValidShellSyntaxAndSafetyGuards() throws {
-    let script = LidSleepController.watchdogScript(directory: "/tmp/pimac-awake-test", pid: 123)
+    let script = LidSleepController.watchdogScript(
+      directory: "/tmp/pimac-awake-test", pid: 123, eventPID: 456)
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/sh")
     // Syntax check only: never run privileged commands during tests.
@@ -69,6 +70,53 @@ struct LidSleepControllerTests {
     let data = output.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
     #expect(process.terminationStatus == 0)
+    #expect(String(data: data, encoding: .utf8) == expected)
+  }
+
+  @Test(arguments: [
+    ("0", "1", "Battery Power", "Yes", true, 0, "sleep\n", Int32(0)),
+    ("0", "1", "Battery Power", "No", true, 0, "", Int32(0)),
+    ("0", "1", "Battery Power", "Unknown", true, 0, "error\n", Int32(1)),
+    ("0", "1", "Unknown", "Yes", true, 0, "error\n", Int32(1)),
+    ("0", "1", "AC Power", "Yes", true, 0, "", Int32(0)),
+    ("0", "1", "Battery Power", "Yes", false, 0, "", Int32(0)),
+    ("0", "0", "Battery Power", "Yes", true, 0, "", Int32(0)),
+    ("1", "1", "Battery Power", "Yes", true, 0, "", Int32(0)),
+    ("0", "1", "Battery Power", "Yes", true, 1, "sleep\nerror\n", Int32(1)),
+  ])
+  func batterySleepRechecksPowerLidAndLease(
+    testCase: (String, String, String, String, Bool, Int, String, Int32)
+  ) throws {
+    let (desired, previous, power, lid, lease, sleepResult, expected, code) = testCase
+    let fragment = LidSleepController.batterySleepScript
+      .replacingOccurrences(of: "/usr/bin/pmset", with: "mock_pmset")
+      .replacingOccurrences(of: "/usr/sbin/ioreg", with: "mock_ioreg")
+      .replacingOccurrences(of: "[ -f \"$dir/lease\" ]", with: lease ? "true" : "false")
+      .replacingOccurrences(of: "2>\"$stateDir/command-error\"", with: "2>/dev/null")
+    let script = """
+      mock_pmset() {
+        if [ "$1" = -g ]; then
+          echo "Now drawing from '\(power)'"
+        else
+          echo sleep
+          return \(sleepResult)
+        fi
+      }
+      mock_ioreg() { echo '\"AppleClamshellState\" = \(lid)'; }
+      publish() { echo "$1"; }
+      desired=\(desired)
+      wasDisabled=\(previous)
+      \(fragment)
+      """
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", script]
+    process.standardOutput = output
+    try process.run()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    #expect(process.terminationStatus == code)
     #expect(String(data: data, encoding: .utf8) == expected)
   }
 

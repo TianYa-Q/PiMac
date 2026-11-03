@@ -80,7 +80,7 @@ struct LidSleepPasswordlessAccessTests {
 
   @Test func passwordlessWatchdogUsesSudoOnlyForSleepSwitch() throws {
     let script = LidSleepController.watchdogScript(
-      directory: "/tmp/pimac-test", pid: 123, passwordless: true)
+      directory: "/tmp/pimac-test", pid: 123, eventPID: 456, passwordless: true)
     #expect(script.contains("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep \"$desired\""))
     #expect(script.contains("trap finish EXIT"))
     #expect(script.contains("/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0"))

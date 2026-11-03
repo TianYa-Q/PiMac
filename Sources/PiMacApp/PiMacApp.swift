@@ -83,6 +83,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
+@MainActor
+enum PiMacEntry {
+  static func main() {
+    let arguments = CommandLine.arguments
+    if arguments.count == 4, arguments[1] == LidSleepPowerEvents.argument,
+      let parentPID = Int32(arguments[3])
+    {
+      exit(LidSleepPowerEvents.run(directory: arguments[2], parentPID: parentPID))
+    }
+    PiMacApp.main()
+  }
+}
+
 struct PiMacApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @StateObject private var workspace = WorkspaceModel()

@@ -17,6 +17,7 @@ enum LidSleepExitReason: String {
   case powerFailed = "power_failed"
   case powerQueryFailed = "power_query_failed"
   case stateWriteFailed = "state_write_failed"
+  case eventSourceFailed = "event_source_failed"
 }
 
 enum LidSleepSessionObservation: Equatable {
