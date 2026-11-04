@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 
@@ -117,6 +118,68 @@ struct T3ConnectionRecoveryTests {
       #expect(fixture.requests.allSatisfy { $0.url?.path == "/api/auth/session" })
       #expect(fixture.requests.allSatisfy { $0.httpMethod == "GET" })
       #expect(fixture.requests.allSatisfy { $0.timeoutInterval == 3 })
+    }
+  }
+
+  @Test func unchangedConnectionChecksDoNotPublishOrRefreshModels() async throws {
+    try await withFixture([
+      .json(200, #"{"authenticated":true}"#),
+      .json(200, #"{"authenticated":true}"#),
+      .json(200, #"{"authenticated":true}"#),
+      .failure(.timedOut), .failure(.timedOut),
+      .json(200, #"{"authenticated":true}"#),
+    ]) { client, fixture in
+      await client.refreshConnection(to: fixture.url) { "fixture-token" }
+      try client.applyConfigurationEvent([
+        "version": 1, "type": "snapshot",
+        "config": [
+          "settings": ["providerModelPreferences": NSNull()],
+          "providers": [["instanceId": "pi", "models": [["slug": "test/model"]]]],
+          "environment": ["capabilities": ["threadTitleRegeneration": true]],
+        ],
+      ])
+      let model = AppModel(restoreLastProjectOnLaunch: false)
+      defer { model.disconnect() }
+      model.attach(to: client)
+      // attach 的初始在线回调会在下一轮读取模型；先等它完成再计数。
+      for _ in 0..<100 where model.models.isEmpty { await Task.yield() }
+      #expect(model.models.map(\.id) == ["test/model"])
+      var connectionChanges: [Bool] = []
+      var clientUpdates = 0
+      var modelUpdates = 0
+      var modelListUpdates = 0
+      let observations = [
+        client.$isConnected.dropFirst().sink { connectionChanges.append($0) },
+        client.objectWillChange.sink { clientUpdates += 1 },
+        model.objectWillChange.sink { modelUpdates += 1 },
+        model.$allModels.dropFirst().sink { _ in modelListUpdates += 1 },
+      ]
+      defer { for observation in observations { observation.cancel() } }
+      for _ in 0..<2 {
+        await client.refreshConnection(to: fixture.url) { "fixture-token" }
+      }
+      #expect(connectionChanges.isEmpty)
+      #expect(clientUpdates == 0)
+      #expect(modelUpdates == 0)
+      #expect(modelListUpdates == 0)
+
+      client.recordRefreshResult(.shell, error: URLError(.timedOut))
+      for _ in 0..<10 { await Task.yield() }
+      #expect(modelUpdates > 0)
+      #expect(modelListUpdates == 0)
+      #expect(client.isConnected)
+
+      await client.refreshConnection(to: fixture.url) { "fixture-token" }
+      #expect(connectionChanges == [false])
+      let disconnectedUpdates = clientUpdates
+      await client.refreshConnection(to: fixture.url) { "fixture-token" }
+      #expect(connectionChanges == [false])
+      #expect(clientUpdates == disconnectedUpdates)
+      await client.refreshConnection(to: fixture.url) { "fixture-token" }
+      for _ in 0..<100 where modelListUpdates == 0 { await Task.yield() }
+      #expect(connectionChanges == [false, true])
+      #expect(modelListUpdates == 1)
+      #expect(fixture.requests.count == 6)
     }
   }
 

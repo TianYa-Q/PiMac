@@ -96,6 +96,7 @@ final class AppModel: ObservableObject {
   var onTelegramLifecycleEvent: ((String) -> Void)?
   private weak var server: T3DesktopClient?
   private var serverConnectionObservation: AnyCancellable?
+  private var serverStatusObservation: AnyCancellable?
   private let observerID = UUID()
   private var isConversationVisible = true
   private var conversationConsumers: Set<UUID> = []
@@ -298,8 +299,11 @@ final class AppModel: ObservableObject {
         Task { @MainActor [weak self] in self?.refreshDeliveryPresentation() }
       }
     // 设置页也可在断线/重连时保持打开；不能依赖会话消息变化才刷新可编辑状态。
-    serverConnectionObservation = server.$isConnected.combineLatest(server.$status)
-      .sink { [weak self, weak server] ready, _ in
+    // 警告只刷新展示；模型配置沿用 Server 配置事件，不因读取告警重新计算。
+    serverStatusObservation = server.$status.removeDuplicates().dropFirst()
+      .sink { [weak self] _ in self?.objectWillChange.send() }
+    serverConnectionObservation = server.$isConnected.removeDuplicates()
+      .sink { [weak self, weak server] ready in
         self?.objectWillChange.send()
         guard ready else { return }
         // @Published 的回调早于属性写入；下一轮再检查真实连接，避免读取到旧值。

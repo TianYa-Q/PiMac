@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { resolve, join } from "node:path";
 import { createJiti } from "jiti";
@@ -228,6 +228,167 @@ try {
       assert.equal(app.status().activeAccount, "Y");
       assert.equal(legacy.readCodexAccountState().activeAccount, "X");
     } finally {
+      await app.close();
+    }
+  });
+
+  await test("weekly rotation and subsequent turns continue while a credential writer holds the account lock", async () => {
+    const accounts = legacy.readCodexAccountState().accounts;
+    const snapshot = (weekly) =>
+      writeHostSnapshot(
+        "openai-codex",
+        accounts,
+        accounts.map((account) => ({
+          accountName: account.name,
+          capturedAt: Date.now(),
+          primary: {
+            remainingPercent: 90,
+            windowSeconds: 18000,
+            resetAt: Date.now() / 1000 + 10000,
+          },
+          ...(weekly
+            ? {
+                secondary: {
+                  remainingPercent: account.name === "X" ? 10 : 90,
+                  windowSeconds: 604800,
+                  resetAt: Date.now() / 1000 + 300000,
+                },
+              }
+            : {}),
+        })),
+        root,
+      );
+    snapshot(false);
+    const app = instance();
+    let releaseWriter;
+    const gate = new Promise((resolve) => {
+      releaseWriter = resolve;
+    });
+    let writer;
+    try {
+      await app.start();
+      assert.equal(app.status().activeAccount, "X");
+      snapshot(true);
+      let writerStarted;
+      const started = new Promise((resolve) => {
+        writerStarted = resolve;
+      });
+      // 真实刷新路径持锁，模拟宿主/另一会话刷新；不伪造 ELOCKED 异常。
+      writer = legacy.refreshStoredCredential("Y", async (latest) => {
+        writerStarted();
+        await gate;
+        return { ...latest, access: "synthetic-refreshed-Y" };
+      });
+      await started;
+      await app.events.get("before_agent_start")({}, app.ctx);
+      await app.events.get("turn_start")({}, app.ctx);
+      assert.equal(app.status().activeAccount, "Y");
+      assert.equal(app.tokens.get("openai-codex"), "synthetic-legacy-Y");
+      assert.equal(
+        app.ctx.aborts,
+        0,
+        "lock contention must not cancel the run and pause Goal",
+      );
+      assert(app.notices.some((notice) => notice.includes("周额度负载平衡")));
+      assert.equal(legacy.readCodexAccountState().activeAccount, "X");
+      releaseWriter();
+      await writer;
+      await app.events.get("before_agent_start")({}, app.ctx);
+      await app.events.get("turn_start")({}, app.ctx);
+      assert.equal(app.tokens.get("openai-codex"), "synthetic-refreshed-Y");
+      assert.equal(app.ctx.aborts, 0);
+    } finally {
+      releaseWriter();
+      await writer;
+      await app.close();
+      await legacy.saveAccount("Y", credential("legacy-Y"));
+    }
+  });
+
+  await test("expired credential readers reuse a concurrent refresh after waiting for the write lock", async () => {
+    const accounts = legacy.readCodexAccountState().accounts;
+    writeHostSnapshot(
+      "openai-codex",
+      accounts,
+      accounts.map((account) => ({
+        accountName: account.name,
+        capturedAt: Date.now(),
+        primary: { remainingPercent: 90, windowSeconds: 18000 },
+      })),
+      root,
+    );
+    const app = instance();
+    const originalFetch = globalThis.fetch;
+    let requests = 0;
+    globalThis.fetch = () => {
+      requests++;
+      throw new Error(
+        "must reuse the committed credential, not refresh it again",
+      );
+    };
+    let releaseWriter;
+    const gate = new Promise((resolve) => {
+      releaseWriter = resolve;
+    });
+    let writer, activation;
+    try {
+      await app.start();
+      await legacy.saveAccount("Y", { ...credential("legacy-Y"), expires: 1 });
+      let writerStarted;
+      const started = new Promise((resolve) => {
+        writerStarted = resolve;
+      });
+      writer = legacy.refreshStoredCredential("Y", async () => {
+        writerStarted();
+        await gate;
+        return credential("renewed-Y");
+      });
+      await started;
+      activation = app.commands.get("accounts").handler("switch Y", app.ctx);
+      // 让真实 activate 读取过期快照并进入异步写锁等待，再提交另一个刷新。
+      await new Promise(setImmediate);
+      releaseWriter();
+      await writer;
+      await activation;
+      await app.events.get("before_agent_start")({}, app.ctx);
+      await app.events.get("turn_start")({}, app.ctx);
+      assert.equal(requests, 0);
+      assert.equal(app.tokens.get("openai-codex"), "synthetic-renewed-Y");
+      assert.equal(app.ctx.aborts, 0);
+    } finally {
+      releaseWriter();
+      await writer;
+      await activation;
+      await app.close();
+      globalThis.fetch = originalFetch;
+      await legacy.saveAccount("Y", credential("legacy-Y"));
+    }
+  });
+
+  await test("corrupt account credentials still block execution and recover after repair", async () => {
+    const file = join(root, "codex-accounts.json");
+    const original = await readFile(file, "utf8");
+    const app = instance();
+    try {
+      await app.start();
+      await writeFile(file, "{invalid", { mode: 0o600 });
+      await app.events.get("before_agent_start")({}, app.ctx);
+      await app.events.get("turn_start")({}, app.ctx);
+      assert.equal(
+        app.ctx.aborts,
+        1,
+        "corruption must not be treated as a usable snapshot",
+      );
+      await writeFile(file, original, { mode: 0o600 });
+      await app.events.get("before_agent_start")({}, app.ctx);
+      await app.events.get("turn_start")({}, app.ctx);
+      assert.equal(
+        app.ctx.aborts,
+        1,
+        "a repaired account must allow the next run",
+      );
+    } finally {
+      await writeFile(file, original, { mode: 0o600 });
       await app.close();
     }
   });

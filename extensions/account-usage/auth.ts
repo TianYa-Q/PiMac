@@ -133,6 +133,8 @@ export class CodexSessionAuth {
 
     return store.refreshStoredCredential(accountName, async (latest) => {
       signal.throwIfAborted();
+      // 等待写锁期间其他会话可能已完成刷新，不重复兑换已轮换的 refresh token。
+      if (latest.expires > Date.now() + REFRESH_SKEW_MS) return latest;
       const refreshed = await getCodexOAuth(this.providerId).refresh(
         latest,
         signal,

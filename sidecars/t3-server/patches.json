@@ -1,4 +1,10 @@
 {
+  "apps/server/src/orchestration-v2/EffectOutbox.ts": [
+    {
+      "oldText": "                candidate.effect_type != 'thread-title.generate'\n                AND active.effect_type != 'thread-title.generate'",
+      "newText": "                candidate.effect_type != 'thread-title.generate'\n                AND active.effect_type != 'thread-title.generate'\n                AND candidate.effect_type != 'runtime-request.respond'\n                AND active.effect_type != 'runtime-request.respond'\n              )\n              OR\n              (\n                -- 会话恢复可能等待扩展确认；回答须有独立通道，否则与启动互锁。\n                -- 同通道仍串行并保留重试退避；普通工作与 rollback 仍按原序执行。\n                candidate.effect_type = 'runtime-request.respond'\n                AND active.effect_type = 'runtime-request.respond'"
+    }
+  ],
   "packages/provider-core/src/server/ProviderAdapter.ts": [
     {
       "oldText": "  readonly uploadFeedback?: (input: {",

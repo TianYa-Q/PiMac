@@ -36,6 +36,8 @@ All private data remains in `~/.pi/agent` (or `PI_CODING_AGENT_DIR`), never in t
 - `pimac-account-monitor.jsonl`: bounded, owner-only monitoring log, rotated at 1 MiB. Includes sample failures, per-window sample values and activation eligibility/skip/result reasons. It never logs access tokens, refresh tokens, request bodies or raw provider errors.
 - `account-usage-errors.jsonl`: session-auth diagnostics, including `read_state`, `initialize`, `activate` and `block_run` stages.
 
+Existing account documents are read as validated, atomically committed snapshots without taking the writer lock. Background credential refreshes therefore do not turn ordinary reads into `ELOCKED` authentication failures that abort runs and pause Goal. Initialization/migration and mutations still acquire the account lock; expired credentials wait for that lock and recheck the latest committed expiry before refreshing again. Corruption and genuine authentication failures remain errors, not empty accounts or successful switches.
+
 ## Activation policy
 
 Activation only uses successful, fresh samples from visible managed accounts. A full 5-hour / 7-day window with a reset time near the complete duration is eligible; an expired full window is also eligible for recovery. Full quota with an already-running shorter countdown is not sufficient to send another message. Missing/unknown windows and failed/stale queries never trigger activation.

@@ -14,25 +14,25 @@ final class DevelopmentReloader: ObservableObject {
   private let restartFile: URL?
   private var lastStatus = ""
 
-  init() {
-    let path = ProcessInfo.processInfo.environment["PIMAC_DEV_RELOAD_PATH"]
+  init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+    let path = environment["PIMAC_DEV_RELOAD_PATH"]
     let running = Bundle.main.executableURL?.standardizedFileURL
     executable = path.flatMap {
       URL(fileURLWithPath: $0).standardizedFileURL == running ? running : nil
     }
-    revisionFile = ProcessInfo.processInfo.environment["PIMAC_DEV_RELOAD_REVISION"].map {
+    revisionFile = environment["PIMAC_DEV_RELOAD_REVISION"].map {
       URL(fileURLWithPath: $0)
     }
-    stateFile = ProcessInfo.processInfo.environment["PIMAC_DEV_STATE_PATH"].map {
+    stateFile = environment["PIMAC_DEV_STATE_PATH"].map {
       URL(fileURLWithPath: $0)
     }
-    requestFile = ProcessInfo.processInfo.environment["PIMAC_DEV_REQUEST_PATH"].map {
+    requestFile = environment["PIMAC_DEV_REQUEST_PATH"].map {
       URL(fileURLWithPath: $0)
     }
-    editDirectory = ProcessInfo.processInfo.environment["PIMAC_DEV_EDIT_DIRECTORY"].map {
+    editDirectory = environment["PIMAC_DEV_EDIT_DIRECTORY"].map {
       URL(fileURLWithPath: $0)
     }
-    restartFile = ProcessInfo.processInfo.environment["PIMAC_DEV_RESTART_PATH"].map {
+    restartFile = environment["PIMAC_DEV_RESTART_PATH"].map {
       URL(fileURLWithPath: $0)
     }
     originalModification = (revisionFile ?? executable).flatMap {
@@ -137,7 +137,8 @@ final class DevelopmentReloader: ObservableObject {
   }
 
   private func setStatus(_ status: String, workspace: WorkspaceModel) {
-    workspace.developmentReloadStatus = status
+    // 每秒心跳仍必须写入；只有状态真正变化才让工作区和侧栏重绘。
+    if workspace.developmentReloadStatus != status { workspace.developmentReloadStatus = status }
     if status != lastStatus {
       if !status.isEmpty {
         NSLog("Pi Mac development reload [%@]: %@", reload.phase.rawValue, status)

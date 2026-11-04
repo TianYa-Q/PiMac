@@ -341,10 +341,10 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       textGenerationModels.reset()
       invalidateThreadSnapshots()
       refreshFailures.removeAll()
-      isConnected = false
+      if isConnected { isConnected = false }
     }
     guard let serverURL else {
-      isConnected = false
+      if isConnected { isConnected = false }
       connectionFailure = service?.status ?? "Server 未启动"
       updateConnectionStatus()
       return
@@ -380,7 +380,8 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       else { throw ClientError.rejected }
       guard authenticated else { throw ClientError.unauthorized }
       let recovered = !isConnected
-      isConnected = true
+      // @Published 不会自动去重；健康检查不能重复唤醒所有标签和模型列表。
+      if recovered { isConnected = true }
       connectionFailure = nil
       updateConnectionStatus()
       if recovered, service != nil {
@@ -392,7 +393,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
       guard generation == current, connectionCheckRevision == revision, !Task.isCancelled else {
         return
       }
-      isConnected = false
+      if isConnected { isConnected = false }
       if (error as? ClientError) == .unauthorized {
         token = ""
         rpcSession.close(error: error)
@@ -470,8 +471,8 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     textGenerationModels.reset()
     syncedDefaultModelPreference = nil
     modelVisibilityRevision += 1
-    isConnected = false
-    status = "T3 Server 尚未连接"
+    if isConnected { isConnected = false }
+    if status != "T3 Server 尚未连接" { status = "T3 Server 尚未连接" }
     watches.removeAll()
     imageCache.removeAll()
     replyImageCache.removeAll()
@@ -657,7 +658,7 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
         guard token == credential else { throw CancellationError() }
         token = ""
         connectionCheckRevision = UUID()
-        isConnected = false
+        if isConnected { isConnected = false }
         connectionFailure = Self.connectionFailureStatus(ClientError.unauthorized, phase: "校验授权")
         updateConnectionStatus()
         throw ClientError.unauthorized

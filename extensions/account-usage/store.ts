@@ -49,7 +49,23 @@ export function createAccountStore(
   };
 
   function readCodexAccountState(): CodexAccountState {
-    return withStoreLock((document) => ({
+    let document: StoreDocument;
+    try {
+      // 写入经临时文件 + 原子 rename 提交；打开的文件始终是完整快照。
+      // 读取不抢刷新锁，否则后台持锁会被会话认证误判为失败并取消 Goal。
+      document = parseStoreDocument(readPrivateRegularFile(STORE_PATH));
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+      // 只有首次初始化/旧数据迁移需要写锁；拿锁后重读，不能覆盖并发提交。
+      ensureStoreParent();
+      const release = lockfile.lockSync(STORE_PATH, { realpath: false });
+      try {
+        document = readStoreDocument();
+      } finally {
+        release();
+      }
+    }
+    return {
       accounts: Object.entries(document.accounts)
         .map(([name, credential]) => ({
           name,
@@ -58,7 +74,7 @@ export function createAccountStore(
         }))
         .sort((left, right) => left.name.localeCompare(right.name)),
       activeAccount: document.active,
-    }));
+    };
   }
 
   async function saveAccount(
@@ -271,16 +287,6 @@ export function createAccountStore(
       writePrivateJson(STORE_PATH, document);
     } finally {
       await lease.release();
-    }
-  }
-
-  function withStoreLock<T>(reader: (document: StoreDocument) => T): T {
-    ensureStoreParent();
-    const release = lockfile.lockSync(STORE_PATH, { realpath: false });
-    try {
-      return reader(readStoreDocument());
-    } finally {
-      release();
     }
   }
 
