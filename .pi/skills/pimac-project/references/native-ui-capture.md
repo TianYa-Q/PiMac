@@ -6,7 +6,9 @@
 
 ## 原生捕获：默认方案
 
-`scripts/capture.py` 将当前 `Package.swift`、`Sources` 和捕获测试复制到独立 `tmp` 包，运行真实 `ContentView`。不会启动/重启 PiMac App，不改当前运行源码或正式 Tests；会编译一次独立包，before/after 复用其构建缓存。默认 1100×800，暗色，输出 PNG 和来源元数据。
+`scripts/capture.py` 直接在仓库根目录执行正式 `Tests/PiMacAppTests/NativeCaptureTests.swift`，运行真实 `ContentView`，所有任务共用仓库 `.build`。不复制源码、不创建独立 Swift 包、不启动/重启 PiMac App；常规回归默认跳过截图测试，仅脚本通过环境变量启用。截图、日志和来源元数据仍保留在各任务 `tmp/<task>/`。默认 1100×800，暗色。
+
+捕获脚本通过锁拒绝并发截图，SwiftPM 自身负责共用构建目录的构建互斥；所有验证仍须串行执行。捕获期间不要编辑源码；脚本会核对前后源码和 fixture 指纹，变化时明确失败，不认证截图。
 
 准备 `tmp/<task>/fixture.json`，只用无敏感信息的确定性测试数据：
 
@@ -28,14 +30,14 @@
 
 ```sh
 CAPTURE=.pi/skills/pimac-project
-python3 "$CAPTURE/scripts/capture.py" --fixture tmp/<task>/fixture.json --output tmp/<task>/before.png --workspace tmp/<task>/capture-package
-# 完成修改后，同一 fixture、同一独立包：
-python3 "$CAPTURE/scripts/capture.py" --fixture tmp/<task>/fixture.json --output tmp/<task>/after.png --workspace tmp/<task>/capture-package
+python3 "$CAPTURE/scripts/capture.py" --fixture tmp/<task>/fixture.json --output tmp/<task>/before.png
+# 完成修改后，同一 fixture、同一仓库构建缓存：
+python3 "$CAPTURE/scripts/capture.py" --fixture tmp/<task>/fixture.json --output tmp/<task>/after.png
 python3 "$HOME/.pi/agent/skills/ui-design/scripts/compare.py" --before tmp/<task>/before.png --after tmp/<task>/after.png --output tmp/<task>/comparison.png
 ```
 
 - 选中子会话可通过真实 `ContentView` 的 reveal 逻辑展开祖先；不要为截图修改正式 UI 的可见性。
-- 如果页面不是 `ContentView`，复制 `assets/NativeCaptureTests.swift` 到本任务 tmp，调整 rootView 及环境对象，通过 `--test-template` 使用；保留隔离初始化和释放逻辑。不适用的 fixture 应明确失败，不能悄悄截图另一页。
-- 忘记改前截图时：仅对**确认任务开始时与指定 ref 一致的文件**使用 `--baseline-ref HEAD --baseline-file Sources/PiMacApp/ContentView.swift` 重建基线（参数可重复）；只覆盖独立副本。明确写“从 ref 重建的原生基线”，不要用 git checkout/reset/stash 覆盖工作区，也不要拿 HEAD 覆盖别人的未提交改动。
+- 如果页面不是 `ContentView`，在正式捕获测试中增加对应 fixture 渲染路径，复用同一 `.build`；保留隔离初始化和释放逻辑。不适用的 fixture 应明确失败，不能悄悄截图另一页。
+- 不再支持 `--workspace`、`--test-template`、`--baseline-ref` 或 `--baseline-file`，避免重新引入复制构建或临时覆盖共享源码。忘记改前截图时明确报告缺少基线，不要用 git checkout/reset/stash 覆盖工作区，也不要拿 HEAD 覆盖别人的未提交改动。
 - 如真实运行环境无法安全复现，fixture 渲染是**真实组件的测试数据截图**，不是运行中应用截图。HTML/CSS 重画只是示意图，不能代替原生修改证据；必须说明降级和未验证项。
 

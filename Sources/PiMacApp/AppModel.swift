@@ -516,17 +516,24 @@ final class AppModel: ObservableObject {
       let command = mode.command(objective: objective),
       let prompt = Self.makePrompt(command, attachments: [], delivery: .followUp)
     else { return false }
-    submit(prompt) { _ in }
-    return true
+    return submit(prompt) { _ in }
   }
 
   /// 原生命令独立提交，不读取或清空正在编辑的正文和附件，也不在忙碌时排队控制命令。
-  func sendGoalCommand(_ command: String) {
-    guard canSubmitPrompt, !isBusy,
-      case .available(_, driver: "pi") = goalState,
-      let prompt = Self.makePrompt(command, attachments: [], delivery: .followUp)
+  func sendGoalCommand(_ command: GoalCommand) {
+    guard canSubmitPrompt, !isBusy, command.isAvailable(in: goalState),
+      let prompt = Self.makePrompt(command.text, attachments: [], delivery: .followUp)
     else { return }
     submit(prompt) { _ in }
+  }
+
+  @discardableResult
+  func reviseGoal(_ revision: GoalRevision, objective: String) -> Bool {
+    guard canSubmitPrompt, !isBusy,
+      let command = revision.command(objective: objective, state: goalState),
+      let prompt = Self.makePrompt(command, attachments: [], delivery: .followUp)
+    else { return false }
+    return submit(prompt) { _ in }
   }
 
   func sendRemotePrompt(
@@ -541,13 +548,15 @@ final class AppModel: ObservableObject {
     }
     submit(prompt, messageID: messageID, completion: completion)
   }
+  /// 返回的是原稿是否已可靠交接给发件箱，不是远端是否已执行；异步失败沿用投递恢复入口。
+  @discardableResult
   private func submit(
     _ prompt: QueuedPrompt, messageID: String? = nil, clearComposer: Bool = false,
     completion: @escaping (Bool) -> Void
-  ) {
+  ) -> Bool {
     guard let server, let projectURL, let deliveryCoordinator, !submitting else {
       completion(false)
-      return
+      return false
     }
     let id = messageID ?? UUID().uuidString
     let target = threadID ?? UUID().uuidString
@@ -560,7 +569,7 @@ final class AppModel: ObservableObject {
     } catch {
       statusText = deliveryCoordinator.store.failure ?? "输入保存失败，尚未发送；草稿已保留"
       completion(false)
-      return
+      return false
     }
     // 持久化交接完成后才清理本次输入，异步结果不会清空后来编辑的草稿。
     if clearComposer {
@@ -571,6 +580,7 @@ final class AppModel: ObservableObject {
     observeThread(target, on: server)
     performDelivery(id, completion: completion)
     refreshDeliveryPresentation()
+    return true
   }
 
   private func performDelivery(_ id: String, completion: @escaping (Bool) -> Void) {

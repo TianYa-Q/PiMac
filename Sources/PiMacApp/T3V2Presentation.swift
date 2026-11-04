@@ -337,19 +337,24 @@ enum T3V2Presentation {
         return attemptIDs.contains(id)
       })
     let outputUsage = latest?["turnTokenUsage"] as? JSON
-    // Only display calibrated streaming measurements. Legacy whole-request
-    // timing is not comparable to AA, so do not silently fall back to it.
-    let piMetrics = latest?["piMetrics"] as? JSON
-    let measuredTokens =
-      piMetrics?["speedTokens"] as? Double
-      ?? (piMetrics?["speedTokens"] as? Int).map(Double.init) ?? 0
-    let durationMs =
-      piMetrics?["speedDurationMs"] as? Double
-      ?? (piMetrics?["speedDurationMs"] as? Int).map(Double.init) ?? 0
-    let measuredSpeed = measuredTokens * 1000 / durationMs
-    let validSpeed =
-      piMetrics?["speedMethod"] as? String == "aa-approx-v1"
-      && measuredTokens > 0 && durationMs > 0 && measuredSpeed.isFinite
+    // 重试尚未产生样本时保留同一 run 最近的有效测速；不跨任务复用旧值。
+    // 没有 run 身份的旧快照只检查最新 turn，避免把历史速度误当当前速度。
+    let speedTurns =
+      run == nil
+      ? latest.map { [$0] } ?? []
+      : turns.filter {
+        guard let id = $0["runAttemptId"] as? String else { return false }
+        return attemptIDs.contains(id)
+      }
+    let measuredSpeed = speedTurns.reversed().lazy.compactMap { turn -> Double? in
+      guard let metrics = turn["piMetrics"] as? JSON,
+        metrics["speedMethod"] as? String == "aa-approx-v1",
+        let tokens = (metrics["speedTokens"] as? NSNumber)?.doubleValue, tokens > 0,
+        let duration = (metrics["speedDurationMs"] as? NSNumber)?.doubleValue, duration > 0
+      else { return nil }
+      let speed = tokens * 1000 / duration
+      return speed.isFinite ? speed : nil
+    }.first
     // Session billing/cache counters come from per-turn usage, never context
     // snapshots (which overlap across requests). Recompute from the projection
     // so refreshes and in-progress metric updates cannot double-count a turn.
@@ -378,7 +383,7 @@ enum T3V2Presentation {
       cost: costs.isEmpty ? nil : costs.reduce(0, +),
       contextPercent: max > 0 ? Double(used) / Double(max) * 100 : nil,
       totalTokens: used, inputTokens: input, cacheReadTokens: cached, cacheWriteTokens: creation,
-      outputTokensPerSecond: validSpeed ? measuredSpeed : nil,
+      outputTokensPerSecond: measuredSpeed,
       contextWindow: max > 0 ? max : nil,
       contextIsEstimated: context?.estimated == true ? true : nil)
   }

@@ -33,24 +33,35 @@ enum GoalCreationAction {
 
 /// 输入只属于当前弹窗；不复用 composer，取消或发送都不改动正文和附件。
 struct GoalCreationButton: View {
+  let state: ThreadGoal.State
   let unavailableReason: String?
   let onStart: (String, GoalStartMode) -> Bool
+  let onCommand: (GoalCommand) -> Void
   @State private var isPresented = false
   @State private var objective = ""
 
   var body: some View {
-    Button {
-      objective = ""
-      isPresented = true
+    Menu {
+      Button("新建目标…") {
+        objective = ""
+        isPresented = true
+      }
+      Button("选择已有目标…") { onCommand(.focus) }
+        .disabled(!GoalCommand.focus.isAvailable(in: state))
+      Divider()
+      Button("运行与审核设置（高级）…") { onCommand(.settings) }
+        .disabled(!GoalCommand.settings.isAvailable(in: state))
     } label: {
-      Label("Goal", systemImage: "target")
+      Label("目标", systemImage: "target")
         .font(.system(size: 12, weight: .medium))
     }
-    .buttonStyle(.bordered)
+    // Menu 不是普通 Button；显式使用紧凑菜单样式并锁定理想尺寸，避免原生弹出控件横向吃满 HStack。
+    .menuStyle(.borderlessButton)
+    .fixedSize()
     .controlSize(.small)
     .disabled(unavailableReason != nil)
-    .help(unavailableReason ?? "创建目标：先讨论确认，或选择直接开始")
-    .accessibilityLabel("创建 Goal")
+    .help(unavailableReason ?? "新建目标，或选择已有目标")
+    .accessibilityLabel("目标管理")
     .sheet(isPresented: $isPresented) {
       GoalCreationForm(
         objective: $objective, unavailableReason: unavailableReason,
@@ -73,7 +84,7 @@ struct GoalCreationForm: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
-      Label("创建 Goal", systemImage: "target")
+      Label("新建目标", systemImage: "target")
         .font(.headline)
       Text("描述你希望完成的目标")
         .font(.subheadline)
@@ -88,15 +99,10 @@ struct GoalCreationForm: View {
         .font(.caption)
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
-      if let reason = unavailableReason {
-        Label(reason, systemImage: "info.circle")
-          .font(.caption)
-          .foregroundStyle(.orange)
-      } else if submissionRejected {
-        Text("目标未提交，请检查会话状态后重试。")
-          .font(.caption)
-          .foregroundStyle(.orange)
-      }
+      Text(unavailableReason ?? (submissionRejected ? "目标未提交，请检查会话状态后重试。" : " "))
+        .font(.caption)
+        .foregroundStyle(.orange)
+        .frame(height: 30, alignment: .topLeading)
       HStack {
         Button("取消") { perform(.cancel) }
           .keyboardShortcut(.cancelAction)

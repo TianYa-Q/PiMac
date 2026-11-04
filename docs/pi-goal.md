@@ -32,9 +32,11 @@ the Server and native UI follows the ordinary development idle gates.
 
 ## Use
 
-Click **Goal** at the right of the project row above the composer. It is available
-without an existing goal. In the native dialog, enter an objective and use the
-primary **讨论并确认** action (guided drafting) or explicitly choose **直接开始**.
+Without a focused goal, open **目标** at the right of the project row above the
+composer. Choose **新建目标…** or **选择已有目标…**; the latter uses `/goal-focus`
+and never silently selects a goal. In the native creation dialog, enter an
+objective and use the primary **讨论并确认** action (guided drafting) or explicitly
+choose **直接开始**.
 The first maps to `/goal`, the second to `/goal-direct`; no command typing is
 required. Cancel submits nothing, and neither action consumes the chat draft or
 its attachments. Empty input cannot start. Busy/disconnected sessions disable the
@@ -47,16 +49,33 @@ The original extension commands remain available for keyboard users:
 - `/goal <idea>`: discuss and confirm the objective/plan.
 - `/goal-direct <objective>`: start immediately, skipping guided drafting.
 - `/goal-status`, `/goal-list`, `/goal-focus`: inspect or switch goals.
+- `/goal-tweak <change>`: discuss and confirm revisions to the focused goal.
 - `/goal-pause`, `/goal-resume`: pause/resume.
 - `/goal-clear`: archive after confirmation (not Codex's `/goal clear`).
 - `/goal-settings`: auditor and continuation settings, including a finite
   `maxAutonomousRuns` allowance if desired. The upstream default is unlimited.
 
-The native card above the composer shows objective, lifecycle, elapsed active
-time and tokens. Pi controls send the extension's original commands only when the
-thread is idle, without touching unsent composer text or attachments. During
-execution, use the existing Stop control; the extension observes the user abort.
-Details/settings/focus/archive dialogs use the existing T3 extension UI bridge.
+The **当前目标** card above the composer shows objective, lifecycle, elapsed
+active time and tokens. **编辑目标** opens a native full-text editor prefilled with
+the current objective; **讨论并确认修改** submits the replacement text through
+`/goal-tweak`, not a direct file write or a new goal. Empty, unchanged, stale,
+completed or non-Pi revisions cannot submit. Cancellation changes nothing.
+Closing the form requires successful local outbox persistence; asynchronous
+transport failure remains visible through the existing delivery recovery flow.
+
+**暂停执行 / 继续执行** control the lifecycle separately from editing. The card's
+management menu contains progress, switching, creation, advanced settings and
+archive; the redundant composer-row entry is hidden for a focused Pi goal.
+**运行与审核设置（高级）…** still opens the extension's original settings picker:
+it configures execution/auditing, not objective content. The raw advanced picker
+has not been replaced by a native settings implementation.
+
+Pi controls send the extension's original commands only when the thread is idle,
+without touching unsent composer text or attachments. During execution, use the
+existing Stop control; the extension observes the user abort. Switching projects,
+threads or tabs destroys the local form context. Busy transitions keep editor
+input and fixed feedback space; they do not queue a control command. Details,
+settings, focus and archive dialogs use the existing T3 extension UI bridge.
 The card does not yet reproduce the terminal's full task tree or auditor panel.
 
 ## State boundary

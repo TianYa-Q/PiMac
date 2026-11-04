@@ -3,67 +3,108 @@ import SwiftUI
 struct ThreadGoalView: View {
   let state: ThreadGoal.State
   let canControl: Bool
-  let onCommand: (String) -> Void
+  let onCommand: (GoalCommand) -> Void
+  let onRevise: (GoalRevision, String) -> Bool
+  let onStart: (String, GoalStartMode) -> Bool
+  @State private var editor: Editor?
+  @State private var expanded = false
+  @State private var newObjective = ""
+
+  private enum Editor: String, Identifiable {
+    case create, revise
+    var id: String { rawValue }
+  }
 
   var body: some View {
     switch state {
     case .none:
       EmptyView()
     case .invalid:
-      Label("Goal 状态数据异常，请刷新会话", systemImage: "exclamationmark.triangle")
+      Label("目标状态数据异常，请刷新会话", systemImage: "exclamationmark.triangle")
         .font(.system(size: 12))
         .foregroundStyle(.orange)
         .frame(maxWidth: .infinity, alignment: .leading)
     case .available(let goal, let driver):
-      VStack(alignment: .leading, spacing: 7) {
-        HStack(spacing: 7) {
-          Label("Goal", systemImage: "target")
+      VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 8) {
+          Label("当前目标", systemImage: "target")
             .fontWeight(.semibold)
           Text(goal.status.title)
             .foregroundStyle(goal.status == .active ? Color.accentColor : .secondary)
           Spacer(minLength: 0)
           if driver == "pi" {
-            Button("详情") { onCommand("/goal-status") }
-            if goal.status == .active {
-              Button("暂停") { onCommand("/goal-pause") }
-            } else if goal.status != .complete {
-              Button("恢复") { onCommand("/goal-resume") }
+            if goal.status != .complete {
+              Button("编辑目标") { editor = .revise }
+              Button(goal.status == .active ? "暂停执行" : "继续执行") {
+                onCommand(goal.status == .active ? .pause : .resume)
+              }
             }
             Menu {
-              Button("切换目标…") { onCommand("/goal-focus") }
-              Button("目标设置…") { onCommand("/goal-settings") }
-              Button("归档目标…") { onCommand("/goal-clear") }
+              Button("查看进度…") { onCommand(.progress) }
+              Button("切换目标…") { onCommand(.focus) }
+              Button("新建目标…") {
+                newObjective = ""
+                editor = .create
+              }
+              Divider()
+              Button("运行与审核设置（高级）…") { onCommand(.settings) }
+              Divider()
+              Button("归档当前目标…") { onCommand(.archive) }
             } label: {
               Image(systemName: "ellipsis")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
+            .accessibilityLabel("目标管理")
           }
         }
         .buttonStyle(.borderless)
         .disabled(!canControl)
-        .help(canControl ? "调用 pi-goal-x 原生命令" : "执行中可使用输入框右下角的停止按钮；其他操作需等待空闲")
+        .help(canControl ? "编辑目标需讨论确认；继续执行会恢复自动工作" : "执行中请使用输入框的停止按钮；其他操作需等待空闲")
         Text(goal.objective)
-          .lineLimit(3)
+          .lineLimit(expanded ? nil : 3)
           .textSelection(.enabled)
           .frame(maxWidth: .infinity, alignment: .leading)
-          .help(goal.objective)
-        if goal.tokensUsed != nil || goal.timeUsedSeconds != nil {
-          HStack(spacing: 12) {
-            if let tokens = goal.tokensUsed {
-              Text("\(tokens.formatted()) tokens")
-            }
-            if let seconds = goal.timeUsedSeconds {
-              Text("\(seconds / 60) 分 \(seconds % 60) 秒")
-            }
+        HStack(spacing: 12) {
+          Button(expanded ? "收起正文" : "展开正文") { expanded.toggle() }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+          Spacer(minLength: 0)
+          if let tokens = goal.tokensUsed {
+            Text("\(tokens.formatted()) tokens")
           }
-          .foregroundStyle(.secondary)
-          .monospacedDigit()
+          if let seconds = goal.timeUsedSeconds {
+            Text("\(seconds / 60) 分 \(seconds % 60) 秒")
+          }
         }
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
       }
       .font(.system(size: 12))
-      .padding(10)
+      .padding(12)
       .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+      .sheet(item: $editor) { mode in
+        switch mode {
+        case .create:
+          GoalCreationForm(
+            objective: $newObjective,
+            unavailableReason: canControl ? nil : "会话暂不可操作，请空闲后再创建目标",
+            onDismiss: { editor = nil }, onStart: onStart)
+        case .revise:
+          GoalRevisionForm(
+            revision: GoalRevision(original: goal), state: state, canControl: canControl,
+            onDismiss: { editor = nil }, onRevise: onRevise)
+        }
+      }
+      // 不因 token、计时或暂时忙碌关闭编辑器；仅目标上下文失效时关闭，避免跨目标提交。
+      .onChange(of: goal.objective) { _, _ in
+        editor = nil
+        expanded = false
+      }
+      .onChange(of: driver) { _, _ in editor = nil }
+      .onChange(of: goal.status) { _, status in
+        if status == .complete { editor = nil }
+      }
     }
   }
 }

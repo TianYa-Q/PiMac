@@ -1444,7 +1444,11 @@ struct ContentView: View {
     VStack(spacing: 8) {
       ThreadGoalView(
         state: app.goalState, canControl: app.canSubmitPrompt && !app.isBusy,
-        onCommand: app.sendGoalCommand)
+        onCommand: app.sendGoalCommand, onRevise: app.reviseGoal, onStart: app.startGoal
+      )
+      .id(app.projectURL)
+      .id(app.currentSessionPath)
+      .id(ObjectIdentifier(app))
       HStack {
         if !app.hasUserMessage, !app.isBusy, !app.isLoadingConfiguration,
           app.queuedPrompts.isEmpty
@@ -1465,13 +1469,19 @@ struct ContentView: View {
             .frame(height: ProjectSwitcher.triggerHeight)
         }
         Spacer()
-        GoalCreationButton(
-          unavailableReason: app.goalCreationUnavailableReason, onStart: app.startGoal
-        )
-        // 切换项目、会话或标签页时销毁弹窗，避免把尚未确认的目标发给另一个执行上下文。
-        .id(app.projectURL)
-        .id(app.currentSessionPath)
-        .id(ObjectIdentifier(app))
+        if case .available(_, driver: "pi") = app.goalState {
+          // 已有目标时统一从卡片管理，不重复放置第二个“目标”入口。
+        } else {
+          GoalCreationButton(
+            state: app.goalState,
+            unavailableReason: app.goalCreationUnavailableReason, onStart: app.startGoal,
+            onCommand: app.sendGoalCommand
+          )
+          // 切换项目、会话或标签页时销毁弹窗，避免提交到另一个执行上下文。
+          .id(app.projectURL)
+          .id(app.currentSessionPath)
+          .id(ObjectIdentifier(app))
+        }
       }
       .frame(height: ProjectSwitcher.triggerHeight)
       if !app.queuedPrompts.isEmpty {

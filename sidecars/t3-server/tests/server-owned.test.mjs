@@ -459,6 +459,11 @@ test('model response metrics arrive before task settlement and survive completio
   assert(!live.runs.some(run => run.status === 'completed'));
   assert.equal(turn.turnTokenUsage.outputTokens, 20);
   assert.equal(turn.piMetrics.totalCostUsd, 0.012);
+  // Goal/工具等待期间直接复用 Pi get_session_stats 的上下文估算，不能等 agent_settled。
+  assert.equal(turn.tokenUsage.usedTokens, 200);
+  assert.equal(turn.tokenUsage.maxTokens, 10000);
+  const rpc = (await readFile(join(directory, 'fixture-rpc.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse);
+  assert(rpc.some(record => record.command === 'get_session_stats'));
   await eventually(async () => (await f.snapshot(threadId)).runs.some(run => run.status === 'completed'));
   const settled = (await f.snapshot(threadId)).providerTurns.at(-1);
   assert.deepEqual(settled.piMetrics, turn.piMetrics);

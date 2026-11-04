@@ -6,7 +6,9 @@ import Testing
 
 @MainActor
 struct PiMacNativeCaptureTests {
-  @Test func capture() async throws {
+  // 常规回归不生成截图；仅显式调用捕获脚本时启用，复用仓库构建缓存。
+  @Test(.enabled(if: ProcessInfo.processInfo.environment["PIMAC_CAPTURE_FIXTURE"] != nil))
+  func capture() async throws {
     let env = ProcessInfo.processInfo.environment
     let fixturePath = try #require(env["PIMAC_CAPTURE_FIXTURE"])
     let output = try #require(env["PIMAC_CAPTURE_OUTPUT"])
