@@ -19,6 +19,77 @@ struct ConversationTimelineSnapshotTests {
     ]
   }
 
+  @Test func subagentsFollowTheLoadedHistoryWindowRegardlessOfStatus() {
+    let recent = messages().map { entry in
+      var entry = entry
+      entry.timestamp = entry.timestamp?.addingTimeInterval(100)
+      return entry
+    }
+    for status in [ConversationSubagent.Status.completed, .failed, .working, .queued] {
+      let children = [50.0, 100, 105, 120].enumerated().map { index, time in
+        ConversationSubagent(
+          id: "c\(index)", title: "task", model: "",
+          createdAt: Date(timeIntervalSince1970: time), status: status,
+          startedAt: nil, completedAt: nil)
+      }
+      let initial = ConversationTimelineSnapshot(
+        messages: recent, children: children, hasMoreHistory: true)
+      #expect(
+        initial.rowIDs == [
+          "turn-u", "subagents-c1", "turn-tool", "subagents-c2",
+          "turn-tail", "subagents-c3",
+        ])
+      // 载入包含委派发生时间的旧页后才显示；分页尚未结束也不应继续隐藏。
+      let expanded = ConversationTimelineSnapshot(
+        messages: messages() + recent, children: children, hasMoreHistory: true)
+      #expect(expanded.rowIDs.contains("subagents-c0"))
+      #expect(expanded.rowIDs.filter { $0 == "subagents-c0" }.count == 1)
+      // 完整历史可能没有委派之前的正文，不能再按第一条消息截断。
+      let complete = ConversationTimelineSnapshot(
+        messages: recent, children: children, hasMoreHistory: false)
+      #expect(complete.rowIDs.first == "subagents-c0")
+    }
+  }
+
+  @Test func boundedEmptyHistoryDoesNotInventAWindowForDatedSubagents() {
+    let dated = ConversationSubagent(
+      id: "dated", title: "task", model: "", createdAt: Date(timeIntervalSince1970: 5),
+      status: .completed, startedAt: nil, completedAt: nil)
+    let unknown = ConversationSubagent(
+      id: "unknown", title: "task", model: "", createdAt: nil,
+      status: .unknown, startedAt: nil, completedAt: nil)
+    for entries in [[], [ChatEntry(id: "no-date", kind: .assistant, title: "", text: "text")]] {
+      let bounded = ConversationTimelineSnapshot(
+        messages: entries, children: [dated, unknown], hasMoreHistory: true)
+      #expect(!bounded.rowIDs.contains("subagents-dated"))
+      #expect(bounded.rowIDs.contains("subagents-unknown"))
+      let complete = ConversationTimelineSnapshot(
+        messages: entries, children: [dated, unknown], hasMoreHistory: false)
+      #expect(complete.rowIDs.contains("subagents-dated"))
+    }
+  }
+
+  @Test func pagingStateParticipatesInTheAppTimelineCache() {
+    let app = AppModel(restoreLastProjectOnLaunch: false)
+    app.currentSessionPath = "t3:one"
+    app.apply(["hasMoreHistory": true, "thread": ["id": "one", "messages": []]])
+    let child = ConversationSubagent(
+      id: "c", title: "task", model: "", createdAt: Date(timeIntervalSince1970: 5),
+      status: .completed, startedAt: nil, completedAt: nil)
+    app.messages = [
+      ChatEntry(
+        id: "recent", kind: .user, title: "", text: "recent",
+        timestamp: Date(timeIntervalSince1970: 100))
+    ]
+    let bounded = app.conversationTimeline(children: [child])
+    #expect(bounded.rowIDs == ["turn-recent"])
+    #expect(app.conversationTimeline(children: [child]) === bounded)
+    app.apply(["hasMoreHistory": false, "thread": ["id": "one", "messages": []]])
+    let complete = app.conversationTimeline(children: [child])
+    #expect(complete !== bounded)
+    #expect(complete.rowIDs == ["subagents-c"])
+  }
+
   @Test func composerOnlyChangesReuseTheImmutableSnapshot() throws {
     let app = AppModel()
     app.messages = messages()

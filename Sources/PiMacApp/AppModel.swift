@@ -16,15 +16,20 @@ final class AppModel: ObservableObject {
     }
   }
   private var conversationTimelineCache:
-    (children: [ConversationSubagent], snapshot: ConversationTimelineSnapshot)?
+    (
+      children: [ConversationSubagent], hasMoreHistory: Bool, snapshot: ConversationTimelineSnapshot
+    )?
   var conversationTurns: [ConversationTurn] { ConversationTurn.group(messages) }
 
   func conversationTimeline(children: [ConversationSubagent]) -> ConversationTimelineSnapshot {
-    if let cache = conversationTimelineCache, cache.children == children {
+    if let cache = conversationTimelineCache, cache.children == children,
+      cache.hasMoreHistory == hasMoreHistory
+    {
       return cache.snapshot
     }
-    let snapshot = ConversationTimelineSnapshot(messages: messages, children: children)
-    conversationTimelineCache = (children, snapshot)
+    let snapshot = ConversationTimelineSnapshot(
+      messages: messages, children: children, hasMoreHistory: hasMoreHistory)
+    conversationTimelineCache = (children, hasMoreHistory, snapshot)
     return snapshot
   }
   @Published private(set) var hasMoreHistory = false
@@ -552,6 +557,11 @@ final class AppModel: ObservableObject {
     return submit(prompt) { _ in }
   }
 
+  var canResumeGoal: Bool {
+    // 扩展恢复提示使用 followUp；运行中沿用持久发件箱排队，不中断当前任务。
+    canSubmitPrompt && GoalCommand.resume.isAvailable(in: goalState)
+  }
+
   var canPauseGoal: Bool {
     guard GoalCommand.pause.isAvailable(in: goalState), !isStopping else { return false }
     if showsStopControl {
@@ -568,7 +578,8 @@ final class AppModel: ObservableObject {
       abort()
       return
     }
-    guard canSubmitPrompt, !isBusy, command.isAvailable(in: goalState),
+    guard canSubmitPrompt, command == .resume ? canResumeGoal : !isBusy,
+      command.isAvailable(in: goalState),
       let prompt = Self.makePrompt(command.text, attachments: [], delivery: .followUp)
     else { return }
     submit(prompt) { _ in }

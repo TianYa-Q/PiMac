@@ -18,6 +18,7 @@ struct ThreadGoalView: View {
   let state: ThreadGoal.State
   let canControl: Bool
   let canPause: Bool
+  let canResume: Bool
   let onCommand: (GoalCommand) -> Void
   let onRevise: (GoalRevision, String) -> Bool
   let onStart: (String) -> Bool
@@ -57,7 +58,7 @@ struct ThreadGoalView: View {
               Button(goal.status == .active ? "暂停执行" : "继续执行") {
                 onCommand(goal.status == .active ? .pause : .resume)
               }
-              .disabled(goal.status == .active ? !canPause : !canControl)
+              .disabled(goal.status == .active ? !canPause : !canResume)
             }
             Menu {
               Button("查看进度…") { onCommand(.progress) }
@@ -77,7 +78,7 @@ struct ThreadGoalView: View {
           }
         }
         .buttonStyle(.borderless)
-        .help("运行中可暂停执行；编辑、继续和目标管理需等待会话空闲")
+        .help("运行中可暂停，继续执行将排队到当前任务结束后；编辑和目标管理需等待会话空闲")
         if let reason = goal.blockerDescription {
           VStack(alignment: .leading, spacing: 4) {
             Label("阻塞原因与所需协助", systemImage: "exclamationmark.triangle")

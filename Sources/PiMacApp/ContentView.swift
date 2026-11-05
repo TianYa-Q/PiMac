@@ -1483,7 +1483,7 @@ struct ContentView: View {
     VStack(spacing: 8) {
       ThreadGoalView(
         state: app.goalState, canControl: app.canSubmitPrompt && !app.isBusy,
-        canPause: app.canPauseGoal,
+        canPause: app.canPauseGoal, canResume: app.canResumeGoal,
         onCommand: app.sendGoalCommand, onRevise: app.reviseGoal, onStart: app.startGoal
       )
       .id(app.projectURL)
