@@ -83,7 +83,7 @@ redemption credentials or implement unsupported account operations.
   prompt. Missing metadata or an unknown template fails explicitly; native
   rendering, tools, transcript and branch data remain Pi-owned. See the sidecar
   README for the scope and private temporary-file boundary.
-- Optional pinned `pi-goal-x` presentation bridge: validate RPC status reports and
+- Pinned `@schovest/pi-goal` presentation adapter (third-party source unmodified): validate RPC status reports and
   mirror them into official `providerThread.goal`; extension scheduling/storage
   and upstream Pi lifecycle remain unchanged. See [Pi Goal](pi-goal.md).
   Pi transport, cancellation, retry and compaction remain official.

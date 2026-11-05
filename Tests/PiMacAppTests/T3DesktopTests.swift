@@ -429,11 +429,16 @@ struct T3DesktopTests {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(model.isStreaming)
-    let runningDetail = try await client.request("/api/orchestration/threads/\(id)")
-    let runs = (runningDetail["projection"] as? [String: Any])?["runs"] as? [[String: Any]]
-    let stoppedRun = try #require(
-      runs?.last { T3V2Presentation.active.contains($0["status"] as? String ?? "") }?["id"]
-        as? String)
+    // 本地提交回显也会显示 streaming，不能用它认定 Server 的新 run 已启动。
+    // 等待权威 running 投影，避免偶然读到上一回合的终态而把 Stop 测试提前判失败。
+    var activeRunID: String?
+    for _ in 0..<200 where activeRunID == nil {
+      let runningDetail = try await client.request("/api/orchestration/threads/\(id)")
+      let runs = (runningDetail["projection"] as? [String: Any])?["runs"] as? [[String: Any]]
+      activeRunID = runs?.last { $0["status"] as? String == "running" }?["id"] as? String
+      if activeRunID == nil { try await Task.sleep(for: .milliseconds(50)) }
+    }
+    let stoppedRun = try #require(activeRunID)
     // 执行中状态可能先于 dispatch 回执投影，不能在上一次提交仍锁定时发送后续消息。
     for _ in 0..<200 where !model.canSubmitPrompt {
       try await Task.sleep(for: .milliseconds(50))

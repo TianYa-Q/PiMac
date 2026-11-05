@@ -29,8 +29,8 @@ struct GoalMenuLayoutTests {
         Label("PiMac", systemImage: "folder")
         Spacer()
         GoalCreationButton(
-          state: .none, unavailableReason: probe.unavailableReason,
-          onStart: { _, _ in false }, onCommand: { _ in }
+          unavailableReason: probe.unavailableReason,
+          onStart: { _ in false }
         )
         .background(FrameProbe())
       }

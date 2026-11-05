@@ -39,11 +39,11 @@ finite number. JSON RPC represents that budget as `null`; a narrow Pi Adapter
 patch preserves it in the official nullable `maxAttempts` contract. Attempts and
 backoff remain visible through existing Server/native retry presentation.
 
-Goal recovery remains a fallback for terminal failures outside this active Pi
-loop, or sessions intentionally using a finite Pi budget. It never runs alongside
-Pi retries. Both classifiers exclude the same permanent-error patterns. Goal also
-honors final `agent_settled.aborted`, so a stop during Pi backoff cannot be mistaken
-for exhausted retries and restart the Goal. Previously paused Goals stay paused.
+The unmodified `@schovest/pi-goal` owns Goal-specific settled-boundary recovery.
+Pi retries remain primary. The previous `pi-goal-x` classifier/scheduler patches
+are no longer installed; its exact fallback classification is not promised for
+the replacement package. Stop/pause during backoff is verified through the real
+new Goal extension and Pi RPC.
 
 ## Install and check
 
@@ -74,7 +74,7 @@ Server remains functional, but may show an incorrect finite total until updated.
 
 ```sh
 PI_RETRY_PACKAGE_ROOT=/path/to/pi-coding-agent \
-PI_RETRY_GOAL_ROOT=/path/to/pi-goal-x \
+PI_RETRY_GOAL_ROOT=/path/to/PiMac/extensions/pi-goal \
 sidecars/t3-server/node_modules/.bin/tsx scripts/test-pi-retry.ts
 ```
 
@@ -82,9 +82,11 @@ This uses the actual installed SDK and bundled Pi RPC, a deterministic offline
 Provider, a temporary agent directory and the real Goal extension. It verifies
 seven transient failures then success, omitted failed responses in model context,
 one observable tool side effect, permanent errors, active Goal state during retry,
-stop/pause during backoff, and no post-stop restart. It makes no remote model calls
+immediate stop during backoff, and no post-stop restart. The replacement module
+can report `blocked` after aborting a failed request rather than `paused`; both
+are stopped states, and this upstream difference is not patched. It makes no remote model calls
 and reads no user credentials. Artifacts stay under `tmp/pi-retry-*`.
 
-Focused Node tests cover Goal classifier/lifecycle patches and Server nullable
+Focused Node tests cover the Goal presentation adapter and Server nullable
 budget projection. These tests do not constitute real-provider outage acceptance
 or release of the running Server/native app.

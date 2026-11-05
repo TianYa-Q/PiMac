@@ -1,10 +1,13 @@
 .build/
-/node_modules/
+# Installed dependencies at any package depth; manifests and lockfiles remain tracked.
+node_modules/
 /tmp/
 dist/
 .DS_Store
 .swiftpm/
-sidecars/*/node_modules/
+# Local package-manager caches and compiler state.
+.pnpm-store/
+*.tsbuildinfo
 
 # Local upstream reference/build sources; keep provenance, not the full checkout.
 /third_party/t3code/

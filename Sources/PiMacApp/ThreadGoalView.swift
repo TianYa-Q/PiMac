@@ -20,7 +20,7 @@ struct ThreadGoalView: View {
   let canPause: Bool
   let onCommand: (GoalCommand) -> Void
   let onRevise: (GoalRevision, String) -> Bool
-  let onStart: (String, GoalStartMode) -> Bool
+  let onStart: (String) -> Bool
   @State private var editor: Editor?
   @State private var expanded = false
   @State private var newObjective = ""
@@ -61,15 +61,12 @@ struct ThreadGoalView: View {
             }
             Menu {
               Button("查看进度…") { onCommand(.progress) }
-              Button("切换目标…") { onCommand(.focus) }
               Button("新建目标…") {
                 newObjective = ""
                 editor = .create
               }
               Divider()
-              Button("运行与审核设置（高级）…") { onCommand(.settings) }
-              Divider()
-              Button("归档当前目标…") { onCommand(.archive) }
+              Button("清除当前目标") { onCommand(.archive) }
             } label: {
               Image(systemName: "ellipsis")
             }

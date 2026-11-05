@@ -53,7 +53,33 @@ struct PiMacNativeCaptureTests {
       defaults.removePersistentDomain(forName: suite)
     }
     let page: AnyView
-    if fixture["page"] as? String == "usage" {
+    if fixture["page"] as? String == "versions" {
+      let versions = VersionManagerModel(
+        current: "1.5.0", latest: "1.5.0",
+        extensions: [
+          ManagedExtension(
+            source: "pi-antigravity", path: "", scope: "内部管理",
+            kind: .npm(name: "pi-antigravity", pinned: true),
+            currentVersion: "0.11.0", latestVersion: "0.11.0"),
+          ManagedExtension(
+            source: "pi-web-access", path: "", scope: "内部管理",
+            kind: .npm(name: "pi-web-access", pinned: true),
+            currentVersion: "0.47.0", latestVersion: "0.47.0"),
+          ManagedExtension(
+            source: "@schovest/pi-goal", path: "", scope: "内部管理",
+            kind: .npm(name: "@schovest/pi-goal", pinned: true),
+            currentVersion: "0.2.1", latestVersion: "0.2.1"),
+        ])
+      page = AnyView(
+        SettingsView(
+          path: "fixture", projectURL: nil, telegram: workspace.telegram, workspace: workspace,
+          initialTab: .updates, versionModel: versions, save: { _ in }))
+    } else if fixture["page"] as? String == "goalCreation" {
+      page = AnyView(
+        GoalCreationForm(
+          objective: .constant(fixture["objective"] as? String ?? "实现 CSV 导出并运行测试"),
+          unavailableReason: nil, onDismiss: {}, onStart: { _ in false }))
+    } else if fixture["page"] as? String == "usage" {
       let summary = try #require(fixture["usageSummary"] as? [String: Any])
       let snapshot = try T3UsageSummary.snapshot(summary, period: .month)
       let model = UsageDashboardModel { _ in snapshot }

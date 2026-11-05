@@ -21,22 +21,16 @@ struct GoalCommandTests {
         GoalCommand.resume.isAvailable(in: state) == (status != .active && status != .complete))
       #expect(GoalCommand.archive.isAvailable(in: state))
     }
-    #expect(GoalCommand.focus.isAvailable(in: .none))
-    #expect(GoalCommand.settings.isAvailable(in: .none))
     for action in GoalCommand.allCases {
       #expect(!action.isAvailable(in: .invalid))
       #expect(!action.isAvailable(in: .available(goal(), driver: "codex")))
       #expect(!action.isAvailable(in: .available(goal(), driver: nil)))
-      if action != .focus && action != .settings {
-        #expect(!action.isAvailable(in: .none))
-      }
+      #expect(!action.isAvailable(in: .none))
     }
-    #expect(GoalCommand.progress.text == "/goal-status")
-    #expect(GoalCommand.pause.text == "/goal-pause")
-    #expect(GoalCommand.resume.text == "/goal-resume")
-    #expect(GoalCommand.focus.text == "/goal-focus")
-    #expect(GoalCommand.settings.text == "/goal-settings")
-    #expect(GoalCommand.archive.text == "/goal-clear")
+    #expect(GoalCommand.progress.text == "/goal status")
+    #expect(GoalCommand.pause.text == "/goal pause")
+    #expect(GoalCommand.resume.text == "/goal resume")
+    #expect(GoalCommand.archive.text == "/goal clear")
   }
 
   @Test func runningPauseAvailabilityDoesNotAuthorizeOtherGoalControls() throws {
@@ -76,7 +70,7 @@ struct GoalCommandTests {
     let revision = GoalRevision(original: original)
     let current = ThreadGoal.State.available(original, driver: "pi")
     let command = try #require(revision.command(objective: "  新目标\n保留真实测试  ", state: current))
-    #expect(command.hasPrefix("/goal-tweak "))
+    #expect(command.hasPrefix("/goal edit "))
     #expect(command.hasSuffix("新目标\n保留真实测试"))
     #expect(!command.contains("/goal-direct"))
     for text in ["", " \n ", " 原目标\n"] {
@@ -128,7 +122,7 @@ struct GoalCommandTests {
     ])
     #expect(model.canSubmitPrompt)
     #expect(!model.reviseGoal(GoalRevision(original: goal()), objective: "新目标"))
-    #expect(!model.startGoal(objective: "另一个目标", mode: .discuss))
+    #expect(!model.startGoal(objective: "另一个目标"))
     #expect(store.messages.isEmpty)
     #expect(store.failure != nil)
     #expect(model.composerText == "保留草稿")

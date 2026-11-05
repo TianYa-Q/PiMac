@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { installPiRetry, patchPiRetrySource, piRetryPatches } from "./install-pi-retry.ts";
 
 const packageRoot = process.env.PI_RETRY_PACKAGE_ROOT;
-assert(packageRoot, "Set PI_RETRY_PACKAGE_ROOT to the pinned Pi 1.3.0 package directory");
+assert(packageRoot, "Set PI_RETRY_PACKAGE_ROOT to the pinned Pi 1.5.0 package directory");
 const root = await realpath(packageRoot);
 const aiManifest = findPackageJSON("@earendil-works/pi-ai", pathToFileURL(join(root, "dist/index.js")).href);
 assert(aiManifest, "Pi AI dependency must resolve");
@@ -70,18 +70,21 @@ settings.retry.baseDelayMs = 1;
 settings.retry.maxAgentDelayMs = 4;
 await writeFile(settingsPath, JSON.stringify(settings));
 const fixture = fileURLToPath(new URL("./fixtures/pi-retry.ts", import.meta.url));
-const goalRoot = process.env.PI_RETRY_GOAL_ROOT;
-assert(goalRoot, "Set PI_RETRY_GOAL_ROOT to the installed pi-goal-x@0.32.3 directory");
+const goalRoot = process.env.PI_RETRY_GOAL_ROOT ?? resolve("extensions/pi-goal");
 const wrapper = join(work, "retry-goal-wrapper.ts");
 await writeFile(wrapper, `
-import goalExtension from ${JSON.stringify(join(goalRoot, "extensions/goal.ts"))};
+import goalExtension from ${JSON.stringify(join(goalRoot, "index.ts"))};
 import retryFixture from ${JSON.stringify(fixture)};
 export default function(pi) {
   goalExtension(pi);
   retryFixture(pi);
   pi.registerCommand("retry-test-goal", { handler: async (_args, ctx) => {
-    pi._goalCore.replaceGoal({ objective: "Offline retry lifecycle verification", autoContinue: true, sisyphus: false }, ctx, false);
-    pi._goalCore.updateUI(ctx);
+    const now = Date.now();
+    pi.appendEntry("goal-state", { goal: { id: "retry-test", text: "Offline retry lifecycle verification",
+      status: "active", startedAt: now, updatedAt: now, iteration: 0,
+      tokensUsed: 0, timeUsedSeconds: 0, baselineTokens: 0, activeStartedAt: now,
+      automaticModelTurns: 0, toolFreeRepeatCount: 0 } });
+    await ctx.reload();
   } });
 }
 `);
@@ -162,12 +165,14 @@ try {
   await until(() => events.slice(start).some((event) => event.type === "agent_settled"));
   assert(Date.now() - stoppedAt < 1000, "stop must interrupt backoff immediately");
   assert.equal((await send({ type: "get_state" })).data.isStreaming, false);
-  await until(() => events.slice(start).some((event) => event.statusKey === "pimac-goal" && JSON.parse(event.statusText).goal?.status === "paused"));
+  // 新模块将已有失败后的 abort 归为 blocked；两种停止状态都必须禁止自动续跑。
+  await until(() => events.slice(start).some((event) => event.statusKey === "pimac-goal" &&
+    ["paused", "blocked"].includes(JSON.parse(event.statusText).goal?.status)));
   const stoppedCount = events.filter((event) => event.type === "auto_retry_start").length;
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(events.filter((event) => event.type === "auto_retry_start").length, stoppedCount);
   assert(!events.some((event) => event.type === "extension_error"), stderr);
-  console.log("Real bundled Pi RPC + Goal: >3 failures recover, no tool replay, clean model context, permanent failures terminate, Goal stays active during retry and pauses on immediate abort passed.");
+  console.log("Real bundled Pi RPC + Goal: >3 failures recover, no tool replay, clean model context, permanent failures terminate, Goal stays active during retry and remains stopped (paused/blocked) on immediate abort passed.");
 } finally {
   child.stdin.end();
   const timeout = setTimeout(() => child.kill("SIGKILL"), 3000);

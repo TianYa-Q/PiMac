@@ -1513,9 +1513,7 @@ struct ContentView: View {
           // 已有目标时统一从卡片管理，不重复放置第二个“目标”入口。
         } else {
           GoalCreationButton(
-            state: app.goalState,
-            unavailableReason: app.goalCreationUnavailableReason, onStart: app.startGoal,
-            onCommand: app.sendGoalCommand
+            unavailableReason: app.goalCreationUnavailableReason, onStart: app.startGoal
           )
           // 切换项目、会话或标签页时销毁弹窗，避免提交到另一个执行上下文。
           .id(app.projectURL)
@@ -3304,13 +3302,9 @@ struct ImageAttachmentPreview: View {
 
 struct SettingsView: View {
   @Environment(\.dismiss) private var dismiss
-  @State private var path: String
-  private let originalPath: String
+  private let path: String
   @State private var selectedTab: SettingsTab = .runtime
   @StateObject private var versions: VersionManagerModel
-  @State private var extensionSource = ""
-  @State private var installLocally = false
-  @State private var extensionToRemove: ManagedExtension?
 
   enum SettingsTab: String, CaseIterable {
     case runtime = "运行环境"
@@ -3341,13 +3335,13 @@ struct SettingsView: View {
 
   init(
     path: String, projectURL: URL?, telegram: TelegramControl, workspace: WorkspaceModel,
-    initialTab: SettingsTab = .runtime, save: @escaping (String) -> Void
+    initialTab: SettingsTab = .runtime, versionModel: VersionManagerModel? = nil,
+    save: @escaping (String) -> Void
   ) {
     _selectedTab = State(initialValue: initialTab)
-    _path = State(initialValue: path)
-    originalPath = path
+    self.path = path
     _versions = StateObject(
-      wrappedValue: VersionManagerModel(piPath: path, projectURL: projectURL))
+      wrappedValue: versionModel ?? VersionManagerModel())
     self.projectURL = projectURL
     self.telegram = telegram
     self.workspace = workspace
@@ -3364,24 +3358,10 @@ struct SettingsView: View {
             if selectedTab == .runtime {
               LidSleepSettingsView()
 
-              GroupBox("Pi 路径") {
-                VStack(alignment: .leading, spacing: 8) {
-                  HStack(spacing: 8) {
-                    TextField("pi 或完整路径", text: $path)
-                      .textFieldStyle(.roundedBorder)
-                    Button("选择…", action: choosePiExecutable)
-                    if pathChanged {
-                      Button("还原") { path = originalPath }
-                        .buttonStyle(.borderless)
-                    }
-                  }
-                  if normalizedPath.isEmpty {
-                    Label("Pi 路径不能为空", systemImage: "exclamationmark.circle")
-                      .font(.caption).foregroundStyle(.red)
-                  }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 4)
+              GroupBox("Pi 运行环境") {
+                Text("Pi 核心与扩展由 PiMac 内部统一管理。版本信息见「版本与扩展」。")
+                  .font(.callout).foregroundStyle(.secondary)
+                  .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
               }
 
             }
@@ -3421,54 +3401,12 @@ struct SettingsView: View {
                       .foregroundStyle(versions.piHasUpdate ? Color.orange : Color.secondary)
                   }
                   Spacer()
-                  if versions.updatingID == "pi" {
-                    ProgressView().controlSize(.small)
-                  } else if versions.piHasUpdate {
-                    Button("更新到 \(versions.piLatestVersion ?? "最新版")") {
-                      versions.updatePi()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(versions.isBusy)
-                  }
+                  Text("内部管理").font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(.vertical, 5)
               }
 
-              GroupBox("安装扩展包") {
-                VStack(alignment: .leading, spacing: 8) {
-                  TextField("npm:包名、git:仓库地址或本地路径", text: $extensionSource)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(versions.isBusy)
-                  HStack {
-                    Picker("安装范围", selection: $installLocally) {
-                      Text("全局").tag(false)
-                      Text("当前项目").tag(true)
-                        .disabled(projectURL == nil)
-                    }
-                    .frame(maxWidth: 280)
-                    .disabled(versions.isBusy)
-                    Spacer()
-                    Button {
-                      versions.install(source: extensionSource, local: installLocally)
-                    } label: {
-                      if versions.updatingID == "install" {
-                        ProgressView().controlSize(.small)
-                      } else {
-                        Label("安装", systemImage: "plus")
-                      }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(
-                      versions.isBusy
-                        || VersionManagerModel.installArguments(
-                          source: extensionSource, local: installLocally) == nil
-                        || (installLocally && projectURL == nil))
-                  }
-                }
-                .padding(.vertical, 5)
-              }
-
-              GroupBox("已安装扩展包") {
+              GroupBox("内部模块") {
                 VStack(alignment: .leading, spacing: 0) {
                   if versions.extensions.isEmpty, versions.isChecking {
                     HStack(spacing: 8) {
@@ -3478,7 +3416,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 12)
                   } else if versions.extensions.isEmpty {
-                    Text("暂无扩展")
+                    Text("尚未读取内部模块清单")
                       .foregroundStyle(.secondary)
                       .padding(.vertical, 12)
                   } else {
@@ -3492,7 +3430,7 @@ struct SettingsView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
               }
 
-              Text("扩展变更后需重开会话。")
+              Text("版本由 PiMac 统一升级并验证兼容性，此处仅展示版本，不提供安装、删除或更新操作。")
                 .font(.caption).foregroundStyle(.secondary)
 
               if !versions.message.isEmpty {
@@ -3522,26 +3460,16 @@ struct SettingsView: View {
                 Text("检查更新")
               }
             }
-            .disabled(versions.isBusy)
-            if versions.extensionUpdateCount > 0 {
-              Button("更新全部（\(versions.extensionUpdateCount)）") {
-                versions.updateAllExtensions()
-              }
-              .disabled(versions.isBusy)
-            }
-          }
-          if pathChanged {
-            Text("路径待保存")
-              .font(.caption).foregroundStyle(.secondary)
+            .disabled(versions.isChecking)
+
           }
           Spacer()
-          Button(pathChanged ? "保存并关闭" : "关闭") {
-            save(normalizedPath)
+          Button("关闭") {
+            save(path)
             dismiss()
           }
           .buttonStyle(.borderedProminent)
           .keyboardShortcut(.defaultAction)
-          .disabled(normalizedPath.isEmpty)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
@@ -3550,23 +3478,6 @@ struct SettingsView: View {
     .frame(width: 760, height: 580)
     .task(id: selectedTab) {
       if selectedTab == .updates { versions.refresh() }
-    }
-    .alert(
-      "删除扩展包？",
-      isPresented: Binding(
-        get: { extensionToRemove != nil },
-        set: { if !$0 { extensionToRemove = nil } }
-      )
-    ) {
-      Button("取消", role: .cancel) { extensionToRemove = nil }
-      Button("删除", role: .destructive) {
-        if let item = extensionToRemove { versions.remove(item) }
-        extensionToRemove = nil
-      }
-    } message: {
-      if let item = extensionToRemove {
-        Text("将从\(item.scope)配置中移除 \(item.source)。本地源文件不会被删除，已打开的会话不受影响。")
-      }
     }
   }
 
@@ -3602,24 +3513,6 @@ struct SettingsView: View {
     .frame(width: 156)
     .frame(maxHeight: .infinity)
     .background(.regularMaterial)
-  }
-
-  private var normalizedPath: String {
-    path.trimmingCharacters(in: .whitespacesAndNewlines)
-  }
-
-  private var pathChanged: Bool { normalizedPath != originalPath }
-
-  private func choosePiExecutable() {
-    let panel = NSOpenPanel()
-    panel.title = "选择 Pi 可执行文件"
-    panel.message = "请选择已安装的 Pi 命令或可执行文件。"
-    panel.canChooseDirectories = false
-    panel.allowsMultipleSelection = false
-    panel.showsHiddenFiles = true
-    if panel.runModal() == .OK, let url = panel.url {
-      path = url.path
-    }
   }
 
   private var versionDescription: String {
@@ -3662,40 +3555,13 @@ struct SettingsView: View {
         }
       }
       Spacer()
-      if versions.updatingID == item.id {
-        ProgressView().controlSize(.small)
-      } else {
-        if item.hasUpdate {
-          Button("更新") { versions.update(item) }
-            .buttonStyle(.borderedProminent)
-            .disabled(versions.isBusy)
-        }
-        Button(role: .destructive) {
-          extensionToRemove = item
-        } label: {
-          Image(systemName: "trash")
-        }
-        .help("删除扩展包")
-        .accessibilityLabel("删除 \(item.source)")
-        .disabled(versions.isBusy)
-      }
+
     }
     .padding(.vertical, 9)
   }
 
   private func extensionVersionDescription(_ item: ManagedExtension) -> String {
     let current = item.currentVersion ?? "未知"
-    if item.isPinned {
-      if let latest = item.latestVersion,
-        VersionManagerModel.isNewer(latest, than: current)
-      {
-        return "当前 \(current) · 已固定版本 · Registry 最新 \(latest)"
-      }
-      return "当前 \(current) · 已固定版本，不参与自动更新"
-    }
-    if case .local = item.kind { return "本地扩展 · 不由 Pi 更新" }
-    if item.hasUpdate { return "当前 \(current) · 最新 \(item.latestVersion ?? "未知")" }
-    if let latest = item.latestVersion { return "当前 \(current) · 已是最新版本（\(latest)）" }
-    return "当前 \(current) · 最新版本未知"
+    return "当前 \(current) · 最新 \(item.latestVersion ?? "检查失败或未知")"
   }
 }

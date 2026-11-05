@@ -34,7 +34,7 @@ struct GoalRevisionForm: View {
         .frame(height: 200)
         .padding(6)
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.3)))
-      Text("提交后先讨论并确认修订，不会直接覆盖已保存的目标。取消此窗口不会修改目标。")
+      Text("保存后直接更新目标，保留累计用量。暂停的目标不会因此恢复执行。")
         .font(.caption)
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
@@ -49,7 +49,7 @@ struct GoalRevisionForm: View {
       HStack {
         Button("取消", action: onDismiss).keyboardShortcut(.cancelAction)
         Spacer()
-        Button("讨论并确认修改") {
+        Button("保存修改") {
           guard canControl, revision.command(objective: objective, state: state) != nil else {
             return
           }

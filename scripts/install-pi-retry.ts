@@ -13,13 +13,13 @@ export const permanentErrors = String.raw`\\b(?:400|401|403|404|405|413|415|422)
 const transportErrors = String.raw`\\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)\\b`;
 export const piRetryPatches = [
   { owner: "agent", file: "dist/core/settings-manager.js",
-    sha256: "f3eeaadbc97b8c36acf98b1dd5894265f7f719bab95218e66dbc8c25658d5b12",
+    sha256: "66edb495ff9767e7f2ce0d2f4e2d102532e4b396ad7bc7c3c648c7c12c0fe71d",
     edits: [{ oldText: settingsAnchor, newText: settingsReplacement }] },
-  { owner: "agent", file: "dist/bundle/chunks/chunk-66G7ITPS.js",
-    sha256: "0426becd43ff630d8c9129f5606b23d0a43d5c115334884c77aa6595035c8690",
+  { owner: "agent", file: "dist/bundle/chunks/chunk-44DLKSKE.js",
+    sha256: "e52d27d064df05fe8ec15f05db07d7c895051597551a0d62b2fe77208d88e942",
     edits: [{ oldText: settingsAnchor.replaceAll(" ", ""), newText: settingsReplacement }] },
-  { owner: "agent", file: "dist/bundle/chunks/chunk-RH6M5TBT.js",
-    sha256: "2490522d0a2f4aae7353481a9ab4b0154ba038602b4f0997bb20659526c80340",
+  { owner: "agent", file: "dist/bundle/chunks/chunk-62VOPMLK.js",
+    sha256: "5c961be45765d1c3676c476c8777177a002a672ee67f7b8af6b554f2437f7ad4",
     edits: [
       { oldText: 'NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN=buildProviderErrorPattern(["GoUsageLimitError"',
         newText: `NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN=buildProviderErrorPattern(["${permanentErrors}","GoUsageLimitError"` },
@@ -27,7 +27,7 @@ export const piRetryPatches = [
         newText: `RETRYABLE_PROVIDER_ERROR_PATTERN=buildProviderErrorPattern(["${transportErrors}","overloaded"` },
     ] },
   { owner: "ai", file: "dist/utils/retry.js",
-    sha256: "cab8af3e38101abc2a7c1c51caa871481c805b3cbe83b9d7267e24857736fc60",
+    sha256: "6ab3ea07994c28824374681d4b0c8055d42b5f9eaccb1702573f3a95b371bfd7",
     edits: [
       { oldText: 'const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([',
         newText: `const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([\n    "${permanentErrors}",` },
@@ -43,7 +43,7 @@ export function patchPiRetrySource(source: string, patch: typeof piRetryPatches[
   }
   if (createHash("sha256").update(original).digest("hex") !== patch.sha256 ||
       patch.edits.some(({ oldText }) => original.split(oldText).length !== 2)) {
-    throw new Error(`Pi retry source differs from pinned 1.3.0: ${patch.file}`);
+    throw new Error(`Pi retry source differs from pinned 1.5.0: ${patch.file}`);
   }
   return patch.edits.reduce((text, edit) => text.replace(edit.oldText, edit.newText), original);
 }
@@ -55,7 +55,7 @@ export async function installPiRetry(packageRoot: string, agentDir: string, chec
   const aiRoot = dirname(aiManifest);
   for (const [path, name] of [[root, "@earendil-works/pi-coding-agent"], [aiRoot, "@earendil-works/pi-ai"]]) {
     const manifest = JSON.parse(await readFile(join(path!, "package.json"), "utf8"));
-    if (manifest.name !== name || manifest.version !== "1.3.0") throw new Error(`Expected ${name}@1.3.0`);
+    if (manifest.name !== name || manifest.version !== "1.5.0") throw new Error(`Expected ${name}@1.5.0`);
   }
   // 所有原文先通过哈希校验；未知版本/本地改动不允许覆盖。临时文件与 rename 避免修改 pnpm 硬链接的其他实例。
   const files = await Promise.all(piRetryPatches.map(async (patch) => {
@@ -96,7 +96,7 @@ export async function installPiRetry(packageRoot: string, agentDir: string, chec
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const root = process.argv[process.argv.indexOf("--package-root") + 1];
   if (!process.argv.includes("--package-root") || !root || root.startsWith("--")) {
-    throw new Error("Usage: tsx scripts/install-pi-retry.ts --package-root <pi-coding-agent@1.3.0 directory> [--check]");
+    throw new Error("Usage: tsx scripts/install-pi-retry.ts --package-root <pi-coding-agent@1.5.0 directory> [--check]");
   }
   installPiRetry(root, process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), process.argv.includes("--check"))
     .then(() => console.log("Pi persistent retry installed/verified; no process restarted."))

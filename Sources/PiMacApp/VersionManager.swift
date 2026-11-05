@@ -3,10 +3,8 @@ import Foundation
 struct ManagedExtension: Identifiable, Equatable, Sendable {
   enum Kind: Equatable, Sendable {
     case npm(name: String, pinned: Bool)
-    case git(pinned: Bool)
     case local
   }
-
   let source: String
   let path: String
   let scope: String
@@ -14,26 +12,55 @@ struct ManagedExtension: Identifiable, Equatable, Sendable {
   var currentVersion: String?
   var latestVersion: String?
   var error: String?
-
-  var id: String { "\(scope):\(source)" }
-
+  var id: String { source }
   var hasUpdate: Bool {
-    guard !isPinned, let currentVersion, let latestVersion else { return false }
-    if case .git = kind { return latestVersion != currentVersion }
+    guard let currentVersion, let latestVersion else { return false }
     return VersionManagerModel.isNewer(latestVersion, than: currentVersion)
   }
+}
 
-  var isPinned: Bool {
-    switch kind {
-    case .npm(_, let pinned), .git(let pinned): pinned
-    case .local: false
-    }
+/// 安装清单由内部发布脚本生成；这里核对实际文件，不把锁定版本当成已安装版本。
+struct ManagedPiRuntime: Decodable, Sendable {
+  struct Module: Decodable, Sendable {
+    let name: String
+    let version: String
+    let manifestPath: String
+  }
+  let schemaVersion: Int
+  let executable: String
+  let modules: [Module]
+
+  static var manifestURL: URL {
+    FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent("Library/Application Support/PiMac/ManagedRuntime/modules.json")
   }
 
-  var canUpdate: Bool {
-    switch kind {
-    case .local: false
-    case .npm, .git: !isPinned
+  static func load(from url: URL = manifestURL) throws -> ManagedPiRuntime {
+    let value = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
+    guard value.schemaVersion == 1, !value.modules.isEmpty,
+      value.modules.contains(where: { $0.name == "@earendil-works/pi-coding-agent" }),
+      Set(value.modules.map(\.name)).count == value.modules.count,
+      FileManager.default.isExecutableFile(atPath: value.executable)
+    else { throw InventoryError.invalid }
+    for module in value.modules {
+      let data = try Data(contentsOf: URL(fileURLWithPath: module.manifestPath))
+      let manifest = try JSONDecoder().decode(PackageVersion.self, from: data)
+      guard manifest.version == module.version else {
+        throw InventoryError.versionMismatch(module.name)
+      }
+    }
+    return value
+  }
+
+  private struct PackageVersion: Decodable { let version: String }
+  enum InventoryError: LocalizedError {
+    case invalid
+    case versionMismatch(String)
+    var errorDescription: String? {
+      switch self {
+      case .invalid: "内部模块清单无效或运行文件缺失，请由 PiMac 重新部署。"
+      case .versionMismatch(let name): "\(name) 的实际版本与内部清单不一致，请由 PiMac 重新部署。"
+      }
     }
   }
 }
@@ -44,15 +71,21 @@ final class VersionManagerModel: ObservableObject {
   @Published private(set) var piLatestVersion: String?
   @Published private(set) var extensions: [ManagedExtension] = []
   @Published private(set) var isChecking = false
-  @Published private(set) var updatingID: String?
   @Published private(set) var message = ""
+  private let checksEnabled: Bool
+  private let manifestURL: URL
 
-  private var piPath: String
-  private var projectURL: URL?
+  init(manifestURL: URL = ManagedPiRuntime.manifestURL) {
+    self.manifestURL = manifestURL
+    checksEnabled = true
+  }
 
-  init(piPath: String, projectURL: URL?) {
-    self.piPath = piPath
-    self.projectURL = projectURL
+  init(current: String, latest: String, extensions: [ManagedExtension]) {
+    manifestURL = ManagedPiRuntime.manifestURL
+    checksEnabled = false
+    piCurrentVersion = current
+    piLatestVersion = latest
+    self.extensions = extensions
   }
 
   var piHasUpdate: Bool {
@@ -60,308 +93,64 @@ final class VersionManagerModel: ObservableObject {
     return Self.isNewer(latest, than: current)
   }
 
-  var extensionUpdateCount: Int { extensions.filter(\.hasUpdate).count }
-
-  func configure(piPath: String, projectURL: URL?) {
-    self.piPath = piPath
-    self.projectURL = projectURL
-  }
-
-  var isBusy: Bool { isChecking || updatingID != nil }
-
-  func refresh(preservingMessage: Bool = false) {
-    guard !isChecking, updatingID == nil else { return }
+  func refresh() {
+    guard checksEnabled, !isChecking else { return }
     isChecking = true
-    if !preservingMessage { message = "" }
-    let path = piPath
-    let cwd = projectURL
+    message = ""
+    let url = manifestURL
     Task {
-      let snapshot = await Self.loadSnapshot(piPath: path, projectURL: cwd)
-      piCurrentVersion = snapshot.piCurrent
-      piLatestVersion = snapshot.piLatest
-      extensions = snapshot.extensions
-      if preservingMessage {
-        if !snapshot.message.isEmpty { message += "\n" + snapshot.message }
-      } else {
-        message = snapshot.message
-      }
-      isChecking = false
-    }
-  }
-
-  func updatePi() {
-    runUpdate(id: "pi", arguments: ["update", "--self"])
-  }
-
-  func updateAllExtensions() {
-    runUpdate(id: "extensions", arguments: ["update", "--extensions"])
-  }
-
-  func update(_ item: ManagedExtension) {
-    guard item.canUpdate else { return }
-    runUpdate(id: item.id, arguments: ["update", "--extension", item.source])
-  }
-
-  func install(source: String, local: Bool) {
-    guard let arguments = Self.installArguments(source: source, local: local),
-      !local || projectURL != nil
-    else { return }
-    runUpdate(id: "install", arguments: arguments, action: "安装")
-  }
-
-  func remove(_ item: ManagedExtension) {
-    guard item.scope != "项目" || projectURL != nil else { return }
-    runUpdate(id: item.id, arguments: Self.removeArguments(for: item), action: "删除")
-  }
-
-  nonisolated static func installArguments(source: String, local: Bool) -> [String]? {
-    let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !source.isEmpty, !source.hasPrefix("-"),
-      !source.contains("\n"), !source.contains("\r")
-    else { return nil }
-    return ["install", source] + (local ? ["--local"] : [])
-  }
-
-  nonisolated static func removeArguments(for item: ManagedExtension) -> [String] {
-    ["remove", item.source] + (item.scope == "项目" ? ["--local"] : [])
-  }
-
-  private func runUpdate(id: String, arguments: [String], action: String = "更新") {
-    guard updatingID == nil, !isChecking else { return }
-    updatingID = id
-    message = "正在\(action)…"
-    let path = piPath
-    let cwd = projectURL
-    Task {
-      let result = await Task.detached {
-        Self.run(path, arguments: arguments, workingDirectory: cwd)
-      }.value
-      if result.status == 0 {
-        message = "\(action)完成。重新打开会话后生效。"
-        if !result.output.isEmpty { message += "\n" + result.output }
-        updatingID = nil
-        refresh(preservingMessage: true)
-      } else {
-        message = "\(action)失败（状态码 \(result.status)）。"
-        if !result.output.isEmpty { message += "\n" + result.output }
-        updatingID = nil
-      }
-    }
-  }
-
-  private struct Snapshot: Sendable {
-    let piCurrent: String?
-    let piLatest: String?
-    let extensions: [ManagedExtension]
-    let message: String
-  }
-
-  nonisolated private static func loadSnapshot(
-    piPath: String, projectURL: URL?
-  ) async -> Snapshot {
-    let versionResult = await Task.detached {
-      run(piPath, arguments: ["--version"], workingDirectory: projectURL)
-    }.value
-    let current =
-      versionResult.status == 0
-      ? versionResult.output.split(whereSeparator: \.isWhitespace).first.map(String.init) : nil
-
-    var latest: String?
-    var checkMessage = ""
-    if current != nil,
-      let url = URL(string: "https://pi.dev/api/latest-version")
-    {
+      defer { isChecking = false }
       do {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 12
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if (response as? HTTPURLResponse)?.statusCode == 200,
-          let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        {
-          latest = payload["version"] as? String
+        let inventory = try await Task.detached { try ManagedPiRuntime.load(from: url) }.value
+        var rows: [ManagedExtension] = []
+        for module in inventory.modules {
+          var row = ManagedExtension(
+            source: module.name, path: module.manifestPath, scope: "内部管理",
+            kind: module.name.hasPrefix("PiMac") || module.name == "账户管理"
+              ? .local : .npm(name: module.name, pinned: true), currentVersion: module.version)
+          switch row.kind {
+          case .local:
+            // 自有模块没有 Registry 发布；最新即当前随 PiMac 管理的版本。
+            row.latestVersion = module.version
+          case .npm(let name, _):
+            do { row.latestVersion = try await Self.latestNPMVersion(package: name) } catch {
+              row.error = "最新版本检查失败：\(error.localizedDescription)"
+            }
+          }
+          rows.append(row)
         }
+        let core = rows.first { $0.source == "@earendil-works/pi-coding-agent" }
+        piCurrentVersion = core?.currentVersion
+        piLatestVersion = core?.latestVersion
+        extensions = rows.filter { $0.source != "@earendil-works/pi-coding-agent" }
+        if let error = core?.error { message = error }
       } catch {
-        checkMessage = "无法检查 Pi 最新版本：\(error.localizedDescription)"
-      }
-    } else if versionResult.status != 0 {
-      checkMessage = versionResult.output.isEmpty ? "无法运行 Pi。" : versionResult.output
-    }
-
-    let listResult = await Task.detached {
-      run(piPath, arguments: ["list", "--approve"], workingDirectory: projectURL)
-    }.value
-    var packages = parsePackageList(listResult.output)
-    for index in packages.indices {
-      packages[index].currentVersion = installedVersion(for: packages[index])
-      switch packages[index].kind {
-      case .npm(let name, _):
-        do {
-          packages[index].latestVersion = try await latestNPMVersion(package: name)
-        } catch {
-          packages[index].error = error.localizedDescription
-        }
-      case .git(let pinned):
-        guard !pinned else { continue }
-        let remote = await Task.detached {
-          runGitRemoteVersion(at: packages[index].path)
-        }.value
-        packages[index].latestVersion = remote.version
-        packages[index].error = remote.error
-      case .local:
-        break
+        // 读取失败保留最后成功快照，明确标记失败，不能伪装成“暂无模块”。
+        message = "内部模块读取失败：\(error.localizedDescription)"
       }
     }
-    if listResult.status != 0, checkMessage.isEmpty {
-      checkMessage = listResult.output.isEmpty ? "无法读取扩展包列表。" : listResult.output
-    }
-    return Snapshot(
-      piCurrent: current,
-      piLatest: latest,
-      extensions: packages,
-      message: checkMessage
-    )
   }
 
-  nonisolated static func parsePackageList(_ output: String) -> [ManagedExtension] {
-    var scope = "用户"
-    var pendingSource: String?
-    var result: [ManagedExtension] = []
-    for rawLine in output.split(separator: "\n", omittingEmptySubsequences: false) {
-      let raw = String(rawLine)
-      let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-      if line.hasPrefix("User packages:") {
-        scope = "用户"
-        pendingSource = nil
-      } else if line.hasPrefix("Project packages:") {
-        scope = "项目"
-        pendingSource = nil
-      } else if raw.hasPrefix("  "), !raw.hasPrefix("    "), !line.isEmpty {
-        pendingSource = line
-      } else if raw.hasPrefix("    "), let source = pendingSource, !line.isEmpty {
-        result.append(
-          ManagedExtension(
-            source: source,
-            path: line,
-            scope: scope,
-            kind: packageKind(for: source),
-            currentVersion: nil,
-            latestVersion: nil,
-            error: nil
-          ))
-        pendingSource = nil
-      }
-    }
-    return result
-  }
-
-  nonisolated private static func packageKind(for source: String) -> ManagedExtension.Kind {
-    if source.hasPrefix("npm:") {
-      let spec = String(source.dropFirst(4))
-      let separator = spec.lastIndex(of: "@")
-      let hasPinnedVersion = separator.map { $0 != spec.startIndex } ?? false
-      let name = hasPinnedVersion ? String(spec[..<separator!]) : spec
-      return .npm(name: name, pinned: hasPinnedVersion)
-    }
-    if source.hasPrefix("git:") || source.hasPrefix("http://")
-      || source.hasPrefix("https://") || source.hasPrefix("ssh://")
-    {
-      // A ref follows the last @. The @ in git@host is before the repository path.
-      let tail = source.split(separator: "/").last.map(String.init) ?? source
-      return .git(pinned: tail.contains("@"))
-    }
-    return .local
-  }
-
-  nonisolated private static func installedVersion(for item: ManagedExtension) -> String? {
-    if case .git = item.kind {
-      let result = run(
-        "/usr/bin/git",
-        arguments: ["-C", item.path, "rev-parse", "--short", "HEAD"]
-      )
-      if result.status == 0 { return result.output }
-    }
-    let url = URL(fileURLWithPath: item.path).appendingPathComponent("package.json")
-    if let data = try? Data(contentsOf: url),
-      let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      let version = payload["version"] as? String
-    {
-      return version
-    }
-    return nil
-  }
-
-  nonisolated private static func latestNPMVersion(package name: String) async throws -> String? {
+  nonisolated static func latestNPMVersion(package name: String) async throws -> String {
     var allowed = CharacterSet.alphanumerics
     allowed.insert(charactersIn: "-._~")
     guard let encoded = name.addingPercentEncoding(withAllowedCharacters: allowed),
       let url = URL(string: "https://registry.npmjs.org/\(encoded)/latest")
-    else { return nil }
+    else { throw URLError(.badURL) }
     var request = URLRequest(url: url)
     request.timeoutInterval = 12
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     let (data, response) = try await URLSession.shared.data(for: request)
-    guard (response as? HTTPURLResponse)?.statusCode == 200,
-      let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else { return nil }
-    return payload["version"] as? String
-  }
-
-  nonisolated private static func runGitRemoteVersion(
-    at path: String
-  ) -> (version: String?, error: String?) {
-    let result = run(
-      "/usr/bin/git", arguments: ["-C", path, "ls-remote", "origin", "HEAD"])
-    guard result.status == 0 else { return (nil, result.output) }
-    let hash = result.output.split(whereSeparator: \.isWhitespace).first.map(String.init)
-    return (hash.map { String($0.prefix(7)) }, nil)
+    guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+      throw URLError(.badServerResponse)
+    }
+    struct Version: Decodable { let version: String }
+    let version = try JSONDecoder().decode(Version.self, from: data).version
+    guard !version.isEmpty else { throw URLError(.cannotParseResponse) }
+    return version
   }
 
   nonisolated static func isNewer(_ candidate: String, than current: String) -> Bool {
-    let left = candidate.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
-      .split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
-    let right = current.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
-      .split(separator: ".").map { Int($0.prefix { $0.isNumber }) ?? 0 }
-    if left != right {
-      for index in 0..<max(left.count, right.count) {
-        let lhs = index < left.count ? left[index] : 0
-        let rhs = index < right.count ? right[index] : 0
-        if lhs != rhs { return lhs > rhs }
-      }
-    }
-    return candidate != current && !candidate.allSatisfy(\.isHexDigit)
-  }
-
-  nonisolated private static func run(
-    _ executable: String, arguments: [String], workingDirectory: URL? = nil
-  ) -> (status: Int32, output: String) {
-    let temporaryURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("pi-mac-version-\(UUID().uuidString).log")
-    FileManager.default.createFile(atPath: temporaryURL.path, contents: nil)
-    guard let outputHandle = try? FileHandle(forWritingTo: temporaryURL) else {
-      return (-1, "无法创建命令输出文件。")
-    }
-    defer {
-      try? outputHandle.close()
-      try? FileManager.default.removeItem(at: temporaryURL)
-    }
-
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-    process.arguments = ["-lc", "exec \"$@\"", "pi-mac-version", executable] + arguments
-    process.currentDirectoryURL = workingDirectory
-    process.standardOutput = outputHandle
-    process.standardError = outputHandle
-    do {
-      try process.run()
-      process.waitUntilExit()
-      try? outputHandle.synchronize()
-      let data = (try? Data(contentsOf: temporaryURL)) ?? Data()
-      let output = String(decoding: data, as: UTF8.self)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      return (process.terminationStatus, output)
-    } catch {
-      return (-1, error.localizedDescription)
-    }
+    candidate.compare(current, options: .numeric) == .orderedDescending
   }
 }

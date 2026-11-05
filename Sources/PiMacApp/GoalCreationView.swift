@@ -1,29 +1,17 @@
 import SwiftUI
 
-enum GoalStartMode: CaseIterable {
-  case discuss
-  case direct
-
-  func command(objective: String) -> String? {
-    let text = objective.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !text.isEmpty else { return nil }
-    return "\(self == .discuss ? "/goal" : "/goal-direct") \(text)"
-  }
-}
-
-/// 统一处理弹窗动作：取消不走提交回调，拒绝提交时保留弹窗和用户输入。
+/// 统一处理弹窗动作：取消不提交，拒绝提交时保留用户输入。
 enum GoalCreationAction {
-  case cancel
-  case start(GoalStartMode)
+  case cancel, start
 
   @discardableResult
   func perform(
     objective: String, unavailableReason: String?, onDismiss: () -> Void,
-    onStart: (String, GoalStartMode) -> Bool
+    onStart: (String) -> Bool
   ) -> Bool {
-    if case .start(let mode) = self {
-      guard unavailableReason == nil, mode.command(objective: objective) != nil,
-        onStart(objective, mode)
+    if case .start = self {
+      let text = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard unavailableReason == nil, !text.isEmpty, text.utf16.count <= 4000, onStart(text)
       else { return false }
     }
     onDismiss()
@@ -31,37 +19,26 @@ enum GoalCreationAction {
   }
 }
 
-/// 输入只属于当前弹窗；不复用 composer，取消或发送都不改动正文和附件。
 struct GoalCreationButton: View {
-  let state: ThreadGoal.State
   let unavailableReason: String?
-  let onStart: (String, GoalStartMode) -> Bool
-  let onCommand: (GoalCommand) -> Void
+  let onStart: (String) -> Bool
   @State private var isPresented = false
   @State private var objective = ""
 
   var body: some View {
-    Menu {
-      Button("新建目标…") {
-        objective = ""
-        isPresented = true
-      }
-      Button("选择已有目标…") { onCommand(.focus) }
-        .disabled(!GoalCommand.focus.isAvailable(in: state))
-      Divider()
-      Button("运行与审核设置（高级）…") { onCommand(.settings) }
-        .disabled(!GoalCommand.settings.isAvailable(in: state))
+    Button {
+      objective = ""
+      isPresented = true
     } label: {
       Label("目标", systemImage: "target")
         .font(.system(size: 12, weight: .medium))
     }
-    // Menu 不是普通 Button；显式使用紧凑菜单样式并锁定理想尺寸，避免原生弹出控件横向吃满 HStack。
-    .menuStyle(.borderlessButton)
+    .buttonStyle(.borderless)
     .fixedSize()
     .controlSize(.small)
     .disabled(unavailableReason != nil)
-    .help(unavailableReason ?? "新建目标，或选择已有目标")
-    .accessibilityLabel("目标管理")
+    .help(unavailableReason ?? "新建当前会话的目标")
+    .accessibilityLabel("新建目标")
     .sheet(isPresented: $isPresented) {
       GoalCreationForm(
         objective: $objective, unavailableReason: unavailableReason,
@@ -74,20 +51,19 @@ struct GoalCreationForm: View {
   @Binding var objective: String
   let unavailableReason: String?
   let onDismiss: () -> Void
-  let onStart: (String, GoalStartMode) -> Bool
+  let onStart: (String) -> Bool
   @State private var submissionRejected = false
   @FocusState private var isFocused: Bool
 
   private var canStart: Bool {
-    unavailableReason == nil && GoalStartMode.discuss.command(objective: objective) != nil
+    let text = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+    return unavailableReason == nil && !text.isEmpty && text.utf16.count <= 4000
   }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
-      Label("新建目标", systemImage: "target")
-        .font(.headline)
-      Text("描述你希望完成的目标")
-        .font(.subheadline)
+      Label("新建目标", systemImage: "target").font(.headline)
+      Text("描述你希望完成的目标").font(.subheadline)
       TextEditor(text: $objective)
         .font(.body)
         .focused($isFocused)
@@ -95,7 +71,7 @@ struct GoalCreationForm: View {
         .frame(height: 100)
         .padding(6)
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.3)))
-      Text("讨论并确认：先明确目标、计划和验收标准，确认后执行。\n直接开始：跳过确认，立即按描述创建并执行目标。")
+      Text("每个会话保留一个目标，开始后立即执行。默认每 25 次自动响应暂停，供你检查进度。目标最多 4000 字符。")
         .font(.caption)
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
@@ -104,12 +80,9 @@ struct GoalCreationForm: View {
         .foregroundStyle(.orange)
         .frame(height: 30, alignment: .topLeading)
       HStack {
-        Button("取消") { perform(.cancel) }
-          .keyboardShortcut(.cancelAction)
+        Button("取消") { perform(.cancel) }.keyboardShortcut(.cancelAction)
         Spacer()
-        Button("直接开始") { perform(.start(.direct)) }
-          .disabled(!canStart)
-        Button("讨论并确认") { perform(.start(.discuss)) }
+        Button("开始执行") { perform(.start) }
           .buttonStyle(.borderedProminent)
           .keyboardShortcut(.defaultAction)
           .disabled(!canStart)

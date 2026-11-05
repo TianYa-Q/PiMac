@@ -543,10 +543,10 @@ final class AppModel: ObservableObject {
   }
   /// 新目标不要求已有 Goal 快照；复用扩展原有入口，保持 composer 草稿完全独立。
   @discardableResult
-  func startGoal(objective: String, mode: GoalStartMode) -> Bool {
-    guard goalCreationUnavailableReason == nil,
-      let command = mode.command(objective: objective),
-      let prompt = Self.makePrompt(command, attachments: [], delivery: .followUp)
+  func startGoal(objective: String) -> Bool {
+    let text = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard goalCreationUnavailableReason == nil, !text.isEmpty, text.utf16.count <= 4000,
+      let prompt = Self.makePrompt("/goal \(text)", attachments: [], delivery: .followUp)
     else { return false }
     return submit(prompt) { _ in }
   }
@@ -560,7 +560,7 @@ final class AppModel: ObservableObject {
   }
 
   /// 运行中暂停走独立 Stop 请求，不能把 /goal-pause 排在当前任务后面。
-  /// pi-goal-x 观察到用户 abort 后持久化暂停；原生层不伪造 Goal 状态。
+  /// Goal 扩展观察到用户 abort 后持久化暂停；原生层不伪造 Goal 状态。
   func sendGoalCommand(_ command: GoalCommand) {
     if command == .pause && showsStopControl {
       guard canPauseGoal else { return }
