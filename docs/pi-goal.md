@@ -28,7 +28,7 @@ a normal safe restart/reload; installation alone does not update loaded code.
 
 - Start: `/goal <objective>`; one goal per Pi session. Native creation is allowed during an active run and uses the existing durable `queue_after_active` delivery: idle sessions execute immediately; active sessions finish their current task first. It does not stop or steer that work.
 - Status: `/goal status`.
-- Pause/resume: `/goal pause`, `/goal resume`.
+- Pause/resume: `/goal pause`, `/goal resume`. Native resume is allowed during an active run and uses the same durable `queue_after_active` delivery as creation: it waits for the current task without stopping or steering it. The package's `resumeGoal` has no idle-only guard and sends its owned prompt with `deliverAs: "followUp"`; its automatic-work counter resets when that prompt starts. Stop, compaction, pending interaction and delivery safety gates still apply. Editing and other management controls remain idle-only.
 - Edit: `/goal edit <complete objective>`; retains usage, leaves paused goals paused.
 - Clear: `/goal clear`; immediate, no confirmation, and no unrelated-turn abort.
 
