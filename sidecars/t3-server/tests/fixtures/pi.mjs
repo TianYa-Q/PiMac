@@ -113,8 +113,8 @@ process.stdin.on('data', chunk => {
             statusText: JSON.stringify({ version: 2, provider: 'openai', activeAccount: command.message.slice('account-selection-'.length),
               updatedAt: Date.now(), accounts: [], supportsAccountSwitch: true, managesSelectedAuth: true }) });
         }
-        if (command.message === 'wait') break;
-        if (['mcp-discovery', 'html-render', 'mcp-model-targets'].includes(command.message)) {
+        if (command.message === 'wait' || command.message.includes('fixture-delegated-wait')) break;
+        if (['mcp-discovery', 'html-render', 'mcp-model-targets', 'mcp-delegate-wait'].includes(command.message)) {
           send({ type: 'message_start', message: { role: 'assistant', content: [] } });
           // 使用上游注入的会话凭据，只输出工具名；不把 token 写入日志或投影。
           void (async () => {
@@ -136,6 +136,12 @@ process.stdin.on('data', chunk => {
             };
             await request(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {},
               clientInfo: { name: 'pimac-fixture', version: '1' } });
+            if (command.message === 'mcp-delegate-wait') {
+              const result = await request(2, 'tools/call', { name: 'delegate_task', arguments: {
+                task: 'fixture-delegated-wait', mode: 'async' } });
+              if (result.isError) throw new Error(JSON.stringify(result.content));
+              return;
+            }
             if (command.message === 'mcp-model-targets') {
               const capabilities = await request(2, 'tools/call', { name: 'orchestrator_capabilities', arguments: {} });
               const accepted = [];
@@ -171,7 +177,12 @@ process.stdin.on('data', chunk => {
           })().catch(error => {
             send({ type: 'message_end', message: { role: 'assistant', content: [],
               stopReason: 'error', errorMessage: String(error) } });
-          }).finally(() => { running = false; send({ type: 'agent_settled' }); });
+          }).finally(() => {
+            // 隔离测试让父子都保持运行，直到测试分别显式停止；不使用真实模型。
+            if (command.message !== 'mcp-delegate-wait') {
+              running = false; send({ type: 'agent_settled' });
+            }
+          });
           break;
         }
         if (command.message === 'dialog') {

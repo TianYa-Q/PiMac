@@ -755,9 +755,11 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
   }
 
   func interrupt(threadID: String, runID: String? = nil) async throws {
-    // 与官方 interruptThreadTurn 相同：优先停止整个线程，不依赖分页/缓存中的旧 run ID。
+    // 使用上游线程停止定位当前运行，但不级联取消独立的委派任务。
     if supportsThreadStop {
-      try await dispatch(["type": "thread.stop", "threadId": threadID])
+      try await dispatch([
+        "type": "thread.stop", "threadId": threadID, "stopDelegatedTasks": false,
+      ])
       return
     }
     var target = runID

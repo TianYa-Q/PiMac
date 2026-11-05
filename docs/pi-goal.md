@@ -28,6 +28,10 @@ SHA-256-verified status, session-interaction and transport-classification patche
 - Do not open the goal picker on session reconnection, even with multiple open
   goals. Leave the session unfocused until the user explicitly chooses a goal
   through **选择已有目标…** / `/goal-focus`.
+- RPC `/goal-clear` archives only the currently focused goal immediately, without
+  confirmation or an unfocused-goal picker. The explicit command/button is the
+  user authorization; terminal confirmation, archive history and stale-focus
+  checks remain intact.
 - Preserve paused state across session reconnections without asking to resume.
 - Tell the model to handle ordinary messages and independent tasks normally while
   paused, without asking/reminding the user to resume. Messages and related
@@ -73,7 +77,9 @@ The original extension commands remain available for keyboard users:
 - `/goal-status`, `/goal-list`, `/goal-focus`: inspect or switch goals.
 - `/goal-tweak <change>`: discuss and confirm revisions to the focused goal.
 - `/goal-pause`, `/goal-resume`: pause/resume.
-- `/goal-clear`: archive after confirmation (not Codex's `/goal clear`).
+- `/goal-clear`: immediately archive the focused goal in PiMac/RPC, without a
+  confirmation dialog (not Codex's `/goal clear`). Terminal sessions retain
+  their original confirmation.
 - `/goal-settings`: auditor and continuation settings, including a finite
   `maxAutonomousRuns` allowance if desired. The upstream default is unlimited.
 
@@ -101,7 +107,10 @@ Stopping disables repeated pause clicks. Editing, resume and management still
 require an idle session. Switching projects,
 threads or tabs destroys the local form context. Busy transitions keep editor
 input and fixed feedback space; they do not queue a control command. Details,
-settings, focus and archive dialogs use the existing T3 extension UI bridge.
+settings and focus dialogs use the existing T3 extension UI bridge. Archive
+executes directly without opening a dialog. Parent Stop uses upstream
+`thread.stop` with `stopDelegatedTasks: false`, preserving independently running
+app-owned delegated tasks; stopping a child remains an explicit action.
 The card does not yet reproduce the terminal's full task tree or auditor panel.
 
 ## State boundary
@@ -122,6 +131,13 @@ is disabled or filtered by this integration.
 
 ## Validation and limitations
 
+- RPC clear tests execute the hash-verified 0.32.3 command handler, covering
+  direct archive, no focused goal, stale focus, unchanged terminal confirmation
+  and idempotent installation. They do not replace real-extension disk archive acceptance.
+- A native-client/isolated-Server regression keeps fixture parent and child runs
+  active, stops the parent and verifies the child survives; the default Server
+  stop is then used as a control and does stop that same child. No live model or
+  user task is involved.
 - Running-pause Swift tests cover connected active-Pi availability and an isolated
   real Server stop while message delivery is suspended, preserving the draft and
   holding the queue without enqueueing `/goal-pause`. This Server test uses a goal

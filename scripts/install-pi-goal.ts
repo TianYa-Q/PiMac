@@ -9,6 +9,24 @@ import { permanentErrors } from "./install-pi-retry.ts";
 export const goalPackage = "npm:pi-goal-x@0.32.3";
 export const goalBridgePatches = [
   {
+    file: "goal-commands.ts",
+    sha256: "b28d51d448da7f4ca8ebdfe532d782f1e84adf61ec43cfcf043df4a1882d5b55",
+    anchor: '\t\tif (!core.state.goal && otherOpenGoalCount(core.goalsById, null) > 0) {\n\t\t\tconst selected = await chooseOpenGoal(ctx, "Clear which open goal?");',
+    replacement: '\t\t// RPC 的清除动作只针对当前焦点，不弹选择器，也不触碰其他开放目标。\n\t\tif (ctx.mode !== "rpc" && !core.state.goal && otherOpenGoalCount(core.goalsById, null) > 0) {\n\t\t\tconst selected = await chooseOpenGoal(ctx, "Clear which open goal?");',
+  },
+  {
+    file: "goal-commands.ts",
+    sha256: "b28d51d448da7f4ca8ebdfe532d782f1e84adf61ec43cfcf043df4a1882d5b55",
+    anchor: '\t\tif (!ctx.hasUI) {\n\t\t\tctx.ui.notify(`Run /goal-clear in an interactive session to confirm clearing: ${oneLineSummary(target)}`, "warning");',
+    replacement: '\t\tif (!ctx.hasUI && ctx.mode !== "rpc") {\n\t\t\tctx.ui.notify(`Run /goal-clear in an interactive session to confirm clearing: ${oneLineSummary(target)}`, "warning");',
+  },
+  {
+    file: "goal-commands.ts",
+    sha256: "b28d51d448da7f4ca8ebdfe532d782f1e84adf61ec43cfcf043df4a1882d5b55",
+    anchor: '\t\tconst confirmed = await ctx.ui.confirm("Clear goal?", oneLineSummary(target));',
+    replacement: '\t\t// RPC 中点击 Clear Goal 或显式输入命令本身即为用户授权；仍沿用原扩展归档与焦点校验。\n\t\tconst confirmed = ctx.mode === "rpc" || await ctx.ui.confirm("Clear goal?", oneLineSummary(target));',
+  },
+  {
     file: "goal-events.ts",
     sha256: "c1d76993741c70460e1886bf04b5f633f5da41f591d943dacea24c2b1ad4d63f",
     anchor: "\t\tnetworkErrorRecoveryAfterSettleFor = null;\n\t\tcore.scheduler.settled(ctx, !!goalId && core.isActionableContinuationGoal(goalId));",
