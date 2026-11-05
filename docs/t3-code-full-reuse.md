@@ -19,10 +19,10 @@
 - 使用官方 `orchestration.subscribeShell` 和 `orchestration.subscribeThread`；删除正文/列表的周期全量轮询。初次订阅或断线重连接收权威快照，后续按序应用增量，序号允许全局跳跃；不重放写命令。
 - `sidecars/t3-client-state/index.ts` 只适配宿主：直接导入同一 pin 的官方 contracts、`orchestrationV2Projection.ts` 和 `shellReducer.ts`，在独立 actor 的 JavaScriptCore 中执行。不是 Electron，也不运行消息正文或工具生成的 JavaScript。
 - 原生标签选择控制正文订阅；隐藏标签只消费 shell 状态，不清空历史。Telegram 的实际消费者持独立观察租约，避免隐藏桌面标签时丢回复；最后一个消费者退出后取消订阅和该线程的资源任务。
-- 保留显式刷新、投递恢复、导出、统计等按需 HTTP 路径。资源不完整时独立分批续读，并遵守失败资源的重试时间，不依赖下一次正文事件；新正文、隐藏标签或前台投递会取消旧资源任务。首次选中仍接收完整历史并沿用既有资源水合；本次没有启用 bounded snapshot/history 分页，不能宣称超长会话已经完成分页或逐行附件懒加载。
+- 保留显式刷新、投递恢复、导出、统计等按需 HTTP 路径。资源不完整时独立分批续读，并遵守失败资源的重试时间，不依赖下一次正文事件；新正文、隐藏标签或前台投递会取消旧资源任务。首次选中和显式展示刷新使用官方 bounded snapshot，只读取近期窗口；顶部「加载更早消息」按官方不透明游标请求一页历史，直接复用 `threadHistoryMerge.ts` 合并，保留实时事件的新版本与序号。未加载旧页不进行资源水合；已加载窗口仍使用既有分批水合，并非逐行附件懒加载。隐藏或重连后的新订阅重新建立近期窗口；用户展开的旧页不写回启动缓存，缓存只保留最近 75 个展示条目。投递核对、导出等非展示用途仍保留完整权威读取。
 - `third_party/t3code/` 保留普通上游源码快照，不保留内层 `.git` 或 submodule 注册；来源与 commit 记录在 `third_party/t3code-source.json`。这份源码目前是生成 reducer 的直接输入，不只是参考资料。
 - 生成客户端资源：`GOMAXPROCS=1 node --import tsx scripts/build-t3-client-state.ts`。来源记录必须匹配 Server pin；升级时同步替换对应版本源码与来源记录。生成物和所打包依赖的许可证放在原生 Resources。原生构建不因此重新编译 Server。
-- 校验生成物和 TypeScript 类型：同命令加 `--check`。针对性回归：`T3StreamReducerTests`、`HTMLLiveHydrationTests`、`T3SubscriptionIntegrationTests`；后者在 `tmp/` 隔离真实 Server 验证零正文 GET、隐藏订阅取消、Unicode 增量、真实 WebSocket 断线恢复，以及超过首批八条工具详情后历史 HTML 无新事件仍能自动显示。
+- 校验生成物和 TypeScript 类型：同命令加 `--check`。针对性回归：`HistoryPagingTests`、`ConversationReadingPositionTests`、`T3StreamReducerTests`、`HTMLLiveHydrationTests`、`T3SubscriptionIntegrationTests`；后者在 `tmp/` 隔离真实 Server 验证零正文 GET、隐藏订阅取消、Unicode 增量、真实 WebSocket 断线恢复，以及超过首批八条工具详情后历史 HTML 无新事件仍能自动显示。
 
 ## 桌面会话引用
 

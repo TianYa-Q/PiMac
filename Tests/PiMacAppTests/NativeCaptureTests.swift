@@ -32,6 +32,19 @@ struct PiMacNativeCaptureTests {
     if let detail = fixture["detail"] as? [String: Any] { tab.model.apply(detail) }
     if let text = fixture["composerText"] as? String { tab.model.composerText = text }
     tab.model.composerContext = T3MessageContext.read(fixture["composerContext"])
+    if fixture["draftAccountSwitch"] as? Bool == true {
+      tab.model.currentSessionPath = ""
+      tab.model.selectedModelId = "openai/gpt-5"
+      workspace.server.didCompletePoll()
+      if let status = fixture["accountStatus"] as? [String: Any] {
+        let data = try JSONSerialization.data(withJSONObject: status)
+        workspace.extensionUI.handle(
+          [
+            "method": "setStatus", "id": "capture-accounts", "statusKey": "account-usage-gui",
+            "statusText": String(decoding: data, as: UTF8.self),
+          ], from: tab.model)
+      }
+    }
     let suite = "PiMacNativeCaptureTests.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     let lidController = LidSleepController(defaults: defaults, restoreSleep: { nil })
@@ -40,7 +53,32 @@ struct PiMacNativeCaptureTests {
       defaults.removePersistentDomain(forName: suite)
     }
     let page: AnyView
-    if fixture["page"] as? String == "lidSleep" {
+    if fixture["page"] as? String == "usage" {
+      let summary = try #require(fixture["usageSummary"] as? [String: Any])
+      let snapshot = try T3UsageSummary.snapshot(summary, period: .month)
+      let model = UsageDashboardModel { _ in snapshot }
+      model.snapshot = fixture["usageState"] as? String == "loading" ? UsageSnapshot() : snapshot
+      model.isLoading = ["loading", "refreshing"].contains(fixture["usageState"] as? String ?? "")
+      let hoveredDate: Date?
+      if let dateString = fixture["usageHoveredDate"] as? String {
+        let parsedDate: Date = try #require(ISO8601DateFormatter().date(from: dateString))
+        hoveredDate = parsedDate
+        _ = try #require(snapshot.day(at: hoveredDate, calendar: .current))
+      } else {
+        hoveredDate = nil
+      }
+      page = AnyView(
+        UsageDashboardView(model: model, automaticallyLoads: false, hoveredDate: hoveredDate))
+    } else if fixture["page"] as? String == "accounts" {
+      defaults.set(true, forKey: "accountQuotaExpanded")
+      page = AnyView(
+        CodexAccountsView()
+          .environmentObject(tab.model)
+          .environmentObject(workspace.extensionUI)
+          .defaultAppStorage(defaults)
+          .padding(16)
+          .background(Color(nsColor: .windowBackgroundColor)))
+    } else if fixture["page"] as? String == "lidSleep" {
       page = AnyView(LidSleepSettingsView(controller: lidController).padding(24))
     } else {
       page = AnyView(
@@ -58,12 +96,28 @@ struct PiMacNativeCaptureTests {
     let window = NSWindow(
       contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
     window.contentView = host
-    defer { window.contentView = nil }
+    let composited = fixture["compositedCapture"] as? Bool == true
+    if composited { window.orderFrontRegardless() }
+    defer {
+      if composited { window.orderOut(nil) }
+      window.contentView = nil
+    }
     // 让 SwiftUI 的 task（例如展开选中会话祖先）跑完；WebKit 应另用明确加载条件。
     try await Task.sleep(for: .milliseconds(250))
     host.layoutSubtreeIfNeeded()
-    let bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-    host.cacheDisplay(in: host.bounds, to: bitmap)
+    let bitmap: NSBitmapImageRep
+    if composited {
+      // layer-backed 原生控件需捕获窗口合成结果，cacheDisplay 可能只得到黑色区域。
+      window.displayIfNeeded()
+      let image = try #require(
+        CGWindowListCreateImage(
+          .null, .optionIncludingWindow, CGWindowID(window.windowNumber),
+          [.boundsIgnoreFraming, .bestResolution]))
+      bitmap = NSBitmapImageRep(cgImage: image)
+    } else {
+      bitmap = try #require(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+      host.cacheDisplay(in: host.bounds, to: bitmap)
+    }
     let png = try #require(bitmap.representation(using: .png, properties: [:]))
     try png.write(to: URL(fileURLWithPath: output))
   }

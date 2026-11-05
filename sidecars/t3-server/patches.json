@@ -154,6 +154,10 @@
   ],
   "packages/contracts/src/orchestrationV2.ts": [
   {
+    "oldText": "  timeUsedSeconds: Schema.optional(NonNegativeInt),",
+    "newText": "  timeUsedSeconds: Schema.optional(NonNegativeInt),\n  pauseReason: Schema.optional(TrimmedNonEmptyString),"
+  },
+  {
     "oldText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),",
     "newText": "  turnTokenUsage: Schema.optional(TurnTokenUsage),\n  piMetrics: Schema.optional(Schema.Struct({\n    outputDurationMs: NonNegativeInt,\n    speedMethod: Schema.optional(Schema.Literal(\"aa-approx-v1\")),\n    speedTokens: Schema.optional(Schema.Number),\n    speedDurationMs: Schema.optional(NonNegativeInt),\n    totalCostUsd: Schema.optional(Schema.Number),\n  })),"
   }

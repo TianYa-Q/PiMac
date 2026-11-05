@@ -164,6 +164,40 @@ struct T3UsageSummaryTests {
   }
 
   @MainActor
+  @Test func refreshKeepsDataWhilePendingAndOnFailureButPeriodChangeClearsIt() async throws {
+    var response: CheckedContinuation<UsageSnapshot, any Error>?
+    let model = UsageDashboardModel { _ in
+      try await withCheckedThrowingContinuation { response = $0 }
+    }
+    model.snapshot.requests = 12
+    model.snapshot.totalTokens = 4_750_000_000
+    model.reload()
+    for _ in 0..<100 where response == nil { try await Task.sleep(for: .milliseconds(5)) }
+    let pending = try #require(response)
+    #expect(model.isLoading)
+    #expect(model.snapshot.requests == 12)
+    #expect(model.snapshot.totalTokens == 4_750_000_000)
+    pending.resume(throwing: T3DesktopClient.ClientError.unavailable)
+    for _ in 0..<100 where model.isLoading { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(!model.isLoading)
+    #expect(model.error != nil)
+    #expect(model.snapshot.requests == 12)
+
+    response = nil
+    model.period = .week
+    model.reload()
+    #expect(model.snapshot.requests == 0)
+    for _ in 0..<100 where response == nil { try await Task.sleep(for: .milliseconds(5)) }
+    var updated = UsageSnapshot()
+    updated.requests = 7
+    try #require(response).resume(returning: updated)
+    for _ in 0..<100 where model.isLoading { try await Task.sleep(for: .milliseconds(5)) }
+    #expect(!model.isLoading)
+    #expect(model.error == nil)
+    #expect(model.snapshot.requests == 7)
+  }
+
+  @MainActor
   @Test func supersededResponseCannotReplaceNewPeriod() async throws {
     var first: CheckedContinuation<UsageSnapshot, Never>?
     let model = UsageDashboardModel { period in

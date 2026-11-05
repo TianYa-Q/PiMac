@@ -67,13 +67,14 @@ actor T3StreamReducer {
     return result
   }
 
-  func apply(_ item: ImmutableJSONSnapshot) throws -> Bool {
+  func apply(_ item: ImmutableJSONSnapshot, preservingLiveSequence: Bool = false) throws -> Bool {
     let runtime = try runtime()
     let context = runtime.context
     let state = runtime.state
     let data = try JSONSerialization.data(withJSONObject: item.value)
     context.exception = nil
-    let result = state.invokeMethod("apply", withArguments: [String(decoding: data, as: UTF8.self)])
+    let result = state.invokeMethod(
+      "apply", withArguments: [String(decoding: data, as: UTF8.self), preservingLiveSequence])
     guard context.exception == nil, let result, result.isBoolean else { throw Failure.invalidFrame }
     return result.toBool()
   }
@@ -92,6 +93,18 @@ actor T3StreamReducer {
       let value = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
     else { throw Failure.invalidFrame }
     return ImmutableJSONSnapshot(value: value)
+  }
+
+  func mergeHistory(_ page: ImmutableJSONSnapshot, cursor: String, revision: Int) throws -> Bool {
+    let runtime = try runtime()
+    let data = try JSONSerialization.data(withJSONObject: page.value)
+    runtime.context.exception = nil
+    let result = runtime.state.invokeMethod(
+      "mergeHistory", withArguments: [String(decoding: data, as: UTF8.self), cursor, revision])
+    guard runtime.context.exception == nil, let result, result.isBoolean else {
+      throw Failure.invalidFrame
+    }
+    return result.toBool()
   }
 
   func snapshot() throws -> ImmutableJSONSnapshot {

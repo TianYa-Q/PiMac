@@ -33,6 +33,37 @@ struct ThreadGoalTests {
     #expect(ThreadGoal.State.read("broken", driver: nil) == .invalid)
   }
 
+  @Test func blockedGoalShowsReasonOrExplicitMissingReasonWithoutImplyingApproval() throws {
+    var value = goal
+    value["status"] = "blocked"
+    value["pauseReason"] = "  请提供真实样例或 Windows 测试环境。\n"
+    guard case .available(let parsed, _) = ThreadGoal.State.read(value, driver: "pi") else {
+      Issue.record("受阻目标未被解析")
+      return
+    }
+    #expect(parsed.status.title == "目标受阻")
+    #expect(parsed.blockerDescription == "请提供真实样例或 Windows 测试环境。")
+    for reason in [nil, NSNull(), "", " \n"] as [Any?] {
+      value["pauseReason"] = reason
+      guard case .available(let missing, _) = ThreadGoal.State.read(value, driver: "pi") else {
+        Issue.record("缺少原因的旧目标仍应可见")
+        continue
+      }
+      #expect(missing.blockerDescription?.contains("未提供阻塞原因") == true)
+    }
+    value["pauseReason"] = 12
+    #expect(ThreadGoal.State.read(value, driver: "pi") == .invalid)
+    value["pauseReason"] = "旧原因"
+    for status in ["active", "paused", "complete"] {
+      value["status"] = status
+      guard case .available(let resumed, _) = ThreadGoal.State.read(value, driver: "pi") else {
+        Issue.record("目标状态未被解析")
+        continue
+      }
+      #expect(resumed.blockerDescription == nil)
+    }
+  }
+
   @Test func onlyActiveProviderGoalIsProjectedAndEmptyStateClearsOldGoal() throws {
     let app = AppModel(continueLastSession: false, restoreLastProjectOnLaunch: false)
     app.currentSessionPath = "t3:thread"

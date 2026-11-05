@@ -196,8 +196,23 @@ struct VirtualConversationStack<Row: View>: View {
       }
       replaceHeights(updated, layout: layout)
     }
-    .onChange(of: ids) {
-      let validIDs = Set(ids)
+    .onChange(of: ids) { previous, current in
+      // 旧页插到前面时，按同一行身份恢复阅读锚点，不能按旧索引或绝对像素定位。
+      if !pinnedToBottom, !previous.isEmpty,
+        let viewport = readingState.scroll.latestViewport ?? readingState.viewport
+      {
+        let old = ConversationWindowLayout(ids: previous, heights: readingState.heights)
+        let anchor = old.index(at: viewport.minY)
+        if let index = current.firstIndex(of: previous[anchor]) {
+          let updated = ConversationWindowLayout(ids: current, heights: readingState.heights)
+          let correction = updated.offsets[index] - old.offsets[anchor]
+          readingState.scroll.preservePosition(adding: correction)
+          var restored = viewport
+          restored.origin.y += correction
+          readingState.viewport = restored
+        }
+      }
+      let validIDs = Set(current)
       readingState.heights = readingState.heights.filter { validIDs.contains($0.key) }
     }
     .environment(\.conversationExpansionStore, readingState.expansionStore)

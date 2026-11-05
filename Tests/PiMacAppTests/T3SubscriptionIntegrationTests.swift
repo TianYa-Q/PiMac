@@ -176,6 +176,44 @@ struct T3SubscriptionIntegrationTests {
     #expect(capture.subscriptions(second).count == 2)
     #expect(capture.subscriptions(first).count == 2)
     #expect(RecordingHTTP.lock.withLock { RecordingHTTP.paths.isEmpty })
+    // 超过官方首屏用户轮次上限后重新选中，只收近期窗口；旧正文必须显式分页才出现。
+    for index in 0..<12 {
+      let text = "history turn \(index)"
+      try await send(second, text)
+      try await wait { secondTexts.contains("Reply: \(text)") }
+    }
+    client.setWatchVisibility(owner: secondOwner, visible: false)
+    secondTexts = []
+    client.setWatchVisibility(owner: secondOwner, visible: true)
+    try await wait { secondTexts.contains("Reply: history turn 11") }
+    #expect(!secondTexts.contains("Reply: hidden reply"))
+    #expect(!secondTexts.contains("Reply: history turn 0"))
+    #expect(capture.subscriptions(second).last?["payload"] as? [String: Any] != nil)
+    let payload = capture.subscriptions(second).last?["payload"] as? [String: Any]
+    #expect(payload?["acceptBoundedSnapshot"] as? Bool == true)
+    #expect(RecordingHTTP.lock.withLock { RecordingHTTP.paths.isEmpty })
+    try await client.loadEarlierHistory(second)
+    try await wait { secondTexts.contains("Reply: hidden reply") }
+    #expect(
+      RecordingHTTP.lock.withLock {
+        RecordingHTTP.paths == ["/api/orchestration/threads/\(second)/history"]
+      })
+    try await send(second, "live after history")
+    try await wait { secondTexts.contains("Reply: live after history") }
+    #expect(secondTexts.contains("Reply: hidden reply"))
+    // 分页结束后再请求是无操作，不会在后台循环拉取，也不会退回完整 GET。
+    try await client.loadEarlierHistory(second)
+    #expect(RecordingHTTP.lock.withLock { RecordingHTTP.paths.count == 1 })
+    try await wait { client.thread(second)?["status"] as? String == "completed" }
+    try await Task.sleep(for: .milliseconds(350))
+    try await client.refresh()
+    #expect(secondTexts.contains("Reply: live after history"))
+    #expect(!secondTexts.contains("Reply: hidden reply"))
+    let expectedReads = [
+      "/api/orchestration/threads/\(second)/history",
+      "/api/orchestration/threads/\(second)/bounded",
+    ]
+    #expect(RecordingHTTP.lock.withLock { RecordingHTTP.paths == expectedReads })
     client.unwatch(owner: firstOwner)
     client.unwatch(owner: secondOwner)
     let lastRequest = try #require(capture.subscriptions(second).last?["id"] as? String)
@@ -213,7 +251,7 @@ struct T3SubscriptionIntegrationTests {
         $0["tag"] as? String == "orchestration.getTurnItem"
           && ($0["payload"] as? [String: Any])?["threadId"] as? String == resources
       }.count > 8)
-    #expect(RecordingHTTP.lock.withLock { RecordingHTTP.paths.isEmpty })
+    #expect(RecordingHTTP.lock.withLock { RecordingHTTP.paths == expectedReads })
     client.unwatch(owner: resourceOwner)
   }
 

@@ -20,6 +20,17 @@ test("Goal bridge accepts lifecycle reports and explicit empty state, never infe
   assert.equal(parsePiGoalStatus(payload({ ...goal, tokenBudget: 100 }))?.tokenBudget, 100);
 });
 
+test("blocker reasons survive reports, normalize whitespace, and reject corrupt data", () => {
+  assert.equal(parsePiGoalStatus(payload({ ...goal, status: "blocked", pauseReason: "  Need a real sample  " }))?.pauseReason,
+    "Need a real sample");
+  for (const pauseReason of [undefined, null, "", "   "]) {
+    assert.equal(parsePiGoalStatus(payload({ ...goal, pauseReason }))?.pauseReason, undefined);
+  }
+  for (const pauseReason of [false, 12, [], {}]) {
+    assert.throws(() => parsePiGoalStatus(payload({ ...goal, pauseReason })));
+  }
+});
+
 test("corrupt or unsupported reports are errors, not empty goals", () => {
   for (const value of [undefined, "", "null", "[]", "{}", '{"version":2,"goal":null}',
     payload({ ...goal, objective: " " }), payload({ ...goal, status: "done" }),
@@ -30,15 +41,17 @@ test("corrupt or unsupported reports are errors, not empty goals", () => {
 });
 
 test("installed UI bridge publishes live state, deduplicates within a session, and clears across sessions", () => {
-  const patch = goalBridgePatches.find((patch) => patch.file === "goal-state.ts")!;
+  const [patch, ...updates] = goalBridgePatches.filter((patch) => patch.file === "goal-state.ts");
+  const bridge = updates.reduce((source, update) => source.replace(update.anchor, update.replacement), patch!.replacement);
   // 执行真正安装的桥接片段，而不是仅匹配补丁字符串；不加载审计器或调用模型。
-  const compiled = ts.transpileModule(`${patch.replacement}\n}\nreturn updateUI;`, {
+  const compiled = ts.transpileModule(`${bridge}\n}\nreturn updateUI;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText;
   const state: { goal: unknown } = { goal: null };
   const update = new Function("state", compiled)(state);
   let session = "first";
   const reports: unknown[] = [];
+  const lastReport = () => reports.at(-1) as ReturnType<typeof parsePiGoalStatus> | undefined;
   const ctx = {
     mode: "rpc", hasUI: false,
     sessionManager: { getSessionId: () => session },
@@ -52,13 +65,19 @@ test("installed UI bridge publishes live state, deduplicates within a session, a
   update(ctx); update(ctx);
   assert.deepEqual(reports.at(-1), { ...goal, objective: "Export CSV", tokensUsed: 12, timeUsedSeconds: 3 });
   assert.equal(reports.length, 2);
+  state.goal = { ...goal, status: "blocked", pauseReason: "Need a real sample", usage: { tokensUsed: 12, activeSeconds: 3 } };
+  update(ctx);
+  assert.equal(lastReport()?.pauseReason, "Need a real sample");
+  state.goal = { ...state.goal as object, pauseReason: "Need Windows access" };
+  update(ctx);
+  assert.equal(lastReport()?.pauseReason, "Need Windows access");
   state.goal = null;
   update(ctx);
   session = "second";
   update(ctx);
   assert.deepEqual(reports.slice(-2), [null, null]);
   update({ ...ctx, mode: "tui" });
-  assert.equal(reports.length, 4);
+  assert.equal(reports.length, 6);
 });
 
 test("adapter caches early reports, projects updates, clears switches, and reports corruption without killing work", async () => {
@@ -105,14 +124,17 @@ test("adapter caches early reports, projects updates, clears switches, and repor
   assert.equal(state.providerThread.goal.status, "active");
   adapter.adopt(state, { providerThread: { id: "first", goal: null } });
   assert.equal(state.providerThread.goal.status, "active", "stale turn input must not erase the native report");
+  await send(payload({ ...goal, status: "blocked", pauseReason: "Need a real sample" }));
+  assert.equal(state.providerThread.goal.pauseReason, "Need a real sample");
   await send(payload({ ...goal, status: "paused" }));
+  assert.equal(state.providerThread.goal.pauseReason, undefined, "new state must clear obsolete reasons");
   assert.equal(state.providerThread.goal.status, "paused");
   await send("broken");
   assert.equal(errors.length, 1);
   assert.equal(state.providerThread.goal.status, "paused", "corruption must retain last known state");
   await send(payload(null));
   assert.equal(state.providerThread.goal, null);
-  assert.equal(updates.length, 2);
+  assert.equal(updates.length, 3);
   await send(payload(goal));
   adapter.reset();
   const second = adapter.register({ id: "second" });
@@ -212,7 +234,15 @@ test("session reconnects never prompt for Goal focus or resume, and paused conve
   assert.equal(restores, 7, "removing the picker does not skip scheduler restoration");
 });
 
-test("installer refuses unknown or locally modified sources", () => {
+test("installer upgrades the released bridge, is idempotent, and refuses local modifications", async () => {
+  const original = await readFile(new URL("fixtures/pi-goal-state-0.32.3.txt", import.meta.url), "utf8");
+  const first = goalBridgePatches.find((patch) => patch.file === "goal-state.ts")!;
+  const released = original.replace(first.anchor, first.replacement);
+  const patched = bridgeGoalSource("goal-state.ts", original);
+  assert.equal(bridgeGoalSource("goal-state.ts", released), patched);
+  assert.equal(bridgeGoalSource("goal-state.ts", patched), patched);
+  assert.match(patched, /pauseReason: goal.pauseReason/);
+  assert.throws(() => bridgeGoalSource("goal-state.ts", patched + "\n// unknown edit"), /differs from pinned/);
   assert.throws(() => bridgeGoalSource("goal-state.ts", "locally modified"), /differs from pinned/);
   assert.throws(() => bridgeGoalSource("other.ts", ""), /Unknown Goal bridge file/);
 });

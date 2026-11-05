@@ -285,7 +285,7 @@ private struct CodexAccountsCard: View, Equatable {
             .buttonStyle(.borderless)
             .font(.caption2)
             .disabled(!snapshot.canSwitch || !T3DesktopClient.isSwitchableAccountName(account.name))
-            .help("空闲时通过 account-usage 扩展切换账户；执行结果以 Pi 回复为准")
+            .help("新聊天切换新会话默认账户；已有会话空闲时通过 account-usage 扩展切换，以 Pi 回复为准")
         }
       }
       // The hover card extends over the quota rows, so its source row must paint above them.

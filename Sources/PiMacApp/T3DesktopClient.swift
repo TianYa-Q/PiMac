@@ -556,7 +556,8 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
           do {
             let reducer = T3StreamReducer(kind: .thread)
             try await self.consumeSubscription(
-              "orchestration.subscribeThread", payload: ["threadId": id]
+              "orchestration.subscribeThread",
+              payload: ["threadId": id, "acceptBoundedSnapshot": true]
             ) { item in
               guard self.generation == current, self.threadStreamIDs[id] == streamID else {
                 throw CancellationError()
@@ -581,6 +582,32 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
           try? await Task.sleep(for: .seconds(2))
         }
       }
+    }
+  }
+
+  /// 历史只由用户请求推进一页；不预取、不循环追到最早，也不读取旧页的资源。
+  func loadEarlierHistory(_ id: String) async throws {
+    guard let reducer = threadReducers[id] else { throw ClientError.unavailable }
+    let current = generation
+    let state = try await reducer.snapshot().value
+    guard state["hasMoreHistory"] as? Bool == true,
+      let cursor = state["historyCursor"] as? String,
+      let revision = state["historyRevision"] as? Int
+    else { return }
+    let escaped = id.addingPercentEncoding(
+      withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
+    var query = URLComponents()
+    query.queryItems = [URLQueryItem(name: "cursor", value: cursor)]
+    let page = try await request(
+      "/api/orchestration/threads/\(escaped)/history?\(query.percentEncodedQuery!)")
+    try Task.checkCancellation()
+    guard generation == current, threadReducers[id] === reducer,
+      watches.values.contains(where: { $0.threadID == id && $0.isVisible })
+    else { throw CancellationError() }
+    if try await reducer.mergeHistory(
+      ImmutableJSONSnapshot(value: page), cursor: cursor, revision: revision)
+    {
+      for task in requestThreadRefreshes(only: id) { try await task.value }
     }
   }
 
@@ -896,8 +923,18 @@ final class T3DesktopClient: ObservableObject, MessageDeliveryTransport {
     if let snapshot {
       nativeDetail = snapshot.value
     } else {
-      // 仅保留显式刷新/恢复需要的权威 HTTP 路径，后台同步使用官方事件订阅。
-      nativeDetail = try await recoverySnapshot(threadID: id)
+      // 展示刷新也必须有界；投递核对/导出仍保留独立的完整权威读取路径。
+      let escaped = id.addingPercentEncoding(
+        withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#%")))!
+      let bounded = try await request("/api/orchestration/threads/\(escaped)/bounded")
+      try Task.checkCancellation()
+      guard generation == current else { return }
+      let reducer = threadReducers[id] ?? T3StreamReducer(kind: .thread)
+      _ = try await reducer.apply(
+        ImmutableJSONSnapshot(value: bounded.merging(["kind": "snapshot"]) { _, new in new }),
+        preservingLiveSequence: true)
+      threadReducers[id] = reducer
+      nativeDetail = try await reducer.snapshot().value
     }
     try Task.checkCancellation()
     guard generation == current else { return }

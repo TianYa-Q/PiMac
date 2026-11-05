@@ -279,6 +279,47 @@ struct MessageRecoveryIntegrationTests {
     let queued = try #require(model.queuedPrompts.first { $0.text == "queued to remove" })
     try await send("queued to hold")
     try await wait { model.queuedPrompts.contains { $0.text == "queued to hold" } }
+    // 真实 Server 拒绝已结束/过期的目标时，原排队消息不能被客户端先删掉。
+    try await send("queued to steer")
+    try await wait { model.queuedPrompts.contains { $0.text == "queued to steer" } }
+    let promoted = try #require(model.queuedPrompts.first { $0.text == "queued to steer" })
+    let beforePromotion = try await client.recoverySnapshot(threadID: threadID)
+    var staleDetail = T3V2Presentation.detail(beforePromotion)
+    var staleThread = try #require(staleDetail["thread"] as? [String: Any])
+    staleThread["latestTurn"] = ["turnId": "stale-target", "state": "running"]
+    staleDetail["thread"] = staleThread
+    model.apply(staleDetail)
+    model.composerText = "Steer 不应触碰这份草稿"
+    model.steerQueuedPrompt(id: promoted.id)
+    #expect(model.pendingQueuePromotion == promoted.id)
+    #expect(!model.canSteerQueuedPrompt)
+    model.steerQueuedPrompt(id: promoted.id)  // 悬挂期间不重复提交。
+    try await wait { model.pendingQueuePromotion == nil }
+    #expect(model.statusText.contains("Steer 未确认"))
+    #expect(model.queuedPrompts.contains { $0.id == promoted.id })
+    #expect(model.composerText == "Steer 不应触碰这份草稿")
+
+    model.apply(T3V2Presentation.detail(try await client.recoverySnapshot(threadID: threadID)))
+    #expect(model.canSteerQueuedPrompt)
+    model.steerQueuedPrompt(id: promoted.id)
+    try await wait {
+      model.pendingQueuePromotion == nil && !model.queuedPrompts.contains { $0.id == promoted.id }
+    }
+    let promotedSnapshot = try await client.recoverySnapshot(threadID: threadID)
+    let promotedProjection = try #require(promotedSnapshot["projection"] as? [String: Any])
+    let promotedMessages = try #require(promotedProjection["messages"] as? [[String: Any]])
+    let promotedMessage = try #require(
+      promotedMessages.first { $0["text"] as? String == promoted.text })
+    #expect(promotedMessages.filter { $0["text"] as? String == promoted.text }.count == 1)
+    let promotedItems = try #require(promotedProjection["turnItems"] as? [[String: Any]])
+    #expect(
+      promotedItems.contains {
+        $0["messageId"] as? String == promotedMessage["id"] as? String
+          && $0["inputIntent"] as? String == "promoted_queued_to_steer"
+      })
+    #expect(model.composerText == "Steer 不应触碰这份草稿")
+    #expect(model.queuedPrompts.contains { $0.text == "queued to hold" })
+
     transport.pauseEnvironment = true
     model.composerText = "must not dispatch after stop"
     model.sendPrompt(delivery: .followUp)

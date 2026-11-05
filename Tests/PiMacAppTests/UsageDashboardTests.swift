@@ -4,6 +4,32 @@ import Testing
 @testable import PiMacApp
 
 struct UsageDashboardTests {
+  @Test func chartSelectionMatchesCalendarDayAndPreservesZeroUsageWithoutFillingGaps() throws {
+    let formatter = ISO8601DateFormatter()
+    let first = try #require(formatter.date(from: "2026-10-08T00:00:00Z"))
+    let last = try #require(formatter.date(from: "2026-10-10T00:00:00Z"))
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(secondsFromGMT: 0))
+    var snapshot = UsageSnapshot()
+    snapshot.days = [
+      UsageDay(date: first, tokens: 123_456_789, cost: 12.34),
+      UsageDay(date: last, tokens: 0, cost: 0),
+    ]
+    let selected = snapshot.day(at: first.addingTimeInterval(23 * 3600), calendar: calendar)
+    #expect(selected == snapshot.days[0])
+    #expect(snapshot.day(at: last.addingTimeInterval(12 * 3600), calendar: calendar)?.tokens == 0)
+    #expect(snapshot.day(at: first.addingTimeInterval(24 * 3600), calendar: calendar) == nil)
+    #expect(snapshot.day(at: first.addingTimeInterval(-1), calendar: calendar) == nil)
+    #expect(snapshot.day(at: nil, calendar: calendar) == nil)
+
+    // 图表采用本地日历时，同一个绝对时间应跟随本地日界线，而非固定 UTC 日界线。
+    calendar.timeZone = try #require(TimeZone(secondsFromGMT: 8 * 3600))
+    #expect(snapshot.day(at: first.addingTimeInterval(15 * 3600), calendar: calendar) != nil)
+    #expect(snapshot.day(at: first.addingTimeInterval(16 * 3600), calendar: calendar) == nil)
+    snapshot.days = []
+    #expect(snapshot.day(at: first, calendar: calendar) == nil)
+  }
+
   @Test func scannerAggregatesTokensCostModelsAndProjects() throws {
     let root = FileManager.default.temporaryDirectory
       .appendingPathComponent(UUID().uuidString, isDirectory: true)

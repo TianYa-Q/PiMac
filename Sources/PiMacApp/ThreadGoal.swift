@@ -12,7 +12,7 @@ struct ThreadGoal: Decodable, Equatable {
       switch self {
       case .active: "进行中"
       case .paused: "已暂停"
-      case .blocked: "等待处理"
+      case .blocked: "目标受阻"
       case .usageLimited: "用量受限"
       case .budgetLimited: "预算受限"
       case .complete: "已完成"
@@ -25,6 +25,16 @@ struct ThreadGoal: Decodable, Equatable {
   let tokensUsed: Int?
   let timeUsedSeconds: Int?
   let tokenBudget: Int?
+  var pauseReason: String? = nil
+
+  /// 仅在受阻时展示原因，避免恢复后残留字段继续提示旧障碍；旧会话缺失原因不等于等待审批。
+  var blockerDescription: String? {
+    guard status == .blocked else { return nil }
+    let reason = pauseReason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return reason.isEmpty
+      ? "未提供阻塞原因。请查看目标进度，了解需要补充的信息或协助。"
+      : reason
+  }
 
   enum State: Equatable {
     case none

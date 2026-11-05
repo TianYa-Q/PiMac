@@ -4,6 +4,7 @@ export interface PiGoalStatus {
   tokensUsed: number;
   timeUsedSeconds: number;
   tokenBudget?: number | null;
+  pauseReason?: string;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -35,8 +36,13 @@ export function parsePiGoalStatus(text: unknown): PiGoalStatus | null {
       status !== "budget_limited" && status !== "complete") {
     throw new Error("Invalid pi-goal-x lifecycle status");
   }
+  if (goal.pauseReason != null && typeof goal.pauseReason !== "string") {
+    throw new Error("Invalid pi-goal-x pause reason");
+  }
+  const pauseReason = typeof goal.pauseReason === "string" ? goal.pauseReason.trim() : "";
   return {
     objective: goal.objective.trim(), status,
+    ...(pauseReason ? { pauseReason } : {}),
     tokensUsed: count(goal.tokensUsed), timeUsedSeconds: count(goal.timeUsedSeconds),
     ...(goal.tokenBudget === undefined ? {} : {
       tokenBudget: goal.tokenBudget === null ? null : count(goal.tokenBudget),

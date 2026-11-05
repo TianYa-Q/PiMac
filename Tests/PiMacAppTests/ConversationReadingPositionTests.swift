@@ -121,5 +121,14 @@ struct ConversationReadingPositionTests {
     fixture.selected = 0
     try await settle()
     #expect(abs(try transcript().contentView.bounds.origin.y - origin) < 3)
+    // 按需分页在当前阅读位置前插入一轮；视口到原内容末端的距离必须保持不变。
+    let distanceBeforePage = bottomDistance(try transcript())
+    fixture.models[0].messages.insert(
+      contentsOf: [
+        ChatEntry(id: "older-user", kind: .user, title: "你", text: "更早的问题"),
+        ChatEntry(id: "older-answer", kind: .assistant, title: "Pi", text: "更早的回答"),
+      ], at: 0)
+    try await settle()
+    #expect(abs(bottomDistance(try transcript()) - distanceBeforePage) < 3)
   }
 }

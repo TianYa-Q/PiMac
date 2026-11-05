@@ -361,7 +361,11 @@ final class ExtensionUIModel: ObservableObject {
       ? (codexAccounts.first(where: \.isActive)?.name
         ?? usageSnapshot.accounts.first(where: \.isActive)?.name)
       : nil
-    let activeAccount = selection != nil ? selection?.activeAccount : fallbackActiveAccount
+    // 无线程的草稿展示下一次启动会使用的默认账户，不沿用上一会话的授权绑定。
+    let activeAccount =
+      source?.supportsAccountSwitch == true && source?.threadID == nil
+      ? usageSnapshot.accounts.first(where: \.isDefault)?.name
+      : (selection != nil ? selection?.activeAccount : fallbackActiveAccount)
     let accounts = usageSnapshot.accounts.map { account in
       CodexAccountStatus(
         name: account.name,

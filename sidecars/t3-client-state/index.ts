@@ -1,9 +1,11 @@
-import { AssetResource, CommandId, ComposerContextId, COMPOSER_CONTEXT_MAX_RECORDS, EnvironmentId, OrchestrationMessageContext, OrchestrationV2RpcSchemas, ProjectId, ThreadContextRecord, ThreadId } from '@t3tools/contracts';
+import { AssetResource, CommandId, ComposerContextId, COMPOSER_CONTEXT_MAX_RECORDS, EnvironmentId, OrchestrationMessageContext, OrchestrationV2RpcSchemas, OrchestrationV2ThreadHistoryPage, ProjectId, ThreadContextRecord, ThreadId } from '@t3tools/contracts';
 import { decodeComposerContextClipboardHtml, decodeComposerContextFragment, encodeComposerContextClipboardHtml, encodeComposerContextFragment } from '../../third_party/t3code/packages/shared/src/composerContextClipboard.ts';
 import { collectComposerContextReferences, formatComposerContextReference, replaceComposerContextReferences, sanitizeComposerContextLabel, threadContextsOutsideEnvironment, toKindScopedComposerContextId } from '../../third_party/t3code/packages/shared/src/composerContextReferences.ts';
 import { parseMarkdownFileLink } from '../../third_party/t3code/packages/shared/src/markdownLinks.ts';
 import { filePreviewKind } from '../../third_party/t3code/packages/shared/src/filePreview.ts';
 import * as Schema from 'effect/Schema';
+import { boundedSnapshotProjection } from '../../third_party/t3code/packages/shared/src/orchestrationV2BoundedSnapshot.ts';
+import { mergeOlderHistoryIntoProjection } from '../../third_party/t3code/packages/client-runtime/src/state/threadHistoryMerge.ts';
 import { applyOrchestrationV2ProjectionEvent } from '../../third_party/t3code/packages/client-runtime/src/state/orchestrationV2Projection.ts';
 import { applyShellStreamEvent, mergeShellSnapshotProjects } from '../../third_party/t3code/packages/client-runtime/src/state/shellReducer.ts';
 
@@ -126,14 +128,20 @@ type ShellSnapshot = Extract<Shell, { kind: 'snapshot' }>['snapshot'];
 type Projection = Extract<Thread, { kind: 'snapshot' }>['projection'];
 const decodeShell = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2RpcSchemas.subscribeShell.output));
 const decodeThread = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2RpcSchemas.subscribeThread.output));
+const decodeHistoryPage = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ThreadHistoryPage));
 
 /** 只适配传输与原生宿主；协议校验、列表合并和消息投影全部复用同版本官方实现。 */
 export function createStreamState(kind: Kind) {
   let shell: ShellSnapshot | null = null;
   let projection: Projection | null = null;
   let sequence = -1;
+  let historyCursor: string | null = null;
+  let hasMoreHistory = false;
+  let historyExpanded = false;
+  let latestLocalTurnOrdinal: number | null = null;
+  let historyRevision = 0;
   return {
-    apply(json: string): boolean {
+    apply(json: string, preservingLiveSequence = false): boolean {
       const input: unknown = JSON.parse(json);
       if (kind === 'shell') {
         const item = decodeShell(input);
@@ -155,11 +163,13 @@ export function createStreamState(kind: Kind) {
       const item = decodeThread(input);
       if (item.kind === 'synchronized') return false;
       if (item.kind === 'snapshot') {
-        // 不申请 bounded/compact/deduped 模式，保留已有原生历史展示契约。
-        if (item.hasMoreHistory === true || item.turnItemsOmitLocalVisible === true) {
-          throw new Error('Unexpected partial snapshot');
-        }
-        projection = item.projection;
+        if (preservingLiveSequence && item.snapshotSequence < sequence) return false;
+        projection = boundedSnapshotProjection(item);
+        historyCursor = item.historyCursor ?? null;
+        hasMoreHistory = item.hasMoreHistory ?? false;
+        historyExpanded = false;
+        latestLocalTurnOrdinal = item.latestLocalTurnOrdinal ?? null;
+        historyRevision += 1;
         sequence = item.snapshotSequence;
         return true;
       }
@@ -167,10 +177,30 @@ export function createStreamState(kind: Kind) {
       if (item.sequence <= sequence) return false;
       sequence = item.sequence;
       if (item.kind === 'unknown-event') return false;
-      const next = applyOrchestrationV2ProjectionEvent(projection, item.event);
+      const partial = hasMoreHistory || historyCursor !== null
+        ? { partialTimeline: true, latestLocalTurnOrdinal } : undefined;
+      const next = applyOrchestrationV2ProjectionEvent(projection, item.event, partial);
+      if (partial && item.event.type === 'turn-item.updated') {
+        latestLocalTurnOrdinal = Math.max(latestLocalTurnOrdinal ?? 0, item.event.payload.ordinal);
+      }
       const changed = next !== projection;
       projection = next;
       return changed;
+    },
+    mergeHistory(json: string, cursor: string, revision: number): boolean {
+      // 正文增量可与历史请求并行；新快照或另一页已推进游标时，旧响应不能接回去。
+      if (projection === null || historyCursor !== cursor || historyRevision !== revision) return false;
+      const page = decodeHistoryPage(JSON.parse(json));
+      if (page.hasMoreHistory && (page.nextCursor === null || page.nextCursor === cursor)) {
+        throw new Error('History cursor did not advance');
+      }
+      projection = mergeOlderHistoryIntoProjection(projection, page.items);
+      historyCursor = page.nextCursor;
+      hasMoreHistory = page.hasMoreHistory;
+      historyExpanded = true;
+      historyRevision += 1;
+      // 分页响应的序号不能覆盖实时事件游标；合并函数保留已到达的新版本。
+      return true;
     },
     snapshot(): string {
       if (kind === 'shell') {
@@ -178,7 +208,7 @@ export function createStreamState(kind: Kind) {
         return JSON.stringify(shell);
       }
       if (projection === null) throw new Error('Thread snapshot unavailable');
-      return JSON.stringify({ snapshotSequence: sequence, projection });
+      return JSON.stringify({ snapshotSequence: sequence, projection, historyCursor, hasMoreHistory, historyExpanded, historyRevision, latestLocalTurnOrdinal });
     },
   };
 }

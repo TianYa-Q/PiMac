@@ -1,5 +1,19 @@
 import SwiftUI
 
+struct GoalObjectiveText: View {
+  let objective: String
+  let expanded: Bool
+
+  var body: some View {
+    Text(objective)
+      .lineLimit(expanded ? nil : 3)
+      .textSelection(.enabled)
+      // 输入区会压缩可变高度文本；取消行数限制还不够，需按实际换行高度布局。
+      .fixedSize(horizontal: false, vertical: true)
+      .frame(maxWidth: .infinity, alignment: .leading)
+  }
+}
+
 struct ThreadGoalView: View {
   let state: ThreadGoal.State
   let canControl: Bool
@@ -31,7 +45,10 @@ struct ThreadGoalView: View {
           Label("当前目标", systemImage: "target")
             .fontWeight(.semibold)
           Text(goal.status.title)
-            .foregroundStyle(goal.status == .active ? Color.accentColor : .secondary)
+            .foregroundStyle(
+              goal.status == .blocked
+                ? Color.orange
+                : goal.status == .active ? Color.accentColor : .secondary)
           Spacer(minLength: 0)
           if driver == "pi" {
             if goal.status != .complete {
@@ -64,10 +81,19 @@ struct ThreadGoalView: View {
         }
         .buttonStyle(.borderless)
         .help("运行中可暂停执行；编辑、继续和目标管理需等待会话空闲")
-        Text(goal.objective)
-          .lineLimit(expanded ? nil : 3)
-          .textSelection(.enabled)
+        if let reason = goal.blockerDescription {
+          VStack(alignment: .leading, spacing: 4) {
+            Label("阻塞原因与所需协助", systemImage: "exclamationmark.triangle")
+              .fontWeight(.medium)
+              .foregroundStyle(.orange)
+            Text(reason)
+              .textSelection(.enabled)
+              .fixedSize(horizontal: false, vertical: true)
+          }
           .frame(maxWidth: .infinity, alignment: .leading)
+          .accessibilityElement(children: .combine)
+        }
+        GoalObjectiveText(objective: goal.objective, expanded: expanded)
         HStack(spacing: 12) {
           Button(expanded ? "收起正文" : "展开正文") { expanded.toggle() }
             .buttonStyle(.plain)

@@ -1192,6 +1192,30 @@ struct ContentView: View {
       ScrollViewReader { proxy in
         ScrollView {
           VStack(alignment: .leading, spacing: 14) {
+            if app.hasMoreHistory || app.isLoadingHistory || app.historyError != nil {
+              HStack(spacing: 8) {
+                Button {
+                  // 主动请求旧页即进入阅读模式，不让新消息或分页完成把视口拉回底部。
+                  conversationScrollMode = .manual
+                  Task { await app.loadEarlierHistory() }
+                } label: {
+                  Text(app.historyError ?? (app.isLoadingHistory ? "正在加载更早消息…" : "加载更早消息"))
+                    .font(.callout)
+                    .lineLimit(1)
+                    .frame(width: 220)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(app.isLoadingHistory)
+                .accessibilityIdentifier("conversation.loadEarlier")
+                ZStack {
+                  if app.isLoadingHistory { ProgressView().controlSize(.small) }
+                }
+                .frame(width: 18, height: 18)
+              }
+              .frame(maxWidth: .infinity)
+              .frame(height: 28)
+            }
             VirtualConversationStack(
               ids: timeline.rowIDs,
               pinnedToBottom: !readingState.isManual,
@@ -1734,6 +1758,18 @@ struct ContentView: View {
         .lineLimit(1)
         .frame(maxWidth: .infinity, alignment: .leading)
       Button {
+        app.steerQueuedPrompt(id: prompt.id)
+      } label: {
+        Label("Steer", systemImage: "arrow.turn.up.right")
+          .font(.caption)
+      }
+      .buttonStyle(.plain)
+      .foregroundStyle(.secondary)
+      .disabled(!app.canSteerQueuedPrompt)
+      .help(app.pendingQueuePromotion == prompt.id ? "正在提交 Steer…" : "不再排队，直接 Steer 当前任务")
+      .accessibilityLabel("将这条排队消息立即改为 Steer")
+
+      Button {
         app.moveQueuedPrompt(id: prompt.id, direction: -1)
       } label: {
         Image(systemName: "chevron.up")
@@ -1775,7 +1811,8 @@ struct ContentView: View {
       .help(app.pendingQueueCancellations.contains(prompt.id) ? "正在取消…" : "取消这条排队消息")
     }
     .disabled(
-      prompt.submissionState != .confirmed || app.pendingQueueCancellations.contains(prompt.id))
+      prompt.submissionState != .confirmed || app.pendingQueueCancellations.contains(prompt.id)
+        || app.pendingQueuePromotion != nil)
   }
 
   @ViewBuilder

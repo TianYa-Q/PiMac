@@ -25,7 +25,13 @@ final class ConversationPresentationCache {
       do {
         guard data.count <= maximumBytes else { throw CocoaError(.fileReadTooLarge) }
         snapshots = Array(
-          try JSONDecoder().decode([Snapshot].self, from: data).suffix(maximumCount))
+          try JSONDecoder().decode([Snapshot].self, from: data).suffix(maximumCount)
+        )
+        .map { snapshot in
+          Snapshot(
+            projectPath: snapshot.projectPath, threadID: snapshot.threadID,
+            title: snapshot.title, messages: Array(snapshot.messages.suffix(75)))
+        }
       } catch {
         // 缓存损坏不是合法空会话；放弃这份展示副本，仍由实时请求恢复正文。
         NSLog("Conversation presentation cache unavailable: %@", error.localizedDescription)
@@ -53,7 +59,8 @@ final class ConversationPresentationCache {
       entry.childToolEntries = entry.childToolEntries.map(readable)
       return entry
     }
-    let messages = messages.map(readable)
+    // 仅缓存近期阅读窗口；完整历史始终保留在 Server，旧缓存也在读取时收窄。
+    let messages = messages.suffix(75).map(readable)
     if let existing = snapshots.first(where: {
       $0.projectPath == path && $0.threadID == threadID
     }), existing.title == title, existing.messages == messages {
@@ -77,7 +84,7 @@ final class ConversationPresentationCache {
     saveTask = nil
     do {
       var data = try JSONEncoder().encode(snapshots)
-      // 按完整会话淘汰，不截断单条消息而伪造一份看似完整的历史。
+      // 按近期窗口淘汰，不截断单条消息；展示层明确标识这是待实时核对的缓存。
       while data.count > maximumBytes, !snapshots.isEmpty {
         snapshots.removeFirst()
         data = try JSONEncoder().encode(snapshots)

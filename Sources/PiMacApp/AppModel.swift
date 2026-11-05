@@ -27,6 +27,27 @@ final class AppModel: ObservableObject {
     conversationTimelineCache = (children, snapshot)
     return snapshot
   }
+  @Published private(set) var hasMoreHistory = false
+  @Published private(set) var isLoadingHistory = false
+  @Published private(set) var historyError: String?
+
+  func loadEarlierHistory() async {
+    guard hasMoreHistory, !isLoadingHistory, let id = threadID else { return }
+    let current = generation
+    isLoadingHistory = true
+    historyError = nil
+    defer { if generation == current { isLoadingHistory = false } }
+    do {
+      guard let server else { throw T3DesktopClient.ClientError.unavailable }
+      try await server.loadEarlierHistory(id)
+    } catch is CancellationError {
+      // 切换会话或重新订阅时旧响应作废，不把取消误报成新会话的错误。
+    } catch {
+      guard generation == current else { return }
+      historyError = "更早消息加载失败，请重试"
+    }
+  }
+
   @Published var models: [PiModel] = []
   @Published var allModels: [PiModel] = []
   @Published var modelDefaultThinkingLevels: [String: String] = [:]
@@ -134,6 +155,7 @@ final class AppModel: ObservableObject {
   @Published private var submitting = false
   @Published private(set) var isStopping = false
   @Published private(set) var pendingQueueCancellations: Set<String> = []
+  @Published private(set) var pendingQueuePromotion: String?
   private var submissionTask: Task<Void, Never>?
   private(set) var deliveryCoordinator: MessageRecoveryCoordinator?
   private var pendingSentMessages: [ChatEntry] {
@@ -181,7 +203,7 @@ final class AppModel: ObservableObject {
   var isProcessRunning: Bool { server?.isConnected == true && threadID != nil }
   var isBusy: Bool {
     isStreaming || isCompacting || submitting || isStopping || isCheckingDelivery
-      || !pendingQueueCancellations.isEmpty
+      || !pendingQueueCancellations.isEmpty || pendingQueuePromotion != nil
       || deliveryCoordinator?.activeThreads.contains(threadID ?? "") == true || awaitingAgentStart
       || pendingSelection != nil
       || codexRotationInFlight || isChangingFastMode || isManagingAccounts
@@ -260,7 +282,8 @@ final class AppModel: ObservableObject {
         || extensionUI?.hasPendingDialog(for: self) == true)
   }
   var supportsAccountSwitch: Bool {
-    isProcessRunning && (accountUsageProvider == .chatGPT || accountUsageProvider == .legacyCodex)
+    server?.isConnected == true
+      && (accountUsageProvider == .chatGPT || accountUsageProvider == .legacyCodex)
   }
   var supportsAccountRotation: Bool { false }
   var accountUsageProvider: AccountUsageProvider? { AccountUsageProvider(modelID: selectedModelId) }
@@ -340,6 +363,7 @@ final class AppModel: ObservableObject {
     submitting = false
     isStopping = false
     pendingQueueCancellations = []
+    pendingQueuePromotion = nil
     awaitingAgentStart = false
     connectTask?.cancel()
     server?.unwatch(owner: observerID)
@@ -357,6 +381,9 @@ final class AppModel: ObservableObject {
     enterSkillWorkspace()
     pendingThreadPath = path
     if changingSession {
+      hasMoreHistory = false
+      isLoadingHistory = false
+      historyError = nil
       messages = []
       sessionName = ""
       isStreaming = false
@@ -370,6 +397,7 @@ final class AppModel: ObservableObject {
     {
       // 不能通过 apply 恢复：它会把旧快照标成已连接，并触发交互/发件箱确认。
       messages = cached.messages
+      // 缓存只是近期阅读副本；分页游标必须等实时订阅确认后才能使用。
       sessionName = cached.title
       isShowingCachedConversation = true
     }
@@ -953,6 +981,7 @@ final class AppModel: ObservableObject {
     guard let thread = detail["thread"] as? [String: Any], thread["id"] as? String == threadID
     else { return }
     connectionState = .connected
+    hasMoreHistory = detail["hasMoreHistory"] as? Bool ?? false
     if isShowingCachedConversation {
       isShowingCachedConversation = false
       if statusText == "正在后台核对会话…" { statusText = "" }
@@ -1086,7 +1115,8 @@ final class AppModel: ObservableObject {
     } catch { statusText = "消息已收到，但本地交接保存失败；请检查发件箱" }
     entries.append(contentsOf: ChatEntry.groupingToolEntries(Array(toolEntries.values)))
     entries.sort { ($0.timestamp ?? .distantPast) < ($1.timestamp ?? .distantPast) }
-    if let projectURL, let threadID {
+    // 用户展开的旧页只留在当前订阅内存，不重新写成下次启动的全量历史。
+    if detail["historyExpanded"] as? Bool != true, let projectURL, let threadID {
       server?.conversationCache.store(
         project: projectURL, threadID: threadID, title: sessionName, messages: entries)
     }
@@ -1200,7 +1230,40 @@ final class AppModel: ObservableObject {
         $0.name == accountName && !$0.isActive
       }) == true
     else { return }
-    performSessionControl("switch-account", accountName: accountName)
+    if threadID != nil {
+      performSessionControl("switch-account", accountName: accountName)
+      return
+    }
+    guard let server, let provider = accountUsageProvider else { return }
+    // 草稿还没有 Server 线程；直接复用账户工作台的默认账户契约，
+    // 不为切换凭据创建会话或发送管理消息，也不改变已有线程的绑定。
+    let current = generation
+    codexRotationInFlight = true
+    statusText = "正在切换新会话默认账户…"
+    Task { [weak self] in
+      guard let self else { return }
+      defer {
+        if self.generation == current {
+          self.codexRotationInFlight = false
+          self.refreshCodexAccounts(force: true)
+        }
+      }
+      do {
+        let result = try await server.accountControl([
+          "operation": "set-default", "provider": provider.rawValue, "name": accountName,
+        ])
+        let data = try JSONSerialization.data(withJSONObject: result)
+        let snapshot = try JSONDecoder().decode(AccountWorkspaceSnapshot.self, from: data)
+        guard snapshot.provider == provider.rawValue,
+          snapshot.accounts.contains(where: { $0.name == accountName && $0.isDefault })
+        else { throw T3DesktopClient.ClientError.rejected }
+        guard self.generation == current else { return }
+        self.statusText = "新会话默认账户已切换为 \(accountName)；已有会话不变。"
+      } catch {
+        guard self.generation == current else { return }
+        self.statusText = "账户切换未确认，请刷新账户状态核验；草稿已保留，不会自动重试。"
+      }
+    }
   }
   func refreshCodexAccounts(force: Bool = false) {
     guard accountStatusTask == nil, let server else { return }
@@ -1324,9 +1387,42 @@ final class AppModel: ObservableObject {
     }
   }
   func resumeQueue() { queueCommand(["type": "queue.resume"]) }
+  var canSteerQueuedPrompt: Bool {
+    lastTurnState == "running" && lastTurnID != nil && !isStopping
+      && pendingQueuePromotion == nil && pendingQueueCancellations.isEmpty
+  }
+
+  func steerQueuedPrompt(id: String) {
+    guard canSteerQueuedPrompt,
+      serverQueuedPrompts.contains(where: { $0.id == id && $0.submissionState == .confirmed }),
+      let targetRunID = lastTurnID, let threadID, let server
+    else { return }
+    let current = generation
+    pendingQueuePromotion = id
+    statusText = "正在将排队消息改为 Steer…"
+    Task {
+      do {
+        // 使用官方原子提升命令，保留消息身份、附件与上下文；不取消后重发。
+        // 目标回合可能已经结束，由 Server 校验，客户端不猜测或自动重试。
+        try await server.dispatch([
+          "type": "queued-message.promote-to-steer", "threadId": threadID,
+          "queuedRunId": id, "targetRunId": targetRunID,
+        ])
+        guard generation == current else { return }
+        pendingQueuePromotion = nil
+        statusText = "Server 已接收 Steer，等待执行状态更新。"
+      } catch {
+        guard generation == current else { return }
+        pendingQueuePromotion = nil
+        statusText = "Steer 未确认；请核对 Server 队列与执行状态，不会自动重发。"
+      }
+    }
+  }
+
   func removeQueuedPrompt(id: String, restoreDraft: Bool = false) {
     guard let prompt = serverQueuedPrompts.first(where: { $0.id == id }),
-      let threadID, let server, !pendingQueueCancellations.contains(id)
+      let threadID, let server, !pendingQueueCancellations.contains(id),
+      pendingQueuePromotion == nil
     else { return }
     guard !restoreDraft || !hasUnsubmittedInput else {
       statusText = "请先发送或清空输入框，避免覆盖尚未提交的草稿。"
@@ -1363,7 +1459,8 @@ final class AppModel: ObservableObject {
     return serverQueuedPrompts[index + direction].id
   }
   func moveQueuedPrompt(id: String, direction: Int) {
-    guard let target = queuedPromptMoveTarget(id: id, direction: direction),
+    guard pendingQueuePromotion == nil,
+      let target = queuedPromptMoveTarget(id: id, direction: direction),
       let to = serverQueuedPrompts.firstIndex(where: { $0.id == target })
     else { return }
     let before: Any =

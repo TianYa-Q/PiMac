@@ -31,7 +31,11 @@ enum T3V2Presentation {
     for thread in threads {
       guard let id = thread["id"] as? String else { continue }
       if let parentID = subagentParentID(thread) { parents[id] = parentID }
-      if active.contains(thread["status"] as? String ?? "") { running.insert(id) }
+      if active.contains(
+        thread["activityRunStatus"] as? String ?? thread["status"] as? String ?? "")
+      {
+        running.insert(id)
+      }
     }
     var pending = Array(running)
     while let id = pending.popLast() {
@@ -61,8 +65,13 @@ enum T3V2Presentation {
         "completedAt": run?["completedAt"] ?? native["latestRunCompletedAt"] ?? NSNull(),
       ]
     }
+    // Shell 的 status 属于最新 run，可能只是排队消息；执行状态沿用官方 shellRuntime
+    // 的 activityRunStatus 优先规则。latestTurn 仍保留最新 run 的身份和时间，不能混成活动 run。
+    let runtimeStatus =
+      run?["status"] as? String ?? native["activityRunStatus"] as? String ?? status
     result["session"] = [
-      "status": active.contains(status) ? "running" : status == "failed" ? "error" : "ready"
+      "status": active.contains(runtimeStatus)
+        ? "running" : runtimeStatus == "failed" ? "error" : "ready"
     ]
     return result
   }
@@ -260,6 +269,9 @@ enum T3V2Presentation {
     result["messages"] = messages
     result["activities"] = activities
     var detail: JSON = ["snapshotSequence": native["snapshotSequence"] ?? -1, "thread": result]
+    for key in ["historyCursor", "hasMoreHistory", "historyExpanded"] {
+      detail[key] = native[key]
+    }
     if let stats = stats(native), let data = try? JSONEncoder().encode(stats),
       let metrics = try? JSONSerialization.jsonObject(with: data)
     {

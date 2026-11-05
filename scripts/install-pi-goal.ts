@@ -108,6 +108,13 @@ export const goalBridgePatches = [
     replacement: "\t\t// 恢复会话不代表选择目标；仅由用户主动通过 /goal-focus 打开选择器。\n",
   },
 ];
+// 独立增量补丁保留已发布桥接的还原锚点，使现有安装也能通过原文哈希校验升级。
+goalBridgePatches.push({
+  file: "goal-state.ts",
+  sha256: "9169cff7f735da0e7d62e65d82516ca602dfa0871ef3f1a9b6ca8977f5283e1e",
+  anchor: "\t\t\t\t...(goal.tokenBudget === undefined ? {} : { tokenBudget: goal.tokenBudget }),",
+  replacement: "\t\t\t\t...(goal.tokenBudget === undefined ? {} : { tokenBudget: goal.tokenBudget }),\n\t\t\t\t...(goal.pauseReason === undefined ? {} : { pauseReason: goal.pauseReason }),",
+});
 const hash = (text: string): string => createHash("sha256").update(text).digest("hex");
 
 export function bridgeGoalSource(file: string, source: string): string {
@@ -120,11 +127,16 @@ export function bridgeGoalSource(file: string, source: string): string {
       original = original.replace(patch.replacement, patch.anchor);
     }
   }
-  if (patches.some((patch) => hash(original) !== patch.sha256 ||
-      original.split(patch.anchor).length !== 2)) {
+  if (patches.some((patch) => hash(original) !== patch.sha256)) {
     throw new Error(`Goal source differs from pinned 0.32.3: ${file}`);
   }
-  return patches.reduce((text, patch) => text.replace(patch.anchor, patch.replacement), original);
+  // 增量锚点可能由前一补丁引入，必须按实际应用顺序校验，而不是只在上游原文中查找。
+  return patches.reduce((text, patch) => {
+    if (text.split(patch.anchor).length !== 2) {
+      throw new Error(`Ambiguous or missing Goal bridge anchor: ${file}`);
+    }
+    return text.replace(patch.anchor, patch.replacement);
+  }, original);
 }
 
 export async function installGoalBridge(packageRoot: string, check: boolean): Promise<void> {

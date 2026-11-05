@@ -43,6 +43,12 @@ struct UsageSnapshot: Sendable {
   var projects: [ProjectUsage] = []
   var coverageWarnings: [String] = []
 
+  func day(at date: Date?, calendar: Calendar) -> UsageDay? {
+    guard let date else { return nil }
+    // 使用与图表日分桶相同的日历；不把历史缺失日期吸附到相邻有用量的日期。
+    return days.first { calendar.isDate($0.date, inSameDayAs: date) }
+  }
+
   var cacheHitPercent: Double? {
     let promptTokens = Double(inputTokens) + Double(cacheReadTokens) + Double(cacheWriteTokens)
     guard promptTokens > 0 else { return nil }
@@ -83,6 +89,7 @@ final class UsageDashboardModel: ObservableObject {
   @Published var isLoading = false
   @Published var error: String?
   @Published var startedAt = Date.now
+  private var snapshotPeriod: UsagePeriod = .month
   private var generation = UUID()
   private var loadTask: Task<Void, Never>?
   private let load: (UsagePeriod) async throws -> UsageSnapshot
@@ -103,7 +110,8 @@ final class UsageDashboardModel: ObservableObject {
     generation = nextGeneration
     let period = period
     let load = load
-    snapshot = UsageSnapshot()
+    // 同范围刷新保留已显示的数据；切换范围则清空，避免把旧范围误标为新范围。
+    if snapshotPeriod != period { snapshot = UsageSnapshot() }
     error = nil
     startedAt = .now
     isLoading = true
@@ -112,6 +120,7 @@ final class UsageDashboardModel: ObservableObject {
         let result = try await load(period)
         guard let self, self.generation == nextGeneration, !Task.isCancelled else { return }
         self.snapshot = result
+        self.snapshotPeriod = period
       } catch {
         guard let self, self.generation == nextGeneration, !Task.isCancelled else { return }
         self.error = "无法获取 T3 Server 用量汇总，请确认连接后重试。"
@@ -125,30 +134,28 @@ final class UsageDashboardModel: ObservableObject {
 
 struct UsageDashboardView: View {
   @StateObject private var model: UsageDashboardModel
-  @State private var exportError: String?
+  @State private var hoveredDate: Date?
+  private let automaticallyLoads: Bool
+
+  init(model: UsageDashboardModel, automaticallyLoads: Bool, hoveredDate: Date? = nil) {
+    _model = StateObject(wrappedValue: model)
+    _hoveredDate = State(initialValue: hoveredDate)
+    self.automaticallyLoads = automaticallyLoads
+  }
 
   init(server: T3DesktopClient) {
-    _model = StateObject(wrappedValue: UsageDashboardModel { period in
-      try await server.usageSummary(period: period)
-    })
+    automaticallyLoads = true
+    _model = StateObject(
+      wrappedValue: UsageDashboardModel { period in
+        try await server.usageSummary(period: period)
+      })
   }
 
   var body: some View {
     VStack(spacing: 0) {
       header
       Divider()
-      if model.isLoading, model.snapshot.requests == 0 {
-        Spacer()
-        VStack(spacing: 12) {
-          ProgressView("正在获取 T3 Server 用量汇总…")
-          scanStatus
-          Text("统计由 Server 执行；首次读取历史记录可能较慢。")
-            .font(.caption).foregroundStyle(.secondary)
-          Button("取消", action: model.cancel)
-        }
-        .frame(width: 380)
-        Spacer()
-      } else if let error = model.error {
+      if let error = model.error, model.snapshot.requests == 0 {
         ContentUnavailableView {
           Label("用量读取未完成", systemImage: "exclamationmark.triangle")
         } description: {
@@ -156,37 +163,36 @@ struct UsageDashboardView: View {
         } actions: {
           Button("重试", action: model.reload)
         }
-      } else if model.snapshot.requests == 0 {
+      } else if model.snapshot.requests == 0 && !model.isLoading {
         ContentUnavailableView(
           "暂无用量记录",
           systemImage: "chart.bar.xaxis",
-          description: Text(model.snapshot.coverageWarnings.isEmpty
-            ? "当前范围内没有 Server 用量记录。"
-            : model.snapshot.coverageWarnings.joined(separator: "\n"))
+          description: Text(
+            model.snapshot.coverageWarnings.isEmpty
+              ? "当前范围内没有 Server 用量记录。"
+              : model.snapshot.coverageWarnings.joined(separator: "\n"))
         )
       } else {
         dashboard
       }
     }
     .background(Color(nsColor: .windowBackgroundColor))
-    .task { model.reload() }
-    .onChange(of: model.period) { model.reload() }
-    .onDisappear { model.cancel() }
-    .alert(
-      "导出失败",
-      isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })
-    ) {
-      Button("确定", role: .cancel) { exportError = nil }
-    } message: {
-      Text(exportError ?? "")
+    .task { if automaticallyLoads { model.reload() } }
+    .onChange(of: model.period) {
+      hoveredDate = nil
+      model.reload()
     }
+    .onChange(of: model.isLoading) {
+      if model.isLoading { hoveredDate = nil }
+    }
+    .onDisappear { model.cancel() }
   }
 
   private var header: some View {
     HStack(spacing: 12) {
       VStack(alignment: .leading, spacing: 3) {
         Text("用量看板").font(.title2.bold())
-        Text("由 T3 Server 提供用量汇总 · 费用为 API 等效估算，非订阅账单")
+        Text("API 等效费用估算，非订阅账单 · 数据来自 T3 Server")
           .font(.caption)
           .foregroundStyle(.secondary)
       }
@@ -196,52 +202,27 @@ struct UsageDashboardView: View {
       }
       .pickerStyle(.segmented)
       .frame(width: 220)
-      if model.isLoading {
-        scanStatus.frame(width: 170)
-        Button("取消", action: model.cancel)
+      Button(action: model.isLoading ? model.cancel : model.reload) {
+        ZStack {
+          Image(systemName: "arrow.clockwise").opacity(model.isLoading ? 0 : 1)
+          ProgressView().controlSize(.small).opacity(model.isLoading ? 1 : 0)
+        }
+        .frame(width: 16, height: 16)
       }
-      Button {
-        exportCSV()
-      } label: {
-        Label("导出", systemImage: "square.and.arrow.up")
-      }
-      .disabled(model.isLoading || model.snapshot.requests == 0)
-      .help("导出 Server 返回的当前范围模型汇总 CSV，不包含消息正文")
-      Button(action: model.reload) {
-        Image(systemName: "arrow.clockwise")
-      }
-      .disabled(model.isLoading)
-      .help("重新统计")
+      .accessibilityLabel(model.isLoading ? "取消更新" : "刷新用量")
+      .help(model.isLoading ? "正在获取用量，点击取消" : "重新统计")
     }
     .padding(.horizontal, 24)
     .padding(.vertical, 16)
   }
 
-  private var scanStatus: some View {
-    VStack(spacing: 5) {
-      Text("等待 Server 返回…")
-      TimelineView(.periodic(from: model.startedAt, by: 1)) { context in
-        Text("已耗时 \(max(0, Int(context.date.timeIntervalSince(model.startedAt)))) 秒")
-      }
-    }
-    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
-  }
-
-  private func exportCSV() {
-    let snapshot = model.snapshot
-    let panel = NSSavePanel()
-    panel.nameFieldStringValue = "pimac-usage-\(model.period.rawValue).csv"
-    panel.begin { response in
-      guard response == .OK, let url = panel.url else { return }
-      do { try UsageCSV.export(snapshot).write(to: url, atomically: true, encoding: .utf8) } catch {
-        exportError = error.localizedDescription
-      }
-    }
-  }
-
   private var dashboard: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: 20) {
+      VStack(alignment: .leading, spacing: 16) {
+        if let error = model.error {
+          Label(error, systemImage: "exclamationmark.triangle")
+            .font(.callout).foregroundStyle(.orange)
+        }
         ForEach(model.snapshot.coverageWarnings, id: \.self) { warning in
           Label(warning, systemImage: "exclamationmark.triangle")
             .font(.caption).foregroundStyle(.orange)
@@ -260,7 +241,7 @@ struct UsageDashboardView: View {
             icon: "bubble.left.and.bubble.right", tint: .orange)
         }
 
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 16) {
           chartCard
           tokenCompositionCard
             .frame(width: 250)
@@ -271,52 +252,138 @@ struct UsageDashboardView: View {
           .font(.caption).foregroundStyle(.secondary)
       }
       .padding(24)
+      .redacted(reason: model.isLoading && model.snapshot.requests == 0 ? .placeholder : [])
+      .overlay(alignment: .top) {
+        if model.isLoading && model.snapshot.requests == 0 {
+          Text("正在获取用量汇总，首次读取可能较慢…")
+            .font(.callout).padding(12)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .padding(.top, 120)
+        }
+      }
     }
   }
 
   private func metricCard(_ title: String, value: String, icon: String, tint: Color) -> some View {
-    VStack(alignment: .leading, spacing: 12) {
-      HStack {
-        Image(systemName: icon)
-          .foregroundStyle(tint)
-          .frame(width: 28, height: 28)
-          .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-        Spacer()
-        Text(title).font(.caption).foregroundStyle(.secondary)
+    VStack(alignment: .leading, spacing: 14) {
+      Label {
+        Text(title).foregroundStyle(.secondary)
+      } icon: {
+        Image(systemName: icon).foregroundStyle(tint)
       }
+      .font(.callout)
       Text(value)
-        .font(.system(.title2, design: .rounded, weight: .semibold))
+        .font(.system(size: 28, weight: .semibold, design: .rounded))
         .monospacedDigit()
+        .lineLimit(1).minimumScaleFactor(0.7)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
-    .padding(15)
+    .padding(18)
     .background(.background, in: RoundedRectangle(cornerRadius: 13))
     .overlay(RoundedRectangle(cornerRadius: 13).stroke(.separator.opacity(0.35)))
   }
 
   private var chartCard: some View {
     VStack(alignment: .leading, spacing: 14) {
-      Text("Token 趋势").font(.headline)
-      Chart(model.snapshot.days) { day in
-        AreaMark(
-          x: .value("日期", day.date, unit: .day),
-          y: .value("Token", day.tokens)
-        )
-        .foregroundStyle(
-          LinearGradient(
-            colors: [.blue.opacity(0.35), .blue.opacity(0.03)], startPoint: .top, endPoint: .bottom)
-        )
-        LineMark(
-          x: .value("日期", day.date, unit: .day),
-          y: .value("Token", day.tokens)
-        )
-        .foregroundStyle(.blue)
-        .lineStyle(StrokeStyle(lineWidth: 2))
+      HStack {
+        Text("Token 趋势").font(.headline)
+        Spacer()
+        Text("每日用量 · Token").font(.caption).foregroundStyle(.secondary)
       }
-      .chartYAxis { AxisMarks(position: .leading) }
-      .frame(height: 210)
+      Chart {
+        ForEach(model.snapshot.days) { day in
+          AreaMark(
+            x: .value("日期", day.date, unit: .day),
+            y: .value("Token", day.tokens)
+          )
+          .foregroundStyle(
+            LinearGradient(
+              colors: [.blue.opacity(0.20), .blue.opacity(0.01)], startPoint: .top,
+              endPoint: .bottom)
+          )
+          LineMark(
+            x: .value("日期", day.date, unit: .day),
+            y: .value("Token", day.tokens)
+          )
+          .foregroundStyle(.blue)
+          .lineStyle(StrokeStyle(lineWidth: 2))
+        }
+        if let day = model.snapshot.day(at: hoveredDate, calendar: .current) {
+          PointMark(
+            x: .value("日期", day.date, unit: .day),
+            y: .value("Token", day.tokens)
+          )
+          .foregroundStyle(.blue)
+          .symbolSize(45)
+          RuleMark(x: .value("日期", day.date, unit: .day))
+            .foregroundStyle(.secondary.opacity(0.5))
+            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            .annotation(
+              position: .top, spacing: 6,
+              overflowResolution: .init(x: .fit(to: .plot), y: .fit(to: .plot))
+            ) {
+              VStack(alignment: .leading, spacing: 8) {
+                Text(day.date.formatted(.dateTime.year().month().day()))
+                  .fontWeight(.semibold)
+                HStack {
+                  Text("Token").foregroundStyle(.secondary)
+                  Spacer()
+                  Text(compact(day.tokens)).monospacedDigit()
+                }
+                HStack {
+                  Text("估算费用").foregroundStyle(.secondary)
+                  Spacer()
+                  Text(currency(day.cost)).monospacedDigit()
+                }
+              }
+              .font(.caption)
+              .padding(12)
+              .frame(width: 200)
+              .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+              .overlay(RoundedRectangle(cornerRadius: 10).stroke(.separator.opacity(0.4)))
+              .allowsHitTesting(false)
+            }
+        }
+      }
+      .chartOverlay { proxy in
+        GeometryReader { geometry in
+          Color.clear
+            .contentShape(Rectangle())
+            .onContinuousHover { phase in
+              guard case .active(let location) = phase,
+                let anchor = proxy.plotFrame,
+                geometry[anchor].contains(location), !model.isLoading
+              else {
+                hoveredDate = nil
+                return
+              }
+              hoveredDate = proxy.value(atX: location.x - geometry[anchor].minX, as: Date.self)
+            }
+        }
+      }
+      .chartYAxis {
+        AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+          AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
+          AxisValueLabel {
+            if let tokens = value.as(Int.self) {
+              // 固定缩写语言，与总量和模型列表的 K / M / B 保持一致，避免本地化成万 / 亿。
+              Text(
+                tokens.formatted(.number.notation(.compactName).locale(Locale(identifier: "en_US")))
+              )
+            }
+          }
+        }
+      }
+      .chartXAxis {
+        AxisMarks(values: .automatic(desiredCount: 5)) { _ in
+          AxisValueLabel(format: .dateTime.month(.defaultDigits).day())
+        }
+      }
+      .frame(maxHeight: .infinity)
     }
-    .padding(16)
+    .padding(18)
     .frame(maxWidth: .infinity)
+    .frame(height: 260)
     .background(.background, in: RoundedRectangle(cornerRadius: 13))
     .overlay(RoundedRectangle(cornerRadius: 13).stroke(.separator.opacity(0.35)))
   }
@@ -328,6 +395,7 @@ struct UsageDashboardView: View {
       usageRow("输出", value: model.snapshot.outputTokens, color: .purple)
       usageRow("缓存读取", value: model.snapshot.cacheReadTokens, color: .green)
       usageRow("缓存写入", value: model.snapshot.cacheWriteTokens, color: .orange)
+      Spacer(minLength: 0)
       Divider()
       HStack {
         Text("缓存命中率").foregroundStyle(.secondary)
@@ -337,7 +405,8 @@ struct UsageDashboardView: View {
       }
       .font(.caption)
     }
-    .padding(16)
+    .padding(18)
+    .frame(height: 260)
     .background(.background, in: RoundedRectangle(cornerRadius: 13))
     .overlay(RoundedRectangle(cornerRadius: 13).stroke(.separator.opacity(0.35)))
   }
@@ -345,67 +414,113 @@ struct UsageDashboardView: View {
   private func usageRow(_ title: String, value: Int, color: Color) -> some View {
     VStack(spacing: 5) {
       HStack {
-        Label(title, systemImage: "circle.fill").foregroundStyle(color)
+        HStack(spacing: 6) {
+          Circle().fill(color).frame(width: 6, height: 6)
+          Text(title).foregroundStyle(.secondary)
+        }
         Spacer()
         Text(compact(value)).monospacedDigit().foregroundStyle(.secondary)
       }
       .font(.caption)
-      ProgressView(value: Double(value), total: Double(max(model.snapshot.totalTokens, 1)))
-        .tint(color)
-    }
-  }
-
-  private var modelBreakdown: some View {
-    breakdownCard(title: "模型用量", icon: "cpu") {
-      ForEach(model.snapshot.models.prefix(6)) { item in
-        breakdownRow(
-          title: item.name,
-          subtitle: "\(item.requests) 次 · \(currency(item.cost))",
-          value: compact(item.tokens),
-          fraction: Double(item.tokens) / Double(max(model.snapshot.totalTokens, 1)),
-          color: .purple
-        )
-      }
-    }
-  }
-
-  private func breakdownCard<Content: View>(
-    title: String, icon: String, @ViewBuilder content: () -> Content
-  ) -> some View {
-    VStack(alignment: .leading, spacing: 13) {
-      Label(title, systemImage: icon).font(.headline)
-      content()
-    }
-    .padding(16)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .background(.background, in: RoundedRectangle(cornerRadius: 13))
-    .overlay(RoundedRectangle(cornerRadius: 13).stroke(.separator.opacity(0.35)))
-  }
-
-  private func breakdownRow(
-    title: String, subtitle: String, value: String, fraction: Double, color: Color
-  ) -> some View {
-    VStack(spacing: 5) {
-      HStack(alignment: .firstTextBaseline) {
-        VStack(alignment: .leading, spacing: 2) {
-          Text(title).font(.callout).lineLimit(1)
-          Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-        }
-        Spacer()
-        Text(value).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-      }
       GeometryReader { geometry in
-        Capsule().fill(.quaternary)
+        Capsule().fill(color.opacity(0.08))
           .overlay(alignment: .leading) {
-            Capsule().fill(color.opacity(0.75))
-              .frame(width: geometry.size.width * max(0, min(fraction, 1)))
+            Capsule().fill(color.opacity(0.8))
+              .frame(
+                width: geometry.size.width
+                  * min(
+                    1,
+                    max(
+                      0,
+                      Double(value) / Double(max(model.snapshot.totalTokens, 1)))))
           }
       }
       .frame(height: 4)
     }
   }
 
+  private var modelBreakdown: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      HStack {
+        Text("模型用量").font(.headline)
+        Spacer()
+        Text(model.snapshot.models.count > 6 ? "按 Token 排序 · 前 6 项" : "按 Token 排序")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+      Grid(horizontalSpacing: 20, verticalSpacing: 0) {
+        GridRow {
+          Text("模型").frame(maxWidth: .infinity, alignment: .leading)
+          Text("用量记录").frame(width: 70, alignment: .trailing)
+          Text("Token").frame(width: 90, alignment: .trailing)
+          Text("估算费用").frame(width: 100, alignment: .trailing)
+          Text("用量占比").frame(width: 110, alignment: .trailing)
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        .padding(.bottom, 10)
+        ForEach(displayModels) { item in
+          Divider().gridCellColumns(5)
+          GridRow {
+            VStack(alignment: .leading, spacing: 3) {
+              Text(item.name.split(separator: "/").last.map(String.init) ?? item.name)
+                .font(.callout.weight(.medium))
+              if let provider = item.name.split(separator: "/").dropLast().first {
+                Text(String(provider)).font(.caption).foregroundStyle(.secondary)
+              }
+            }
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+            .help(item.name)
+            Text(item.requests.formatted()).foregroundStyle(.secondary)
+            Text(compact(item.tokens))
+            Text(currency(item.cost))
+            HStack(spacing: 8) {
+              GeometryReader { geometry in
+                Capsule().fill(.quaternary)
+                  .overlay(alignment: .leading) {
+                    Capsule().fill(.blue.opacity(0.65))
+                      .frame(
+                        width: geometry.size.width
+                          * min(
+                            1,
+                            max(
+                              0,
+                              Double(item.tokens) / Double(max(model.snapshot.totalTokens, 1)))))
+                  }
+              }
+              .frame(width: 54, height: 4)
+              Text(
+                (Double(item.tokens) / Double(max(model.snapshot.totalTokens, 1)))
+                  .formatted(.percent.precision(.fractionLength(1)))
+              )
+              .frame(width: 48, alignment: .trailing)
+              .foregroundStyle(.secondary)
+            }
+          }
+          .font(.callout.monospacedDigit())
+          .gridColumnAlignment(.trailing)
+          .padding(.vertical, 3)
+        }
+      }
+    }
+    .padding(18)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(.background, in: RoundedRectangle(cornerRadius: 13))
+    .overlay(RoundedRectangle(cornerRadius: 13).stroke(.separator.opacity(0.35)))
+  }
+
+  private var displayModels: [ModelUsage] {
+    if model.isLoading && model.snapshot.requests == 0 {
+      return (0..<6).map {
+        ModelUsage(name: "model/placeholder-\($0)", tokens: 0, cost: 0, requests: 0)
+      }
+    }
+    return Array(model.snapshot.models.prefix(6))
+  }
+
   private func compact(_ value: Int) -> String {
+    if value >= 1_000_000_000 {
+      return String(format: "%.2fB", Double(value) / 1_000_000_000)
+    }
     if value >= 1_000_000 {
       return String(format: "%.2fM", Double(value) / 1_000_000)
     }
