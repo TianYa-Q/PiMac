@@ -3,6 +3,7 @@ import SwiftUI
 struct ThreadGoalView: View {
   let state: ThreadGoal.State
   let canControl: Bool
+  let canPause: Bool
   let onCommand: (GoalCommand) -> Void
   let onRevise: (GoalRevision, String) -> Bool
   let onStart: (String, GoalStartMode) -> Bool
@@ -35,9 +36,11 @@ struct ThreadGoalView: View {
           if driver == "pi" {
             if goal.status != .complete {
               Button("编辑目标") { editor = .revise }
+                .disabled(!canControl)
               Button(goal.status == .active ? "暂停执行" : "继续执行") {
                 onCommand(goal.status == .active ? .pause : .resume)
               }
+              .disabled(goal.status == .active ? !canPause : !canControl)
             }
             Menu {
               Button("查看进度…") { onCommand(.progress) }
@@ -53,14 +56,14 @@ struct ThreadGoalView: View {
             } label: {
               Image(systemName: "ellipsis")
             }
+            .disabled(!canControl)
             .menuStyle(.borderlessButton)
             .fixedSize()
             .accessibilityLabel("目标管理")
           }
         }
         .buttonStyle(.borderless)
-        .disabled(!canControl)
-        .help(canControl ? "编辑目标需讨论确认；继续执行会恢复自动工作" : "执行中请使用输入框的停止按钮；其他操作需等待空闲")
+        .help("运行中可暂停执行；编辑、继续和目标管理需等待会话空闲")
         Text(goal.objective)
           .lineLimit(expanded ? nil : 3)
           .textSelection(.enabled)

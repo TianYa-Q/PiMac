@@ -277,6 +277,55 @@ struct LidSleepControllerTests {
     #expect(controller.status == "恢复休眠失败：测试恢复失败")
   }
 
+  @Test(arguments: [
+    ("1", "0", "1:ac", Int32(0)),
+    ("1", "1", "1:ac", Int32(0)),
+    ("0", "0", "0:battery", Int32(0)),
+    ("0", "1", "1:battery_awake", Int32(0)),
+    ("0", "invalid", "error", Int32(1)),
+  ])
+  func manualBatteryPolicy(testCase: (String, String, String, Int32)) throws {
+    let (onAC, override, expected, code) = testCase
+    let fragment = LidSleepController.powerPolicyScript
+      .replacingOccurrences(of: "/bin/cat", with: "mock_cat")
+    let script = """
+      mock_cat() { printf '%s' '\(override)'; }
+      publish() { printf '%s' "$1"; }
+      onAC=\(onAC)
+      dir=/unused
+      \(fragment)
+      printf '%s:%s' "$desired" "$state"
+      """
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = ["-c", script]
+    process.standardOutput = output
+    try process.run()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    #expect(process.terminationStatus == code)
+    #expect(String(data: data, encoding: .utf8) == expected)
+  }
+
+  @Test @MainActor func manualBatteryOverrideIsSessionOnlyAndCancelledWithActivation() throws {
+    let suite = "LidSleepControllerTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let controller = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    controller.setBatteryOverride(true)
+    #expect(controller.batteryOverride)
+    #expect(controller.requested)
+    #expect(controller.busy)
+    controller.setEnabled(false)
+    #expect(!controller.batteryOverride)
+    controller.stop()
+    let reopened = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer { reopened.stop() }
+    #expect(!reopened.batteryOverride)
+    #expect(!reopened.enableOnLaunch)
+  }
+
   @Test func appleScriptQuotingEscapesNestedSource() {
     #expect(LidSleepController.appleScriptQuote("a\\b\"c\nd") == "\"a\\\\b\\\"c\\nd\"")
   }

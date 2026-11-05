@@ -104,12 +104,15 @@ pending. See docs/t3-server-migration.md for wire-output and upgrade limitations
 Command acceptance is not task completion; unknown outcomes must be inspected
 before resubmitting. `agent_settled`, not `agent_end`, determines completion.
 
-Pi tool/file-change projection and token usage now use the unmodified official
-Pi Adapter and contracts. Local diff enrichment, tool-parent inference and
-assistant-duration/output aggregation patches have been removed. The desktop
-uses official `turnTokenUsage` and turn timestamps when supplied; absent usage
-means no output-speed display, not an inferred or host-injected metric. Upstream
-Pi currently emits flat tool items and does not supply per-turn output usage.
+Pi tool/file-change projection uses the official Pi Adapter. The Pi telemetry
+bridge adds per-turn usage and calibrated stream-speed samples in `piMetrics`;
+missing or insufficient samples do not become a fabricated speed. The desktop
+client bundle applies the same hash-verified contract patches as the Server before
+building the official stream decoder/reducers. Otherwise Schema strips `piMetrics`
+from snapshots and incremental updates, leaving speed and cost absent despite
+correct Server reports. `T3StreamReducerTests` covers the real JavaScriptCore decode
+→ official reducer → presentation → AppModel path, including reconnects and corrupt
+metrics. This supplements, rather than replaces, Server and presentation tests.
 
 The desktop currently reads native HTTP snapshots by polling. iOS uses upstream
 shell/thread subscriptions and completion markers. Pairing or socket connection

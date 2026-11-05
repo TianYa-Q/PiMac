@@ -4,7 +4,10 @@ import SwiftUI
 enum LidSleepStatusKind: Equatable {
   case checking, applying, attention, active, battery, off
 
-  init(state: LidSleepSystemState, requested: Bool, enabled: Bool, busy: Bool) {
+  init(
+    state: LidSleepSystemState, requested: Bool, enabled: Bool, busy: Bool,
+    batteryOverride: Bool = false
+  ) {
     if busy {
       self = .applying
     } else {
@@ -12,12 +15,12 @@ enum LidSleepStatusKind: Equatable {
       case .checking: self = .checking
       case .failed: self = .attention
       case .available(let onAC, let disabled):
-        if disabled != (requested && onAC) || (requested && !enabled) {
+        if disabled != (requested && (onAC || batteryOverride)) || (requested && !enabled) {
           self = .attention
         } else if !requested {
           self = .off
         } else {
-          self = onAC ? .active : .battery
+          self = onAC || batteryOverride ? .active : .battery
         }
       }
     }
@@ -59,9 +62,12 @@ struct LidSleepStatusCard: View {
   let requested: Bool
   let enabled: Bool
   let busy: Bool
+  var batteryOverride = false
 
   private var kind: LidSleepStatusKind {
-    LidSleepStatusKind(state: state, requested: requested, enabled: enabled, busy: busy)
+    LidSleepStatusKind(
+      state: state, requested: requested, enabled: enabled, busy: busy,
+      batteryOverride: batteryOverride)
   }
 
   var body: some View {
@@ -74,9 +80,12 @@ struct LidSleepStatusCard: View {
           .background(kind.color.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
         VStack(alignment: .leading, spacing: 4) {
           Text(kind.title).font(.system(.body, weight: .semibold))
-          Text(state.managementDescription(requested: requested, enabled: enabled, busy: busy))
-            .font(.caption).foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+          Text(
+            state.managementDescription(
+              requested: requested, enabled: enabled, busy: busy, batteryOverride: batteryOverride)
+          )
+          .font(.caption).foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
         }
         Spacer(minLength: 0)
         if busy || kind == .checking {
@@ -106,19 +115,20 @@ struct LidSleepStatusCard: View {
 }
 
 struct LidSleepSettingsView: View {
-  @ObservedObject private var controller = LidSleepController.shared
+  @ObservedObject var controller = LidSleepController.shared
   @State private var confirming = false
+  @State private var confirmingBattery = false
   @State private var confirmingAccess = false
   @State private var installingAccess = true
   @AppStorage(LidSleepController.launchPreferenceKey) private var enableOnLaunch = false
 
   var body: some View {
-    GroupBox("插电合盖运行") {
+    GroupBox("合盖保持运行") {
       VStack(alignment: .leading, spacing: 18) {
         HStack(spacing: 16) {
           VStack(alignment: .leading, spacing: 4) {
             Text("合盖保持运行").font(.system(.body, weight: .semibold))
-            Text("仅插电时生效，拔电后恢复正常休眠")
+            Text("默认仅插电生效，可手动允许电池供电时运行")
               .font(.caption).foregroundStyle(.secondary)
               .fixedSize(horizontal: false, vertical: true)
           }
@@ -136,10 +146,30 @@ struct LidSleepSettingsView: View {
           .disabled(controller.busy)
         }
 
+        HStack(spacing: 16) {
+          VStack(alignment: .leading, spacing: 4) {
+            Text("电池供电时继续运行")
+            Text("仅本次运行有效，会增加耗电；关闭后恢复插电策略")
+              .font(.caption).foregroundStyle(.secondary)
+              .fixedSize(horizontal: false, vertical: true)
+          }
+          Spacer(minLength: 0)
+          Button(controller.batteryOverride ? "停止手动运行" : "手动开启") {
+            if controller.batteryOverride {
+              controller.setBatteryOverride(false)
+            } else {
+              confirmingBattery = true
+            }
+          }
+          .frame(width: 110)
+          .disabled(controller.busy)
+        }
+
         VStack(alignment: .leading, spacing: 10) {
           LidSleepStatusCard(
             state: controller.systemState, requested: controller.requested,
-            enabled: controller.enabled, busy: controller.busy)
+            enabled: controller.enabled, busy: controller.busy,
+            batteryOverride: controller.batteryOverride)
           if controller.requested && !controller.enabled && !controller.busy {
             Button("重试开启", systemImage: "arrow.clockwise") { controller.setEnabled(true) }
               .controlSize(.small)
@@ -203,7 +233,7 @@ struct LidSleepSettingsView: View {
           DisclosureGroup("运行详情与说明") {
             VStack(alignment: .leading, spacing: 8) {
               Text("运行详情：\(controller.status)")
-              Text("仅插电生效，无需外接显示器；拔电、关闭或退出后约 10 秒内恢复系统休眠开关。")
+              Text("默认仅插电生效，无需外接显示器；手动开启后电池供电也继续运行，关闭或退出后恢复系统休眠开关。")
               Text("开启表示允许 PiMac 接管；是否生效以当前状态为准，失败不会取消开关。")
               Text("运行期间也会接管已有的禁用状态。退出后不再持续管理，其他应用的休眠断言仍由系统处理。")
               Text("合盖时请求关闭所有屏幕，开盖后可用键盘或触控板唤醒。仅插电不保证唤醒已合盖的 Mac。")
@@ -223,6 +253,13 @@ struct LidSleepSettingsView: View {
         await controller.refreshSystemState()
         do { try await Task.sleep(for: .seconds(2)) } catch { return }
       }
+    }
+    .confirmationDialog("允许电池供电时合盖运行？", isPresented: $confirmingBattery, titleVisibility: .visible)
+    {
+      Button("手动开启") { controller.setBatteryOverride(true) }
+      Button("取消", role: .cancel) {}
+    } message: {
+      Text("仅本次运行有效，电池可能持续耗尽。请保持通风，勿放入包中。未授权时需要管理员授权；退出后恢复正常休眠，下次启动不自动开启电池模式。")
     }
     .confirmationDialog("允许插电合盖运行？", isPresented: $confirming, titleVisibility: .visible) {
       Button(controller.passwordlessAvailable || controller.passwordlessConfigured ? "开启" : "授权并开启")

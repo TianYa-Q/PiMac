@@ -77,7 +77,8 @@ enum MarkdownMath {
       if intent.contains(.stronglyEmphasized) { html = "<strong>\(html)</strong>" }
       if intent.contains(.emphasized) { html = "<em>\(html)</em>" }
       if intent.contains(.strikethrough) { html = "<del>\(html)</del>" }
-      if let link = run.link, ["https", "http", "mailto"].contains(link.scheme?.lowercased() ?? "")
+      if let link = run.link,
+        ["https", "http", "mailto", "t3-context"].contains(link.scheme?.lowercased() ?? "")
       {
         html = "<a href=\"\(escape(link.absoluteString))\">\(html)</a>"
       }
@@ -157,12 +158,13 @@ struct MarkdownMathView: View {
   let blocks: [MarkdownBlock]
   let textStyle: NSFont.TextStyle
   @Environment(\.colorScheme) private var colorScheme
+  @Environment(\.openURL) private var openURL
   @State private var height: CGFloat = 120
 
   var body: some View {
     MathWebContent(
       blocks: blocks, fontSize: NSFont.preferredFont(forTextStyle: textStyle).pointSize,
-      dark: colorScheme == .dark, height: $height
+      dark: colorScheme == .dark, height: $height, openLink: { openURL($0) }
     )
     .frame(height: height)
   }
@@ -173,6 +175,7 @@ private struct MathWebContent: NSViewRepresentable {
   let fontSize: CGFloat
   let dark: Bool
   @Binding var height: CGFloat
+  let openLink: (URL) -> Void
 
   func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -190,6 +193,7 @@ private struct MathWebContent: NSViewRepresentable {
 
   func updateNSView(_ view: WKWebView, context: Context) {
     context.coordinator.onHeight = { height = $0 }
+    context.coordinator.openLink = openLink
     let key = "\(fontSize):\(dark):\(blocks)"
     guard context.coordinator.key != key else { return }
     let coordinator = context.coordinator
@@ -215,6 +219,7 @@ private struct MathWebContent: NSViewRepresentable {
     view.configuration.userContentController.removeScriptMessageHandler(forName: "mathSize")
     view.configuration.userContentController.removeScriptMessageHandler(forName: "mathSelection")
     coordinator.onHeight = nil
+    coordinator.openLink = nil
   }
 
   final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -224,6 +229,7 @@ private struct MathWebContent: NSViewRepresentable {
     var appearance = ""
     var loaded = false
     var onHeight: ((CGFloat) -> Void)?
+    var openLink: ((URL) -> Void)?
 
     func updateContent(_ view: WKWebView) {
       // 通过参数而非拼接脚本传正文；流式更新复用页面，避免反复重载字体和闪白。
@@ -255,9 +261,9 @@ private struct MathWebContent: NSViewRepresentable {
     ) {
       if navigationAction.navigationType == .linkActivated {
         if let url = navigationAction.request.url,
-          ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "")
+          ["http", "https", "mailto", "t3-context"].contains(url.scheme?.lowercased() ?? "")
         {
-          NSWorkspace.shared.open(url)
+          openLink?(url)
         }
         decisionHandler(.cancel)
       } else {

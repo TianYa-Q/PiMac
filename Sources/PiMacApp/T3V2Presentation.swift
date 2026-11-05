@@ -106,6 +106,7 @@ enum T3V2Presentation {
           "role": type == "user_message" ? "user" : type == "reasoning" ? "reasoning" : "assistant",
           "text": item["text"] ?? "", "streaming": item["streaming"] ?? false,
           "attachments": item["attachments"] ?? [], "createdAt": date,
+          "context": item["context"] ?? NSNull(),
           "runId": item["runId"] ?? NSNull(),
         ])
       case "compaction":

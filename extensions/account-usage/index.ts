@@ -92,14 +92,12 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     _notify: boolean,
     _force = false,
-    rotateIdle = true,
   ) => {
     const state = safeReadAccountState(ctx);
     if (!state) return;
     try {
       settings = accountStore.readSettings();
       usagesForState(state);
-      if (rotateIdle) await rotateAccounts(ctx);
     } catch (error) {
       usages.clear();
       ctx.ui.notify(
@@ -134,8 +132,8 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
     }
   };
 
-  // Automatic changes are session-local. Manual /accounts switch still changes
-  // the future default. Never abort tools or inject/replay a user's prompt.
+  // 自动选择只在请求前/额度不足的执行边界发生，不能在正常结束后换账号。
+  // 手动切换和自动选择均只影响当前会话，不改未来默认账号、不重放用户输入。
   const rotateAccounts = async (
     ctx: ExtensionContext,
     boundary = false,
@@ -366,6 +364,8 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       await sessionAuth.clear(ctx);
       await initializeAccounts(ctx);
     }
+    // PiMac 宿主在发送本次 prompt 前已等待额度采样；扩展只消费身份匹配的快照。
+    // session_start 不提前均衡，避免初始化默认账号触发冷却，压过首次请求的新数据。
     await rotateAccounts(ctx, true);
     if (ctx.model?.provider !== providerId || ctx.model.api === "pi-virtual")
       return;
@@ -403,9 +403,9 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
 
   pi.on("turn_end", async (event, ctx) => {
     // Tools have finished and the next model request has not started yet.
-    // Weekly balancing waits for idle/pre-run boundaries; urgency need not.
+    // 周额度均衡只在下一次运行前发生；这里仅处理额度不足。
     if (event.outcome === "completed") {
-      await refreshAll(ctx, false, false, false);
+      await refreshAll(ctx, false);
       await rotateAccounts(ctx, true, false);
     }
   });
@@ -430,7 +430,7 @@ export default function codexAccountExtension(pi: ExtensionAPI) {
       return;
     // Retry only a confirmed quota failure, at most once for this user run.
     // No retries for cancellation, network/auth errors or ordinary completion.
-    await refreshAll(ctx, false, true, false);
+    await refreshAll(ctx, false, true);
     if (
       event.context.canContinue &&
       (await rotateAccounts(ctx, true, false, true))

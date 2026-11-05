@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { createAccountRuntime, activationReason } from "../account-runtime.js";
+import { preparePiAccountQuota } from "../pi-account-preflight.js";
 import { createAccountStore } from "../../../extensions/account-usage/store.js";
 import { readHostSnapshot } from "../../../extensions/account-usage/host-snapshot.js";
 import type { AccountSDK } from "../../../extensions/account-usage/host-types.js";
@@ -121,6 +122,112 @@ async function settle(predicate: () => boolean | Promise<boolean>) {
   }
   assert.fail("Background work did not settle");
 }
+
+test("pre-run quota preparation awaits the host sample and coalesces concurrent first prompts", async () => {
+  const f = await fixture();
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let queries = 0;
+  const runtime = f.create({
+    fetchImpl: async (input) => {
+      if (String(input).endsWith("reset-credits"))
+        return Response.json({ available_count: 0 });
+      queries++;
+      await gate;
+      return Response.json({
+        rate_limit: {
+          primary_window: {
+            used_percent: 10,
+            reset_at: Date.now() / 1000 + 10000,
+            limit_window_seconds: 18000,
+          },
+          secondary_window: {
+            used_percent: 20,
+            reset_at: Date.now() / 1000 + 300000,
+            limit_window_seconds: 604800,
+          },
+        },
+      });
+    },
+  });
+  try {
+    let ready = 0;
+    const model = { provider: "openai-codex", api: "openai-codex-responses" };
+    const first = preparePiAccountQuota(model, runtime).then(() => {
+      ready++;
+    });
+    const second = preparePiAccountQuota(model, runtime).then(() => {
+      ready++;
+    });
+    await settle(() => queries === 1);
+    assert.equal(
+      ready,
+      0,
+      "a prompt must not pass before its quota snapshot is written",
+    );
+    assert.deepEqual(
+      readHostSnapshot(
+        "openai-codex",
+        f.store.readCodexAccountState().accounts,
+        f.directory,
+      ),
+      [],
+    );
+    release!();
+    await Promise.all([first, second]);
+    const snapshot = readHostSnapshot(
+      "openai-codex",
+      f.store.readCodexAccountState().accounts,
+      f.directory,
+    );
+    assert.equal(ready, 2);
+    assert.equal(snapshot[0]?.primary?.remainingPercent, 90);
+    assert.equal(snapshot[0]?.secondary?.remainingPercent, 80);
+    await preparePiAccountQuota(model, runtime);
+    assert.equal(
+      queries,
+      1,
+      "subsequent prompts reuse the existing host quota cache",
+    );
+    assert.equal(
+      f.sends,
+      0,
+      "preflight must not inject an activation or user message",
+    );
+  } finally {
+    release?.();
+    runtime.close();
+    await f.cleanup();
+  }
+});
+
+test("pre-run sampling does not cross providers or hide sampling failure", async () => {
+  const calls: string[] = [];
+  const accounts = {
+    accountStatus: async ({ provider }: { provider: string }) => {
+      calls.push(provider);
+      throw new Error("sample unavailable");
+    },
+  };
+  for (const model of [
+    undefined,
+    {},
+    { provider: "other" },
+    { provider: "openai", api: "pi-virtual" },
+  ]) {
+    await preparePiAccountQuota(model, accounts);
+  }
+  assert.deepEqual(calls, []);
+  for (const provider of ["openai", "openai-codex"]) {
+    await assert.rejects(
+      preparePiAccountQuota({ provider }, accounts),
+      /sample unavailable/,
+    );
+  }
+  assert.deepEqual(calls, ["openai", "openai-codex"]);
+});
 
 test("full quota with an active countdown is not an unused window; expired full windows can recover", () => {
   const now = Date.now();

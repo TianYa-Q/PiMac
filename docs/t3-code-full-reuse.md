@@ -24,6 +24,15 @@
 - 生成客户端资源：`GOMAXPROCS=1 node --import tsx scripts/build-t3-client-state.ts`。来源记录必须匹配 Server pin；升级时同步替换对应版本源码与来源记录。生成物和所打包依赖的许可证放在原生 Resources。原生构建不因此重新编译 Server。
 - 校验生成物和 TypeScript 类型：同命令加 `--check`。针对性回归：`T3StreamReducerTests`、`HTMLLiveHydrationTests`、`T3SubscriptionIntegrationTests`；后者在 `tmp/` 隔离真实 Server 验证零正文 GET、隐藏订阅取消、Unicode 增量、真实 WebSocket 断线恢复，以及超过首批八条工具详情后历史 HTML 无新事件仍能自动显示。
 
+## 桌面会话引用
+
+- 会话列表右键「复制会话引用」写入官方 `app.t3.context-fragment` UTI、纯文本和带 payload 的 HTML；Web MIME 不是合法 macOS UTI，跨 Web 通过官方 HTML fallback 读取。保留原有「复制 Thread ID」。
+- `sidecars/t3-client-state/index.ts` 直接复用同一 pin 的 `composerContextClipboard.ts`、`composerContextReferences.ts` 和 contracts Schema。Swift 只适配 NSPasteboard、草稿/发件箱持久化、宿主分配粘贴身份及原生导航，不复制服务端的 Provider 上下文投影逻辑。
+- 本入口导入 thread 引用，不承诺附件/终端/评审引用的创建或跨环境迁移；其他类型粘贴明确失败。已有消息的官方 records 整体保留，不因为原生 UI 不认识其类型而剥离 payload。发送时过滤已删除的引用，并拒绝跨环境 thread；未携带 payload 的链接不按标题或 ID 擅自补全。
+- 引用随草稿、排队消息、发件箱原稿、取回/编辑和丢失会话迁移保存；投递命令仍按原身份冻结和恢复。异步粘贴遇到切换会话、取消或文字/选区变化，不向新草稿写入迟到结果。
+- 原生正文中的会话链接及输入框上方引用可打开同环境会话；内容缺失或不可访问时明确提示。包含公式的正文也通过原生 `openURL` 路径处理引用，不交给系统浏览器。
+- 回归：`ThreadContextTests`、`ThreadContextIntegrationTests`、`MessageRecoveryTests`、`ReplyAndDraftRegressionTests`。隔离 Server 测试覆盖官方剪贴板 → 原生适配 → 发件箱 → Server 投影 → Pi Provider，断言 Provider 收到 `threadId` 与读取指引，而非 `unavailable`。
+
 ## 输入恢复边界
 
 - 旧输入待恢复不得单独阻止用户继续发送独立的新输入；恢复入口和原始错误仍保留。

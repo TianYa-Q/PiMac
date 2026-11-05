@@ -62,6 +62,9 @@ struct LidSleepSessionTests {
 
   @Test(arguments: [
     ("normal", "set:1\nset:0\n", "app_exited:ok", 0),
+    ("manualBattery", "set:1\nset:0\n", "app_exited:ok", 0),
+    ("tickEnable", "set:1\nset:0\n", "app_exited:ok", 0),
+    ("tickDisable", "set:1\nset:0\nset:0\n", "app_exited:ok", 0),
     ("battery", "set:1\nset:0\nset:0\n", "app_exited:ok", 0),
     ("folderRemoved", "set:1\nset:0\n", "", 0),
     ("externalReset", "set:1\nset:1\nset:0\n", "app_exited:ok", 0),
@@ -91,6 +94,8 @@ struct LidSleepSessionTests {
     let session = directory.appendingPathComponent("session")
     try FileManager.default.createDirectory(at: session, withIntermediateDirectories: false)
     try Data().write(to: session.appendingPathComponent("lease"))
+    try Data((["manualBattery", "tickDisable"].contains(scenario) ? "1" : "0").utf8)
+      .write(to: session.appendingPathComponent("battery-override"))
     let commands = directory.appendingPathComponent("commands")
     try Data().write(to: commands)
     // 执行完整生成脚本，只替换系统边界；任何场景都不调用真实 pmset/sudo 或休眠。
@@ -118,7 +123,7 @@ struct LidSleepSessionTests {
           if [ "$2" = batt ]; then
             printf 'query\\n' >> "$testCommands-queries"
             [ "$scenario" != powerSourceFailed ] || return 1
-            if [ "$scenario" = inheritedDisabledBattery ] || [ "$scenario" = externalDisableOnBattery ] || { [ "$scenario" = battery ] && [ "$loops" -ge 2 ]; }; then
+            if [ "$scenario" = manualBattery ] || [ "$scenario" = tickEnable ] || [ "$scenario" = tickDisable ] || [ "$scenario" = inheritedDisabledBattery ] || [ "$scenario" = externalDisableOnBattery ] || { [ "$scenario" = battery ] && [ "$loops" -ge 2 ]; }; then
               echo "Now drawing from 'Battery Power'"
             else
               echo "Now drawing from 'AC Power'"
@@ -159,6 +164,8 @@ struct LidSleepSessionTests {
       }
       mock_sleep() {
         if [ "$loops" = 2 ]; then
+          [ "$scenario" != tickEnable ] || printf 1 > "$dir/battery-override"
+          [ "$scenario" != tickDisable ] || printf 0 > "$dir/battery-override"
           [ "$scenario" != externalReset ] || systemPower=0
           [ "$scenario" != externalDisableOnBattery ] || systemPower=1
           [ "$scenario" != runtimeQueryFailed ] || systemPower=bad

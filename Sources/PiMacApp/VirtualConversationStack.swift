@@ -103,18 +103,35 @@ private struct ConversationRowHeights: PreferenceKey {
   }
 }
 
+/// 会话级缓存同时保留坐标和高度；仅保存像素位置会被虚拟列表的估算高度扰动。
+@Observable
+final class ConversationReadingState {
+  var heights: [String: CGFloat] = [:]
+  var viewport: CGRect?
+  var measuredWidth: CGFloat = 0
+  fileprivate var scroll = ConversationViewportController()
+  var expansionStore = ConversationExpansionStore()
+  var isManual = false
+}
+
+final class ConversationReadingStore {
+  private var sessions: [String: ConversationReadingState] = [:]
+
+  func state(for key: String) -> ConversationReadingState {
+    if let state = sessions[key] { return state }
+    let state = ConversationReadingState()
+    sessions[key] = state
+    return state
+  }
+}
+
 /// Only the viewport plus overscan (and the live tail while following) have message views.
 /// Spacer heights are controlled by us, rather than LazyVStack's changing estimates.
 struct VirtualConversationStack<Row: View>: View {
   let ids: [String]
   let pinnedToBottom: Bool
+  @State var readingState = ConversationReadingState()
   @ViewBuilder let row: (Int) -> Row
-
-  @State private var heights: [String: CGFloat] = [:]
-  @State private var viewport: CGRect?
-  @State private var measuredWidth: CGFloat = 0
-  @State private var scroll = ConversationViewportController()
-  @State private var expansionStore = ConversationExpansionStore()
 
   private let spacing: CGFloat = 14
 
@@ -125,7 +142,7 @@ struct VirtualConversationStack<Row: View>: View {
   }
 
   var body: some View {
-    let layout = ConversationWindowLayout(ids: ids, heights: heights)
+    let layout = ConversationWindowLayout(ids: ids, heights: readingState.heights)
     let blocks = blocks(layout: layout)
 
     VStack(alignment: .leading, spacing: 0) {
@@ -156,17 +173,19 @@ struct VirtualConversationStack<Row: View>: View {
       }
     }
     .background {
-      ConversationViewportReader(controller: scroll) { rect, _ in
-        if layout.requiresWindowUpdate(from: viewport, to: rect) { viewport = rect }
+      ConversationViewportReader(controller: readingState.scroll) { rect, _ in
+        if layout.requiresWindowUpdate(from: readingState.viewport, to: rect) {
+          readingState.viewport = rect
+        }
       }
     }
     .onPreferenceChange(ConversationRowHeights.self) { measured in
       guard let width = measured.values.first?.width, width > 0 else { return }
       // Invalidate old wrapping measurements atomically with the new visible heights;
       // clearing them separately can lose a preference whose value hasn't changed.
-      let widthChanged = abs(width - measuredWidth) > 0.5
-      var updated = widthChanged ? [:] : heights
-      if widthChanged { measuredWidth = width }
+      let widthChanged = abs(width - readingState.measuredWidth) > 0.5
+      var updated = widthChanged ? [:] : readingState.heights
+      if widthChanged { readingState.measuredWidth = width }
       for (id, measurement) in measured
       where measurement.height.isFinite && measurement.height > 0
         && abs(measurement.width - width) <= 0.5
@@ -179,15 +198,16 @@ struct VirtualConversationStack<Row: View>: View {
     }
     .onChange(of: ids) {
       let validIDs = Set(ids)
-      heights = heights.filter { validIDs.contains($0.key) }
+      readingState.heights = readingState.heights.filter { validIDs.contains($0.key) }
     }
-    .environment(\.conversationExpansionStore, expansionStore)
+    .environment(\.conversationExpansionStore, readingState.expansionStore)
     .transaction { $0.animation = nil }
   }
 
   private func blocks(layout: ConversationWindowLayout) -> [Block] {
     guard !ids.isEmpty else { return [] }
-    let indices = layout.mountedIndices(viewport: viewport, pinnedToBottom: pinnedToBottom)
+    let indices = layout.mountedIndices(
+      viewport: readingState.viewport, pinnedToBottom: pinnedToBottom)
     var result: [Block] = []
     var previousEnd: CGFloat = 0
     for index in indices {
@@ -209,10 +229,10 @@ struct VirtualConversationStack<Row: View>: View {
   private func replaceHeights(
     _ updated: [String: CGFloat], layout: ConversationWindowLayout
   ) {
-    guard heights != updated else { return }
+    guard readingState.heights != updated else { return }
     // SwiftUI 的 viewport 只记录上次窗口切换，不能用它校正阅读锚点。
     // 高度变化时读取 AppKit 最近报告的精确位置，避免同一窗口内滚动后回跳。
-    let currentViewport = scroll.latestViewport ?? viewport
+    let currentViewport = readingState.scroll.latestViewport ?? readingState.viewport
     let next = ConversationWindowLayout(ids: ids, heights: updated)
     let correction = layout.anchorCorrection(to: next, viewportY: currentViewport?.minY ?? 0)
     // Capture the reading position before changing document height. In bottom-follow
@@ -220,13 +240,13 @@ struct VirtualConversationStack<Row: View>: View {
     if !pinnedToBottom {
       // Also restore a zero-delta anchor: live-tail growth below the viewport
       // must not let SwiftUI's default bottom anchor move the reader.
-      scroll.preservePosition(adding: correction)
+      readingState.scroll.preservePosition(adding: correction)
     }
     if var rect = currentViewport {
       if !pinnedToBottom { rect.origin.y += correction }
-      viewport = rect
+      readingState.viewport = rect
     }
-    heights = updated
+    readingState.heights = updated
   }
 }
 
@@ -297,7 +317,16 @@ private struct ConversationViewportReader: NSViewRepresentable {
     coordinator.controller = controller
     DispatchQueue.main.async { [weak view] in
       guard let view, coordinator.active else { return }
+      let isNewAttachment = coordinator.observedScrollView == nil
       coordinator.attach(view)
+      if isNewAttachment, let rect = controller.latestViewport,
+        let clip = view.enclosingScrollView?.contentView
+      {
+        // 恢复前不发布新列表的默认底部坐标，避免覆盖上次阅读位置。
+        let origin = view.convert(rect, to: clip).origin
+        clip.scroll(
+          to: clip.constrainBoundsRect(CGRect(origin: origin, size: clip.bounds.size)).origin)
+      }
       controller.restorePosition()
       coordinator.report()
     }

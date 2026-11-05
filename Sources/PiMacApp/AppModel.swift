@@ -62,6 +62,7 @@ final class AppModel: ObservableObject {
   @Published var currentSessionPath = ""
   @Published var stats: SessionStats?
   @Published var composerText = ""
+  @Published var composerContext: T3MessageContext? = nil
   @Published var attachments: [PromptAttachment] = []
   /// Server 队列与尚未确认的本地提交分开保存；确认后按消息 ID 原位交接。
   @Published private var serverQueuedPrompts: [ServerQueuedPrompt] = []
@@ -79,7 +80,8 @@ final class AppModel: ObservableObject {
       + pendingQueuedMessages.map {
         ServerQueuedPrompt(
           id: "pending:\($0.id)", text: $0.text, attachments: $0.attachments,
-          submissionState: $0.isError ? .unconfirmed : .submitting)
+          submissionState: $0.isError ? .unconfirmed : .submitting,
+          messageContext: $0.messageContext)
       }
   }
   @Published private(set) var queueHeld = false
@@ -505,7 +507,9 @@ final class AppModel: ObservableObject {
       statusText = reason
       return
     }
-    guard let prompt = Self.makePrompt(composerText, attachments: attachments, delivery: delivery)
+    guard
+      let prompt = Self.makePrompt(
+        composerText, attachments: attachments, delivery: delivery, messageContext: composerContext)
     else { return }
     submit(prompt, clearComposer: true) { _ in }
   }
@@ -519,8 +523,22 @@ final class AppModel: ObservableObject {
     return submit(prompt) { _ in }
   }
 
-  /// 原生命令独立提交，不读取或清空正在编辑的正文和附件，也不在忙碌时排队控制命令。
+  var canPauseGoal: Bool {
+    guard GoalCommand.pause.isAvailable(in: goalState), !isStopping else { return false }
+    if showsStopControl {
+      return isProcessRunning && connectionState == .connected
+    }
+    return canSubmitPrompt && !isBusy
+  }
+
+  /// 运行中暂停走独立 Stop 请求，不能把 /goal-pause 排在当前任务后面。
+  /// pi-goal-x 观察到用户 abort 后持久化暂停；原生层不伪造 Goal 状态。
   func sendGoalCommand(_ command: GoalCommand) {
+    if command == .pause && showsStopControl {
+      guard canPauseGoal else { return }
+      abort()
+      return
+    }
     guard canSubmitPrompt, !isBusy, command.isAvailable(in: goalState),
       let prompt = Self.makePrompt(command.text, attachments: [], delivery: .followUp)
     else { return }
@@ -574,6 +592,7 @@ final class AppModel: ObservableObject {
     // 持久化交接完成后才清理本次输入，异步结果不会清空后来编辑的草稿。
     if clearComposer {
       composerText = ""
+      composerContext = nil
       let ids = Set(prompt.attachments.map(\.id))
       attachments.removeAll { ids.contains($0.id) }
     }
@@ -636,6 +655,7 @@ final class AppModel: ObservableObject {
       restoredDeliveryDrafts.insert(draft.id).inserted, !hasUnsubmittedInput
     {
       composerText = draft.text
+      composerContext = draft.messageContext
       attachments = draft.attachments.map(\.attachment)
     }
     let pending = pendingSentMessages
@@ -770,6 +790,7 @@ final class AppModel: ObservableObject {
         $0.issue = "原稿已取回并保留备份；重新发送前请核验旧请求是否已执行"
       }
       composerText = first.text
+      composerContext = first.messageContext
       attachments = first.attachments.map(\.attachment)
       statusText = "原稿已取回；这不会撤销旧请求，重新发送前请核验是否已执行"
       recoveryReady = false
@@ -943,7 +964,8 @@ final class AppModel: ObservableObject {
       guard let id = $0["runId"] as? String else { return nil }
       return ServerQueuedPrompt(
         id: id, text: $0["text"] as? String ?? "",
-        attachments: $0["localImages"] as? [PromptAttachment] ?? [])
+        attachments: $0["localImages"] as? [PromptAttachment] ?? [],
+        messageContext: T3MessageContext.read($0["context"]))
     }
     if let selection = thread["modelSelection"] as? [String: Any],
       pendingSelection == nil || NSDictionary(dictionary: pendingSelection!).isEqual(to: selection)
@@ -993,7 +1015,8 @@ final class AppModel: ObservableObject {
         htmlDocument: message["htmlDocument"] as? String,
         htmlRenderError: message["htmlRenderError"] as? String,
         timestamp: T3DesktopClient.date(message["createdAt"]),
-        runID: message["runId"] as? String)
+        runID: message["runId"] as? String,
+        messageContext: T3MessageContext.read(message["context"]))
     }
     var toolEntries: [String: ChatEntry] = [:]
     var completedTools: Set<String> = []
@@ -1321,6 +1344,7 @@ final class AppModel: ObservableObject {
         pendingQueueCancellations.remove(id)
         if restoreDraft, !hasUnsubmittedInput {
           composerText = prompt.text
+          composerContext = prompt.messageContext
           attachments = prompt.attachments
         }
         statusText = "Server 已取消这条排队消息。"
@@ -1349,7 +1373,10 @@ final class AppModel: ObservableObject {
         ? serverQueuedPrompts[to + 1].id as Any : NSNull())
     queueCommand(["type": "queued-run.reorder", "runId": id, "beforeRunId": before])
   }
-  func editMessage(_ text: String) { composerText = text }
+  func editMessage(_ entry: ChatEntry) {
+    composerText = entry.text
+    composerContext = entry.messageContext
+  }
   func replyDocumentURL(for url: URL) async throws -> URL {
     guard let href = T3ReplyDocumentLinks.href(for: url), let id = threadID, let server else {
       throw T3DesktopClient.ClientError.rejected
@@ -1407,14 +1434,15 @@ final class AppModel: ObservableObject {
     return String(path.dropFirst(3))
   }
   nonisolated static func makePrompt(
-    _ text: String, attachments: [PromptAttachment], delivery: QueuedPromptDelivery
+    _ text: String, attachments: [PromptAttachment], delivery: QueuedPromptDelivery,
+    messageContext: T3MessageContext? = nil
   ) -> QueuedPrompt? {
     let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !value.isEmpty || !attachments.isEmpty else { return nil }
     let display = value.isEmpty ? "请查看附件。" : value
     return QueuedPrompt(
       id: UUID(), text: display, rpcText: rpcText(for: display, attachments: attachments),
-      delivery: delivery, attachments: attachments)
+      delivery: delivery, attachments: attachments, messageContext: messageContext)
   }
   nonisolated static func rpcText(for text: String, attachments: [PromptAttachment]) -> String {
     let paths = attachments.filter { !$0.isImage }.map(\.url.path)

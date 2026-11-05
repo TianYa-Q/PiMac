@@ -94,10 +94,13 @@ final class WorkspaceModel: ObservableObject {
     else { return }
     let text = previous.composerText
     let attachments = previous.attachments
+    let context = previous.composerContext
     newSession(in: project.url)
     guard let next = selectedModel, next !== previous else { return }
     next.composerText = text
     next.attachments = attachments
+    next.composerContext = context
+    previous.composerContext = nil
     previous.composerText = ""
     previous.attachments = []
   }
@@ -730,6 +733,7 @@ final class WorkspaceModel: ObservableObject {
             let draft = try PropertyListDecoder().decode(ComposerDraft.self, from: data)
             model.composerText = draft.text
             model.attachments = draft.attachments
+            model.composerContext = draft.messageContext
           } else if let sessionPath,
             let text = draftDefaults.string(forKey: "t3Draft.\(sessionPath)")
           {
@@ -741,16 +745,16 @@ final class WorkspaceModel: ObservableObject {
       }
       // 使用 Published 传出的新值，避免 willSet 时读到旧文字或旧附件。
       draftObservations[tab.id] = model.$composerText.combineLatest(
-        model.$attachments, model.$currentSessionPath
+        model.$attachments, model.$currentSessionPath, model.$composerContext
       )
-      .dropFirst().sink { [weak model] text, attachments, currentPath in
+      .dropFirst().sink { [weak model] text, attachments, currentPath, context in
         guard let model else { return }
         // 迁移只改变线程身份也必须保存新归属，不能等用户再输入一个字才落盘。
         let sessionPath = currentPath.isEmpty ? path : currentPath
         guard let key = Self.draftKey(sessionPath: sessionPath, projectURL: model.projectURL)
         else { return }
         do {
-          let draft = ComposerDraft(text: text, attachments: attachments)
+          let draft = ComposerDraft(text: text, attachments: attachments, messageContext: context)
           if draft.isEmpty {
             draftDefaults.removeObject(forKey: key)
           } else {

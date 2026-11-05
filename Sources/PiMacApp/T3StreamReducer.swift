@@ -5,7 +5,10 @@ import JavaScriptCore
 /// 放在独立 actor 上，避免协议解码、投影合并和历史序列化阻塞主线程。
 actor T3StreamReducer {
   enum Kind: String { case shell, thread }
-  enum Preparation: String { case prepareProject, prepareReplyDocument }
+  enum Preparation: String {
+    case prepareProject, prepareReplyDocument, prepareThreadCopy, prepareThreadPaste,
+      prepareContextDispatch
+  }
   enum Failure: Error { case missingResource, invalidRuntime, invalidFrame }
   private struct Runtime {
     let context: JSContext

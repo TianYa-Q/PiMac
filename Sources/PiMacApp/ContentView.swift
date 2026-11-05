@@ -81,11 +81,15 @@ struct ContentView: View {
   @State private var selectedPage: MainPage = .conversation
   @State private var previewedAttachment: PromptAttachment?
   @State private var composerFocused = false
-  @State private var isPastingImage = false
+  @State private var isImportingClipboard = false
   @State private var composerSelection = NSRange(location: 0, length: 0)
   @State private var skillSelectedIndex = 0
   @State private var skillDismissedText: String?
-  @State private var conversationScrollMode: ConversationScrollMode = .pinnedToBottom
+  @State private var readingStore = ConversationReadingStore()
+  private var conversationScrollMode: ConversationScrollMode {
+    get { readingState.isManual ? .manual : .pinnedToBottom }
+    nonmutating set { readingState.isManual = newValue == .manual }
+  }
   @State private var autoScrollScheduled = false
   @State private var autoScrollGeneration = 0
   @State private var initialSessionScrollPending = true
@@ -231,6 +235,7 @@ struct ContentView: View {
     .sheet(item: $previewedAttachment) { attachment in
       ImageAttachmentPreview(attachment: attachment)
     }
+    .environment(\.openThreadContext, workspace.openThreadReference)
     .environment(
       \.openURL,
       OpenURLAction { url in
@@ -334,7 +339,6 @@ struct ContentView: View {
       skillDismissedText = nil
       app.refreshModelPreferences()
       composerSelection = NSRange(location: 0, length: 0)
-      conversationScrollMode = .pinnedToBottom
       autoScrollScheduled = false
       autoScrollGeneration += 1
       initialSessionScrollPending = true
@@ -967,6 +971,9 @@ struct ContentView: View {
         if let threadID = AppModel.threadID(from: session.path) {
           SessionHTMLExportButton(
             server: workspace.server, threadID: threadID, title: session.title, isBusy: running)
+          Button("复制会话引用", systemImage: "link") {
+            workspace.copyThreadReference(threadID: threadID, title: session.title)
+          }
           Button("复制 Thread ID", systemImage: "doc.on.doc") {
             let pasteboard = NSPasteboard.general
             pasteboard.clearContents()
@@ -1168,6 +1175,10 @@ struct ContentView: View {
       in: app.messages, root: URL(fileURLWithPath: path, isDirectory: true))
   }
 
+  private var readingState: ConversationReadingState {
+    readingStore.state(for: "\(tabID)-\(app.currentSessionPath)")
+  }
+
   private var conversation: some View {
     let children =
       app.threadID.map {
@@ -1183,7 +1194,8 @@ struct ContentView: View {
           VStack(alignment: .leading, spacing: 14) {
             VirtualConversationStack(
               ids: timeline.rowIDs,
-              pinnedToBottom: conversationScrollMode == .pinnedToBottom
+              pinnedToBottom: !readingState.isManual,
+              readingState: readingState
             ) { index in
               switch rows[index] {
               case .turn(let turn):
@@ -1255,9 +1267,8 @@ struct ContentView: View {
             .padding(16)
           }
         }
-        // 让长会话在首帧布局时就以底部为基准，避免先显示靠上的位置，
-        // 再等待延迟校正滚到底部。后续显式滚动仍用于 Markdown 高度变化。
-        .defaultScrollAnchor(.bottom)
+        // 新会话以底部为基准；阅读历史的会话由原生视口恢复，不能再次锚定底部。
+        .defaultScrollAnchor(readingState.isManual ? .top : .bottom)
         .onAppear {
           // 会话内容通过 RPC 异步到达；保持首次滚动待处理，直到消息完成首轮布局。
           initialSessionScrollPending = true
@@ -1284,17 +1295,15 @@ struct ContentView: View {
         .onChange(of: app.currentSessionPath) {
           autoScrollGeneration += 1
           autoScrollScheduled = false
-          conversationScrollMode = .pinnedToBottom
           initialSessionScrollPending = true
           scheduleInitialSessionScroll(proxy)
         }
         .onChange(of: tabID) {
           // Switching projects replaces the environment AppModel while preserving this ScrollView.
           // The two projects can temporarily expose the same/empty session path, so path changes
-          // alone are not a reliable trigger for the initial bottom positioning.
+          // alone cannot identify a conversation change.
           autoScrollGeneration += 1
           autoScrollScheduled = false
-          conversationScrollMode = .pinnedToBottom
           initialSessionScrollPending = true
           scheduleInitialSessionScroll(proxy)
         }
@@ -1325,8 +1334,8 @@ struct ContentView: View {
     ConversationTurnView(
       turn: turn,
       isActive: isActive,
-      onEdit: { text in
-        app.editMessage(text)
+      onEdit: { entry in
+        app.editMessage(entry)
         composerFocused = true
       }
     )
@@ -1338,6 +1347,10 @@ struct ContentView: View {
 
   private func scheduleInitialSessionScroll(_ proxy: ScrollViewProxy) {
     initialScrollGeneration += 1
+    if readingState.isManual {
+      initialSessionScrollPending = false
+      return
+    }
     let generation = initialScrollGeneration
 
     // RPC 返回、VStack 创建子视图以及 Markdown 定高并不在同一轮布局中。
@@ -1380,6 +1393,8 @@ struct ContentView: View {
     guard !initialSessionScrollPending || isUserGesture else { return }
 
     if isAtBottom {
+      // 切换时旧文档的底部报告不是用户意图，不能覆盖恢复中的历史阅读状态。
+      guard isUserGesture || !readingState.isManual else { return }
       // 返回底部或边界手势结束时恢复跟随；可见性由同一观察器的位置报告更新。
       if conversationScrollMode != .pinnedToBottom { conversationScrollMode = .pinnedToBottom }
       return
@@ -1444,6 +1459,7 @@ struct ContentView: View {
     VStack(spacing: 8) {
       ThreadGoalView(
         state: app.goalState, canControl: app.canSubmitPrompt && !app.isBusy,
+        canPause: app.canPauseGoal,
         onCommand: app.sendGoalCommand, onRevise: app.reviseGoal, onStart: app.startGoal
       )
       .id(app.projectURL)
@@ -1504,6 +1520,8 @@ struct ContentView: View {
           onReload: { workspace.server.reloadWorkspaceSkills(key: key) })
       }
 
+      ThreadContextChips(text: app.composerText, context: app.composerContext)
+
       ZStack(alignment: .topLeading) {
         ComposerTextView(
           text: $app.composerText,
@@ -1514,7 +1532,13 @@ struct ContentView: View {
           onPasteFiles: registerAttachments,
           onPasteImage: registerPastedImage,
           onPasteError: { app.statusText = $0 },
-          onPastePendingChange: { isPastingImage = $0 },
+          onPastePendingChange: { isImportingClipboard = $0 },
+          onPrepareContextPaste: { clipboard in
+            try await T3ThreadContext.paste(
+              clipboard, existing: app.composerContext,
+              environmentID: workspace.server.recoveryEnvironmentID())
+          },
+          onAcceptContextPaste: { app.composerContext = $0 },
           pasteContextID: "\(ObjectIdentifier(app))-\(app.currentSessionPath)",
           onCompletionKey: handleSkillKey
         )
@@ -1846,8 +1870,8 @@ struct ContentView: View {
   }
 
   private func sendPromptFollowingOutput(delivery: QueuedPromptDelivery) {
-    guard !isPastingImage else {
-      app.statusText = "图片仍在读取，请稍候再发送"
+    guard !isImportingClipboard else {
+      app.statusText = "剪贴板内容仍在导入，请稍候再发送"
       return
     }
     // 发送消息明确恢复固定底部模式；随后的用户滚动仍可立即切回手动模式。
@@ -2091,6 +2115,8 @@ struct ComposerTextView: NSViewRepresentable {
   let onPasteImage: (Data, String) -> [String]
   let onPasteError: (String) -> Void
   let onPastePendingChange: (Bool) -> Void
+  var onPrepareContextPaste: ((T3ContextClipboard) async throws -> T3ThreadPaste)? = nil
+  var onAcceptContextPaste: ((T3MessageContext) -> Void)? = nil
   let pasteContextID: String
   let onCompletionKey: (UInt16) -> Bool
 
@@ -2127,6 +2153,8 @@ struct ComposerTextView: NSViewRepresentable {
     textView.onPasteImage = onPasteImage
     textView.onPasteError = onPasteError
     textView.onPastePendingChange = onPastePendingChange
+    textView.onPrepareContextPaste = onPrepareContextPaste
+    textView.onAcceptContextPaste = onAcceptContextPaste
     textView.pasteContextID = pasteContextID
     textView.onCompletionKey = onCompletionKey
     textView.string = text
@@ -2171,6 +2199,8 @@ struct ComposerTextView: NSViewRepresentable {
     textView.onPasteImage = onPasteImage
     textView.onPasteError = onPasteError
     textView.onPastePendingChange = onPastePendingChange
+    textView.onPrepareContextPaste = onPrepareContextPaste
+    textView.onAcceptContextPaste = onAcceptContextPaste
     textView.pasteContextID = pasteContextID
     textView.onCompletionKey = onCompletionKey
     // AppModel 的流式事件会频繁触发 SwiftUI 更新。只有 Binding 确实发生了外部
@@ -2269,6 +2299,8 @@ struct ComposerTextView: NSViewRepresentable {
     var onPasteImage: ((Data, String) -> [String])?
     var onPasteError: ((String) -> Void)?
     var onPastePendingChange: ((Bool) -> Void)?
+    var onPrepareContextPaste: ((T3ContextClipboard) async throws -> T3ThreadPaste)?
+    var onAcceptContextPaste: ((T3MessageContext) -> Void)?
     var pasteContextID = "" {
       didSet {
         if pasteContextID != oldValue { cancelImagePastes() }
@@ -2330,8 +2362,46 @@ struct ComposerTextView: NSViewRepresentable {
       return super.performKeyEquivalent(with: event)
     }
 
+    /// 异步解析期间仍允许编辑，但编辑/切换会话后不再把旧粘贴写回新草稿。
+    /// 记录与正文只在同一主线程提交，失败时两者都保留原状。
+    func pasteContext(_ clipboard: T3ContextClipboard) {
+      guard let prepare = onPrepareContextPaste, imagePasteTasks.isEmpty else { return }
+      let generation = pasteGeneration
+      let original = string
+      let selection = selectedRange()
+      let id = UUID()
+      onPastePendingChange?(true)
+      imagePasteTasks[id] = Task { @MainActor [weak self] in
+        do {
+          let pasted = try await prepare(clipboard)
+          try Task.checkCancellation()
+          guard let self, self.pasteGeneration == generation else { return }
+          self.imagePasteTasks[id] = nil
+          self.onPastePendingChange?(!self.imagePasteTasks.isEmpty)
+          guard self.string == original, self.selectedRange() == selection else {
+            self.onPasteError?("输入已变化，请在当前位置重新粘贴会话引用。")
+            return
+          }
+          // insertText 会走既有 undo/Binding 更新；记录先交接，避免文本更新时保存半条引用。
+          self.onAcceptContextPaste?(pasted.context)
+          self.insertText(pasted.text, replacementRange: selection)
+        } catch {
+          guard let self, self.pasteGeneration == generation else { return }
+          self.imagePasteTasks[id] = nil
+          self.onPastePendingChange?(!self.imagePasteTasks.isEmpty)
+          if !(error is CancellationError) {
+            self.onPasteError?("会话引用粘贴失败：内容损坏、不受支持或来自其他环境，请重新复制。")
+          }
+        }
+      }
+    }
+
     override func paste(_ sender: Any?) {
       let pasteboard = NSPasteboard.general
+      if let clipboard = T3ContextClipboard(pasteboard: pasteboard) {
+        pasteContext(clipboard)
+        return
+      }
       let types = pasteboard.types ?? []
       let urls =
         types.contains(.fileURL)
@@ -2403,7 +2473,7 @@ struct ComposerTextView: NSViewRepresentable {
 struct ConversationTurnView: View, Equatable {
   let turn: ConversationTurn
   let isActive: Bool
-  let onEdit: (String) -> Void
+  let onEdit: (ChatEntry) -> Void
 
   static func == (lhs: Self, rhs: Self) -> Bool {
     // `onEdit` is recreated with ContentView's body but has the same behavior. Comparing only
@@ -2414,7 +2484,7 @@ struct ConversationTurnView: View, Equatable {
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       if let user = turn.user {
-        ChatEntryView(entry: user) { onEdit(user.text) }
+        ChatEntryView(entry: user) { onEdit(user) }
           .equatable()
           .id(user.id)
       }
@@ -2927,6 +2997,9 @@ private struct ChatEntryView: View, Equatable {
   @State private var expanded: Bool
   @State private var copied = false
   @State private var selectedQuote = ""
+  @State private var contextUnavailable = false
+  @Environment(\.openThreadContext) private var openThread
+  @Environment(\.openURL) private var openURL
   @Environment(\.messageQuoteAction) private var quoteAction
 
   static func == (lhs: Self, rhs: Self) -> Bool {
@@ -3043,6 +3116,28 @@ private struct ChatEntryView: View, Equatable {
       MarkdownView(entry.text, attachments: entry.attachments)
         .equatable()
         .font(.body)
+        .environment(
+          \.openURL,
+          OpenURLAction { url in
+            guard url.scheme == "t3-context" else {
+              openURL(url)
+              return .handled
+            }
+            if let threads = try? entry.messageContext?.threads(in: entry.text),
+              let reference = threads.first(where: { $0.href == url.absoluteString })
+            {
+              openThread?(reference)
+            } else {
+              contextUnavailable = true
+            }
+            return .handled
+          }
+        )
+        .alert("上下文不可用", isPresented: $contextUnavailable) {
+          Button("好", role: .cancel) {}
+        } message: {
+          Text("此引用未携带可用的会话内容，请从原会话重新复制。")
+        }
     }
   }
 

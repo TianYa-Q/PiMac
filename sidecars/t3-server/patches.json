@@ -65,6 +65,18 @@
   ],
   "packages/provider-pi/src/server/adapter.ts": [
     {
+      "oldText": "            const maxAttempts = Math.max(\n              attempt,\n              Math.trunc(recordNumber(event, \"maxAttempts\") ?? attempt),\n            );",
+      "newText": "            // Pi 的无限重试预算经 JSON RPC 编码为 null；沿用官方契约，不伪造有限次数。\n            const maxAttempts = event[\"maxAttempts\"] === null ? null : Math.max(\n              attempt,\n              Math.trunc(recordNumber(event, \"maxAttempts\") ?? attempt),\n            );"
+    },
+    {
+      "oldText": "                maxAttempts: current?.retry.maxAttempts ?? attempt,",
+      "newText": "                maxAttempts: current ? current.retry.maxAttempts : attempt,"
+    },
+    {
+      "oldText": "            const startedAt = yield* DateTime.now;\n            const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;",
+      "newText": "            // 宿主额度采样必须先于 Pi 的 before_agent_start；不能等本轮结束才选账号。\n            if (payload !== null) {\n              const quotaModel = recordField(yield* request({ type: \"get_state\" }), \"model\");\n              yield* Effect.tryPromise(() => getNative().preparePiAccountQuota(quotaModel)).pipe(\n                Effect.catch(() => Effect.logWarning(\"PiMac quota preflight failed; account balancing will use only fresh validated telemetry\")),\n              );\n            }\n            const startedAt = yield* DateTime.now;\n            const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;"
+    },
+    {
       "oldText": "      const pendingPrompts = new Map<string, PendingPiPrompt>();",
       "newText": "      let exportOrdinal = 0;\n      const exportPrompts = new Map<string, Deferred.Deferred<string>>();\n      const pendingPrompts = new Map<string, PendingPiPrompt>();"
     },

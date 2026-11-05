@@ -8,7 +8,7 @@ PiMac now owns account management and quota monitoring. This extension is only t
 | --- | --- |
 | Official OAuth login for managed ChatGPT/Codex accounts; default account; delete; visibility | Apply and restore session-local runtime credentials without replacing API keys |
 | Quota queries, in-memory cache, identity-matched disk snapshots | Restore the saved session account; respect provider isolation |
-| Fixed one-minute background checks, startup/wake catch-up | Safe account rotation at idle/pre-run/turn boundaries |
+| Fixed one-minute background checks, startup/wake catch-up; awaited quota sampling before Pi prompts | Weekly selection before a run; urgent low-quota rotation at safe turn boundaries |
 | Activation with `你好`, durable claims, cooldown and retry | At most one continuation after a confirmed quota error and successful switch |
 | History, health summary, sanitized decision log | `/accounts switch <name>` changes only the current session |
 
@@ -37,6 +37,14 @@ All private data remains in `~/.pi/agent` (or `PI_CODING_AGENT_DIR`), never in t
 - `account-usage-errors.jsonl`: session-auth diagnostics, including `read_state`, `initialize`, `activate` and `block_run` stages.
 
 Existing account documents are read as validated, atomically committed snapshots without taking the writer lock. Background credential refreshes therefore do not turn ordinary reads into `ELOCKED` authentication failures that abort runs and pause Goal. Initialization/migration and mutations still acquire the account lock; expired credentials wait for that lock and recheck the latest committed expiry before refreshing again. Corruption and genuine authentication failures remain errors, not empty accounts or successful switches.
+
+## Session account selection
+
+Session startup restores the saved binding or future-session default, but does not rebalance or start the weekly cooldown. Before a Pi prompt, the Server waits for the host's quota sampling to finish and write its identity-matched snapshot; existing host caching and concurrent-query coalescing still apply. `before_agent_start` then selects the account using that snapshot before the first model request. The extension never queries quota itself.
+
+Normal completion only refreshes the displayed snapshot: it no longer switches accounts for weekly balancing. The next run is the next balancing boundary. Manual choices retain their cooldown; genuine low quota can still switch at a safe turn boundary, and a confirmed quota error permits at most one continuation. These choices remain session-local and do not rewrite the future-session default.
+
+Quota sampling failure is logged safely and does not block otherwise valid authentication. Only fresh, successful, identity-matched telemetry participates in balancing; missing/failed telemetry cannot guarantee an optimal initial account. No user prompt is injected or replayed to refresh quota.
 
 ## Activation policy
 

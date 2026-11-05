@@ -41,6 +41,7 @@ struct OutboxMessage: Identifiable, Codable, Equatable, Sendable {
   var migratedTo: String?
   // 可选字段兼容已落盘的旧记录；只存受控阶段和安全错误，不保存 URL、凭据或响应正文。
   var lastFailure: MessageRecoveryCoordinator.FailureDiagnostic?
+  var messageContext: T3MessageContext? = nil
 
   var isVisible: Bool { ![.delivered, .migrated, .dismissed].contains(state) }
   var entry: ChatEntry {
@@ -49,7 +50,8 @@ struct OutboxMessage: Identifiable, Codable, Equatable, Sendable {
       title: state == .accepted
         ? "你" : state == .saved ? "你 · 已保存" : "你 · \(state.needsRecovery ? "待恢复" : "正在提交")",
       text: rpcText, isError: state.needsRecovery && state != .saved,
-      attachments: attachments.map(\.attachment).filter(\.isImage), timestamp: createdAt)
+      attachments: attachments.map(\.attachment).filter(\.isImage), timestamp: createdAt,
+      messageContext: messageContext)
   }
 }
 
@@ -144,7 +146,8 @@ final class MessageOutboxStore: ObservableObject {
       // 远端客户端可能重试同一 messageID；不允许换正文或跨项目冒充同一次提交。
       guard existing.threadID == threadID, existing.text == prompt.text,
         existing.projectPath == project.standardizedFileURL.path,
-        existing.attachments.map(\.attachment.id) == prompt.attachments.map(\.id)
+        existing.attachments.map(\.attachment.id) == prompt.attachments.map(\.id),
+        existing.messageContext == prompt.messageContext
       else { throw CocoaError(.validationMultipleErrors) }
       return existing
     }
@@ -175,7 +178,8 @@ final class MessageOutboxStore: ObservableObject {
         delivery: prompt.delivery, attachments: imported,
         selection: try JSONSerialization.data(withJSONObject: selection, options: [.sortedKeys]),
         context: context, createdAt: .now, createsThread: createsThread,
-        createCommandID: UUID().uuidString, dispatchCommandID: UUID().uuidString)
+        createCommandID: UUID().uuidString, dispatchCommandID: UUID().uuidString,
+        messageContext: prompt.messageContext)
       var next = messages
       if let replacingDraftID {
         guard
@@ -278,7 +282,8 @@ final class MessageOutboxStore: ObservableObject {
       delivery: .followUp, attachments: attachments,
       selection: first.selection, context: context, createdAt: .now, createsThread: true,
       createCommandID: UUID().uuidString, dispatchCommandID: UUID().uuidString,
-      environmentID: first.environmentID)
+      environmentID: first.environmentID,
+      messageContext: try T3MessageContext.merging(records.compactMap(\.messageContext)))
     var next = messages
     let ids = Set(records.map(\.id))
     for index in next.indices where ids.contains(next[index].id) {
@@ -655,11 +660,23 @@ final class MessageRecoveryCoordinator: ObservableObject {
         if store.message(id)?.state.isConfirmed == true { return true }
         guard store.message(id)?.state == .sending else { return false }
         try Task.checkCancellation()
+        let contextFields: [String: Any]
+        if let context = record.messageContext {
+          contextFields = try await T3ThreadContext.dispatchContext(
+            text: record.rpcText, context: context,
+            environmentID: try await transport.recoveryEnvironmentID())
+        } else {
+          contextFields = [:]
+        }
+        // 异步协议校验期间可能已经收到权威回执，不能再写入新状态或换身份发送。
+        if store.message(id)?.state.isConfirmed == true { return true }
+        guard store.message(id)?.state == .sending else { return false }
         let command: [String: Any] = [
           "type": "message.dispatch", "threadId": record.threadID, "messageId": record.id,
           "modelSelection": selection, "text": record.rpcText, "attachments": uploaded,
           "dispatchMode": ["type": "queue_after_active"],
         ].merging(record.delivery == .steer ? ["deliveryIntent": "steer"] : [:]) { _, new in new }
+          .merging(contextFields) { _, new in new }
         let data = try JSONSerialization.data(withJSONObject: command, options: [.sortedKeys])
         try store.update(id) { $0.dispatchCommand = data }
         record = store.message(id)!

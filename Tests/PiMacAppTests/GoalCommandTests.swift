@@ -39,6 +39,38 @@ struct GoalCommandTests {
     #expect(GoalCommand.archive.text == "/goal-clear")
   }
 
+  @Test func runningPauseAvailabilityDoesNotAuthorizeOtherGoalControls() throws {
+    let client = T3DesktopClient()
+    let model = AppModel(continueLastSession: false, restoreLastProjectOnLaunch: false)
+    model.attach(to: client)
+    defer {
+      model.disconnect()
+      client.stop()
+    }
+    model.currentSessionPath = "t3:running-goal"
+    model.connectionState = .connected
+    func apply(_ driver: String, _ status: String = "active") {
+      model.apply([
+        "thread": [
+          "id": "running-goal", "goalDriver": driver,
+          "goal": ["objective": "运行中目标", "status": status],
+          "latestTurn": ["turnId": "run", "state": "running"],
+        ]
+      ])
+    }
+    apply("pi")
+    #expect(!model.canPauseGoal, "离线不能发送暂停")
+    client.didCompletePoll()
+    #expect(model.isBusy)
+    #expect(model.canPauseGoal)
+    apply("codex")
+    #expect(!model.canPauseGoal)
+    apply("pi", "paused")
+    #expect(!model.canPauseGoal)
+    apply("pi", "complete")
+    #expect(!model.canPauseGoal)
+  }
+
   @Test func revisionUsesConfirmationFlowAndRejectsEmptyUnchangedOrStaleObjectives() throws {
     let original = goal()
     let revision = GoalRevision(original: original)

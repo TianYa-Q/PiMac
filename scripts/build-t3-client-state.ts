@@ -1,11 +1,16 @@
 import { build, type Plugin } from 'esbuild';
+import { createHash } from 'node:crypto';
 import { readFile, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const upstream = path.join(root, 'third_party/t3code');
-const pin = JSON.parse(await readFile(path.join(root, 'sidecars/t3-server/upstream-pin.json'), 'utf8')) as { repository: string; commit: string };
+const pin = JSON.parse(await readFile(path.join(root, 'sidecars/t3-server/upstream-pin.json'), 'utf8')) as {
+  repository: string; commit: string; files: Record<string, string>;
+};
+const patches = JSON.parse(await readFile(path.join(root, 'sidecars/t3-server/patches.json'), 'utf8')) as
+  Record<string, { oldText: string; newText: string; count?: number }[]>;
 // 上游以普通源码快照保存；版本来自保留的来源记录，不依赖内嵌 Git 仓库。
 const source: unknown = JSON.parse(await readFile(path.join(root, 'third_party/t3code-source.json'), 'utf8'));
 if (typeof source !== 'object' || source === null
@@ -18,6 +23,23 @@ if (commit !== pin.commit) throw new Error('Client reducers and Server must use 
 const workspace: Plugin = {
   name: 'official-client-workspace',
   setup(builder) {
+    // Server 与订阅解码必须共享协议扩展；只更新 Server 会使 Schema 静默剥离 piMetrics。
+    // 复用同一份补丁和原文哈希，不放宽解码、不手改上游或生成资源。
+    builder.onLoad({ filter: /\.ts$/ }, async args => {
+      const file = path.relative(upstream, args.path).split(path.sep).join('/');
+      if (!file.startsWith('packages/contracts/') || !patches[file]) return;
+      let contents = await readFile(args.path, 'utf8');
+      if (!pin.files[file] || createHash('sha256').update(contents).digest('hex') !== pin.files[file]) {
+        throw new Error('Changed upstream client contract: ' + file);
+      }
+      for (const patch of patches[file]) {
+        if (contents.split(patch.oldText).length !== (patch.count ?? 1) + 1) {
+          throw new Error('Ambiguous or missing client contract patch: ' + file);
+        }
+        contents = contents.replaceAll(patch.oldText, patch.newText);
+      }
+      return { contents, loader: 'ts', resolveDir: path.dirname(args.path) };
+    });
     builder.onResolve({ filter: /^@t3tools\// }, async args => {
       const [name, ...rest] = args.path.slice('@t3tools/'.length).split('/');
       const directory = path.join(upstream, 'packages', name!);

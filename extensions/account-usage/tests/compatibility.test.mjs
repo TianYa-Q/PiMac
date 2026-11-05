@@ -225,8 +225,115 @@ try {
     const app = instance();
     try {
       await app.start();
+      assert.equal(app.status().activeAccount, "X");
+      app.ctx.isIdle = () => false;
+      await app.events.get("turn_end")({ outcome: "completed" }, app.ctx);
       assert.equal(app.status().activeAccount, "Y");
       assert.equal(legacy.readCodexAccountState().activeAccount, "X");
+    } finally {
+      await app.close();
+    }
+  });
+
+  await test("weekly selection consumes the latest host snapshot before the first request, never at normal completion", async () => {
+    const accounts = legacy.readCodexAccountState().accounts;
+    const snapshot = (favored) =>
+      writeHostSnapshot(
+        "openai-codex",
+        accounts,
+        accounts.map((account) => ({
+          accountName: account.name,
+          capturedAt: Date.now(),
+          primary: {
+            remainingPercent: 90,
+            windowSeconds: 18000,
+            resetAt: Date.now() / 1000 + 10000,
+          },
+          secondary: {
+            remainingPercent: account.name === favored ? 90 : 10,
+            windowSeconds: 604800,
+            resetAt: Date.now() / 1000 + 300000,
+          },
+        })),
+        root,
+      );
+    snapshot("X");
+    const app = instance();
+    try {
+      await app.start();
+      assert.equal(app.status().activeAccount, "X");
+      // 宿主首轮采样晚于初始化完成；发送前应使用最新快照，而非初始化时的决定。
+      snapshot("Y");
+      app.ctx.isIdle = () => false;
+      app.ctx.signal = new AbortController().signal;
+      await app.events.get("before_agent_start")({}, app.ctx);
+      assert.equal(app.status().activeAccount, "Y");
+      assert.equal(app.tokens.get("openai-codex"), "synthetic-legacy-Y");
+      const noticeCount = app.notices.length;
+      snapshot("X");
+      await app.events.get("turn_end")({ outcome: "completed" }, app.ctx);
+      assert.equal(app.status().activeAccount, "Y");
+      app.ctx.isIdle = () => true;
+      await app.events.get("agent_settled")({}, app.ctx);
+      assert.equal(app.status().activeAccount, "Y");
+      assert.equal(app.notices.length, noticeCount);
+      assert.equal(legacy.readCodexAccountState().activeAccount, "X");
+    } finally {
+      await app.close();
+    }
+    // 没有发生过轮换、也没有冷却保护时，结束事件同样不能触发周均衡。
+    snapshot("X");
+    const unrotated = instance();
+    try {
+      await unrotated.start();
+      unrotated.ctx.isIdle = () => false;
+      await unrotated.events.get("before_agent_start")({}, unrotated.ctx);
+      snapshot("Y");
+      await unrotated.events.get("turn_end")(
+        { outcome: "completed" },
+        unrotated.ctx,
+      );
+      assert.equal(unrotated.status().activeAccount, "X");
+      unrotated.ctx.isIdle = () => true;
+      await unrotated.events.get("agent_settled")({}, unrotated.ctx);
+      assert.equal(unrotated.status().activeAccount, "X");
+      await unrotated.events.get("before_agent_start")({}, unrotated.ctx);
+      assert.equal(unrotated.status().activeAccount, "Y");
+    } finally {
+      await unrotated.close();
+    }
+  });
+
+  await test("startup does not start weekly cooldown and a manual choice is not rebalanced before its first request", async () => {
+    const accounts = legacy.readCodexAccountState().accounts;
+    writeHostSnapshot(
+      "openai-codex",
+      accounts,
+      accounts.map((account) => ({
+        accountName: account.name,
+        capturedAt: Date.now(),
+        primary: { remainingPercent: 90, windowSeconds: 18000 },
+        secondary: {
+          remainingPercent: account.name === "Y" ? 90 : 10,
+          windowSeconds: 604800,
+          resetAt: Date.now() / 1000 + 300000,
+        },
+      })),
+      root,
+    );
+    const app = instance();
+    try {
+      await app.start();
+      assert.equal(app.status().activeAccount, "X");
+      assert.equal(
+        app.notices.some((notice) => notice.includes("周额度负载平衡")),
+        false,
+      );
+      await app.events.get("before_agent_start")({}, app.ctx);
+      assert.equal(app.status().activeAccount, "Y");
+      await app.commands.get("accounts").handler("switch X", app.ctx);
+      await app.events.get("before_agent_start")({}, app.ctx);
+      assert.equal(app.status().activeAccount, "X");
     } finally {
       await app.close();
     }

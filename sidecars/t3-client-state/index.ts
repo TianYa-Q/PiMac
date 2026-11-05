@@ -1,4 +1,6 @@
-import { AssetResource, CommandId, OrchestrationV2RpcSchemas, ProjectId } from '@t3tools/contracts';
+import { AssetResource, CommandId, ComposerContextId, COMPOSER_CONTEXT_MAX_RECORDS, EnvironmentId, OrchestrationMessageContext, OrchestrationV2RpcSchemas, ProjectId, ThreadContextRecord, ThreadId } from '@t3tools/contracts';
+import { decodeComposerContextClipboardHtml, decodeComposerContextFragment, encodeComposerContextClipboardHtml, encodeComposerContextFragment } from '../../third_party/t3code/packages/shared/src/composerContextClipboard.ts';
+import { collectComposerContextReferences, formatComposerContextReference, replaceComposerContextReferences, sanitizeComposerContextLabel, threadContextsOutsideEnvironment, toKindScopedComposerContextId } from '../../third_party/t3code/packages/shared/src/composerContextReferences.ts';
 import { parseMarkdownFileLink } from '../../third_party/t3code/packages/shared/src/markdownLinks.ts';
 import { filePreviewKind } from '../../third_party/t3code/packages/shared/src/filePreview.ts';
 import * as Schema from 'effect/Schema';
@@ -45,6 +47,76 @@ export function prepareReplyDocument(json: string): string {
     ...(kind === 'html' || kind === 'pdf' ? {} : { disposition: 'attachment' }),
   });
   return JSON.stringify(resource);
+}
+
+const decodeThreadCopy = Schema.decodeUnknownSync(Schema.Struct({
+  environmentId: EnvironmentId, threadId: ThreadId, title: Schema.String,
+}));
+
+/** 剪贴板同时写入官方 fragment 和 HTML fallback，兼容 iOS 与 Web。 */
+export function prepareThreadCopy(json: string): string {
+  const input = decodeThreadCopy(JSON.parse(json));
+  const label = sanitizeComposerContextLabel(input.title, 'thread');
+  const record = Schema.decodeUnknownSync(ThreadContextRecord)({
+    version: 1, kind: 'thread', contextId: toKindScopedComposerContextId('thread', input.threadId),
+    label, title: label, environmentId: input.environmentId, threadId: input.threadId,
+  });
+  const text = formatComposerContextReference(record);
+  const fragment = encodeComposerContextFragment({ version: 1, source: { environmentId: input.environmentId }, records: [record] });
+  if (fragment === null) throw new Error('Context is too large to copy');
+  return JSON.stringify({ text, fragment, html: encodeComposerContextClipboardHtml(text, fragment) });
+}
+
+const decodeThreadPaste = Schema.decodeUnknownSync(Schema.Struct({
+  text: Schema.String, fragment: Schema.String, html: Schema.String,
+  environmentId: EnvironmentId, identity: ComposerContextId,
+  existing: Schema.optional(OrchestrationMessageContext),
+}));
+
+/** 复用官方校验和引用解析；宿主仅分配新身份，防止多次粘贴覆盖旧快照。
+ * 本入口只导入 thread，附件迁移需要独立上传链路，不能冒充已经支持。
+ */
+export function prepareThreadPaste(json: string): string {
+  const input = decodeThreadPaste(JSON.parse(json));
+  const fragment = decodeComposerContextFragment(input.fragment) ?? decodeComposerContextClipboardHtml(input.html);
+  if (!fragment) throw new Error('Invalid context clipboard payload');
+  const referenced = new Set(collectComposerContextReferences(input.text).map(ref => ref.contextId));
+  const records = fragment.records.filter(record => referenced.has(record.contextId));
+  if (records.some(record => record.kind !== 'thread' || !('threadId' in record))) {
+    throw new Error('This paste entry supports thread references only');
+  }
+  if (threadContextsOutsideEnvironment({ text: input.text, records, environmentId: input.environmentId }).length) {
+    throw new Error('Thread reference belongs to another environment');
+  }
+  const ids = new Map(records.map((record, index) => [record.contextId, ComposerContextId.make(`${input.identity}_${index}`)]));
+  const imported = records.map(record => ({ ...record, contextId: ids.get(record.contextId)! }));
+  const all = [...(input.existing?.records ?? []), ...imported];
+  const context = Schema.decodeUnknownSync(OrchestrationMessageContext)({ version: 1, records: all });
+  return JSON.stringify({
+    text: replaceComposerContextReferences(input.text, ref => formatComposerContextReference({ ...ref, contextId: ids.get(ref.contextId) ?? ref.contextId })),
+    context,
+  });
+}
+
+const decodeContextDispatch = Schema.decodeUnknownSync(Schema.Struct({
+  text: Schema.String, context: Schema.optional(OrchestrationMessageContext), environmentId: EnvironmentId,
+}));
+
+/** 只发送正文实际引用的记录；缺失的记录由官方 Server 明确标为 unavailable。 */
+export function prepareContextDispatch(json: string): string {
+  const input = decodeContextDispatch(JSON.parse(json));
+  const ids = new Set(collectComposerContextReferences(input.text).map(ref => ref.contextId));
+  // 与官方 composer 一致，预览注释的截图是间接依赖，不能在重新编辑后被当成孤立记录丢掉。
+  for (const record of input.context?.records ?? []) {
+    if (ids.has(record.contextId) && record.kind === 'preview-annotation'
+      && 'screenshotContextId' in record && record.screenshotContextId) ids.add(record.screenshotContextId);
+  }
+  const records = input.context?.records.filter(record => ids.has(record.contextId)) ?? [];
+  if (records.length > COMPOSER_CONTEXT_MAX_RECORDS) throw new Error('Too many context records');
+  if (threadContextsOutsideEnvironment({ text: input.text, records, environmentId: input.environmentId }).length) {
+    throw new Error('Thread reference belongs to another environment');
+  }
+  return JSON.stringify(records.length ? { context: { version: 1, records } } : {});
 }
 
 type Kind = 'shell' | 'thread';

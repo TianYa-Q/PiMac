@@ -295,8 +295,25 @@ struct MessageRecoveryIntegrationTests {
     try await wait { !model.queuedPrompts.contains { $0.id == queued.id } }
     #expect(
       coordinator.activeThreads.contains(threadID), "queue cancellation bypasses the held delivery")
-    model.abort()
+    // 模拟当前 Pi Provider 投影的 active Goal；运行中的暂停必须绕过悬挂的投递。
+    // 这里验证真实 Server 的 Stop/队列链路，不冒充 pi-goal-x 的持久化验证。
+    model.apply([
+      "thread": [
+        "id": threadID, "goalDriver": "pi",
+        "goal": ["objective": "测试运行中暂停", "status": "active"],
+        "latestTurn": ["turnId": "fixture-run", "state": "running"],
+      ]
+    ])
+    model.composerText = "暂停时保留的新草稿"
+    #expect(!model.canSubmitPrompt)
+    #expect(model.canPauseGoal)
+    model.sendGoalCommand(.pause)
+    #expect(model.isStopping)
+    #expect(!model.canPauseGoal)
+    model.sendGoalCommand(.pause)  // 重复点击不重发，也不进入发件箱。
     try await wait { !model.isStopping && model.queueHeld && !model.isStreaming }
+    #expect(model.composerText == "暂停时保留的新草稿")
+    #expect(!store.messages.contains { $0.rpcText == "/goal-pause" })
     #expect(
       coordinator.activeThreads.contains(threadID), "stop must finish before preflight is released")
     print("Queue cancellation + stop while delivery is suspended: \(started.duration(to: .now))")

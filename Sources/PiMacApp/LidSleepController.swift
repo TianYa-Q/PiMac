@@ -8,6 +8,22 @@ final class LidSleepController: ObservableObject {
   static let shared = LidSleepController()
   /// User permission is independent of the watchdog's current health.
   @Published private(set) var requested: Bool
+  @Published private(set) var batteryOverride = false
+
+  /// 手动放行只属于当前会话；原子替换标记，helper 下一轮即可读取。
+  func setBatteryOverride(_ value: Bool) {
+    guard !busy else { return }
+    do {
+      if let directory {
+        try Data((value ? "1" : "0").utf8)
+          .write(to: directory.appendingPathComponent("battery-override"), options: .atomic)
+      }
+      batteryOverride = value
+      if value && !enabled { setEnabled(true) }
+    } catch {
+      status = "更新电池合盖策略失败：\(error.localizedDescription)"
+    }
+  }
   private enum Phase {
     case inactive, configuring, starting, active, recovering
   }
@@ -178,6 +194,8 @@ final class LidSleepController: ObservableObject {
         attributes: [.posixPermissions: 0o700])
       directory = folder
       try Data().write(to: folder.appendingPathComponent("lease"))
+      try Data((batteryOverride ? "1" : "0").utf8)
+        .write(to: folder.appendingPathComponent("battery-override"), options: .atomic)
       guard mkfifo(folder.appendingPathComponent("events").path, 0o600) == 0 else {
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
       }
@@ -280,6 +298,7 @@ final class LidSleepController: ObservableObject {
     recoveryTask?.cancel()
     recoveryTask = nil
     phase = .inactive
+    batteryOverride = false
     launchRestoreTask?.cancel()
     launchRestoreTask = nil
     timer?.invalidate()
@@ -345,6 +364,7 @@ final class LidSleepController: ObservableObject {
     if case .ended(_, let value) = observation { restored = value } else { restored = false }
     LidSleepDiagnostics.record("守护结束：\(observation)，拥有系统开关：\(owned)")
     let delay = recoveryPolicy.nextDelay()
+    let batteryOverride = self.batteryOverride
     stop()
     guard directory == nil else { return }
     // 临时管理员授权不做后台弹窗；免密码恢复也必须仍持有本会话的所有权凭据。
@@ -380,6 +400,7 @@ final class LidSleepController: ObservableObject {
       LidSleepDiagnostics.record("将在 \(delay) 秒后自动重建守护会话")
       do { try await Task.sleep(for: .seconds(delay)) } catch { return }
       guard sessionGeneration == generation, requested, !Task.isCancelled else { return }
+      self.batteryOverride = batteryOverride
       activate()
     }
   }
@@ -390,6 +411,9 @@ final class LidSleepController: ObservableObject {
     case .acClosed: status = "已插电、已合盖：已请求屏幕休眠，电脑继续运行"
     case .acDisplayError: status = "合盖保持运行，但熄屏请求失败"
     case .battery: status = "未插电：使用正常休眠策略"
+    case .batteryAwake: status = "电池供电：手动保持合盖运行"
+    case .batteryClosed: status = "电池供电、已合盖：已请求熄屏，电脑继续运行"
+    case .batteryDisplayError: status = "电池合盖保持运行，但熄屏请求失败"
     }
   }
 
@@ -455,9 +479,9 @@ final class LidSleepController: ObservableObject {
         $1 == "\\"AppleClamshellState\\"" && $2 == "=" {print $3; exit}')
       if [ "$lid" = Yes ]; then
         if /usr/bin/pmset displaysleepnow; then
-          state=ac_closed
+          state="${state}_closed"
         else
-          state=ac_display_error
+          state="${state}_display_error"
         fi
       fi
     fi
@@ -493,6 +517,26 @@ final class LidSleepController: ObservableObject {
     [ -f "$dir/lease" ] || { reason=lease_removed; break; }
     appNow=$(/bin/ps -p "$appPID" -o lstart=)
     [ -n "$appStart" ] && [ "$appNow" = "$appStart" ] || { reason=app_exited; break; }
+    """
+
+  /// 电源事件决定供电来源；手动标记每轮重读，无需等待插拔事件。
+  nonisolated static let powerPolicyScript = """
+    override=$(/bin/cat "$dir/battery-override") || {
+      reason=power_query_failed; publish error; exit 1;
+    }
+    case "$override" in
+      0|1) : ;;
+      *) reason=power_query_failed; publish error; exit 1 ;;
+    esac
+    state=battery
+    desired=0
+    if [ "$onAC" = 1 ]; then
+      desired=1
+      state=ac
+    elif [ "$override" = 1 ]; then
+      desired=1
+      state=battery_awake
+    fi
     """
 
   nonisolated static func watchdogScript(
@@ -566,7 +610,7 @@ final class LidSleepController: ObservableObject {
       reason=app_exited
       # FIFO 由未提权的原生监听进程写入。事件不可信，所有电源事实在此重新读取。
       exec 3<> "$dir/events" || exit 1
-      desired=
+      onAC=
       while /bin/kill -0 "$appPID" 2>/dev/null; do
         \(watchdogLeaseScript)
         /bin/kill -0 "$eventPID" 2>/dev/null || {
@@ -579,15 +623,14 @@ final class LidSleepController: ObservableObject {
           power)
             power=$(/usr/bin/pmset -g batt) || { reason=power_query_failed; publish error; exit 1; }
             case "$power" in
-              *"Now drawing from 'AC Power'"*) desired=1 ;;
-              *"Now drawing from 'Battery Power'"*) desired=0 ;;
+              *"Now drawing from 'AC Power'"*) onAC=1 ;;
+              *"Now drawing from 'Battery Power'"*) onAC=0 ;;
               *) reason=power_query_failed; publish error; exit 1 ;;
             esac ;;
-          tick) [ -n "$desired" ] || continue ;;
+          tick) [ -n "$onAC" ] || continue ;;
           *) reason=power_query_failed; publish error; exit 1 ;;
         esac
-        state=battery
-        [ "$desired" != 1 ] || state=ac
+        \(powerPolicyScript)
         # 每轮重新读取真实系统值，避免唤醒或外部改动后仍相信旧缓存。
         actual=$(readSetting) || { reason=power_query_failed; publish error; exit 1; }
         [ "$actual" = 0 ] || [ "$actual" = 1 ] || {

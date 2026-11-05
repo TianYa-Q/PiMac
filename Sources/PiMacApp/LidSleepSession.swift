@@ -6,6 +6,9 @@ enum LidSleepPowerState: String {
   case ac, battery
   case acClosed = "ac_closed"
   case acDisplayError = "ac_display_error"
+  case batteryAwake = "battery_awake"
+  case batteryClosed = "battery_awake_closed"
+  case batteryDisplayError = "battery_awake_display_error"
 }
 
 enum LidSleepExitReason: String {

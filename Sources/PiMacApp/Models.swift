@@ -56,6 +56,7 @@ struct ChatEntry: Identifiable, Equatable, Codable, Sendable {
   var modelID: String? = nil
   var timestamp: Date? = .now
   var runID: String? = nil
+  var messageContext: T3MessageContext? = nil
 
   /// Only explicit parent links determine ownership; concurrent top-level tools stay separate.
   static func groupingToolEntries(_ entries: [ChatEntry]) -> [ChatEntry] {
@@ -119,6 +120,7 @@ struct ServerQueuedPrompt: Identifiable, Sendable {
   let text: String
   let attachments: [PromptAttachment]
   var submissionState: SubmissionState = .confirmed
+  var messageContext: T3MessageContext? = nil
 
   enum SubmissionState: Sendable {
     case submitting, unconfirmed, confirmed
@@ -142,6 +144,7 @@ struct QueuedPrompt: Identifiable, Sendable {
   var waitsForCompaction = false
   var remoteMessageID: String? = nil
   var remoteMessageDate: Date? = nil
+  var messageContext: T3MessageContext? = nil
 }
 
 struct PromptAttachment: Identifiable, Hashable, Codable, Sendable {

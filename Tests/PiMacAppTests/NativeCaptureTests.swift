@@ -29,11 +29,29 @@ struct PiMacNativeCaptureTests {
     let tab = try #require(workspace.tabs.first)
     workspace.selectedTabID = tab.id
     tab.model.currentSessionPath = "t3:\(selectedID)"
+    if let detail = fixture["detail"] as? [String: Any] { tab.model.apply(detail) }
+    if let text = fixture["composerText"] as? String { tab.model.composerText = text }
+    tab.model.composerContext = T3MessageContext.read(fixture["composerContext"])
+    let suite = "PiMacNativeCaptureTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    let lidController = LidSleepController(defaults: defaults, restoreSleep: { nil })
+    defer {
+      lidController.stop()
+      defaults.removePersistentDomain(forName: suite)
+    }
+    let page: AnyView
+    if fixture["page"] as? String == "lidSleep" {
+      page = AnyView(LidSleepSettingsView(controller: lidController).padding(24))
+    } else {
+      page = AnyView(
+        ContentView(tabID: tab.id)
+          .environmentObject(tab.model)
+          .environmentObject(workspace)
+          .environmentObject(workspace.extensionUI))
+    }
     let host = NSHostingView(
-      rootView: ContentView(tabID: tab.id)
-        .environmentObject(tab.model)
-        .environmentObject(workspace)
-        .environmentObject(workspace.extensionUI)
+      rootView:
+        page
         .frame(width: width, height: height)
         .preferredColorScheme(fixture["theme"] as? String == "light" ? .light : .dark))
     host.frame = NSRect(x: 0, y: 0, width: width, height: height)

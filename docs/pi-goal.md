@@ -4,6 +4,9 @@ PiMac uses `pi-goal-x@0.32.3` for Pi Provider goals. Goal files, focus, task tra
 auditing and automatic continuation remain owned by that extension. This is not
 T3's provider interaction mode and does not add an autonomous loop to PiMac.
 
+Transient request recovery is primarily owned by [Pi persistent retries](pi-retry.md),
+for ordinary chats and Goals alike; the Goal scheduler is only a terminal-failure fallback.
+
 ## Install / verify
 
 From the repository root, with the desired Pi executable on `PATH`:
@@ -14,16 +17,35 @@ sidecars/t3-server/node_modules/.bin/tsx scripts/install-pi-goal.ts --check
 ```
 
 The installer uses Pi's personal package installation (honoring
-`PI_CODING_AGENT_DIR`) and pins the exact npm version. It applies two small,
-SHA-256-verified presentation patches to the installed extension:
+`PI_CODING_AGENT_DIR`) and pins the exact npm version. It applies small,
+SHA-256-verified status, session-interaction and transport-classification patches to the installed extension:
 
 - Publish the focused in-memory goal through the supported RPC
   `setStatus("pimac-goal", JSON)` channel whenever its UI state changes.
 - Publish an explicit empty/current snapshot at session startup. Deduplication
   includes the session ID so switching sessions cannot retain a stale goal.
 
-The patches do not change extension tools, model selection, scheduling, storage,
-auditing or permissions. Unknown versions and local source modifications fail
+- Do not open the goal picker on session reconnection, even with multiple open
+  goals. Leave the session unfocused until the user explicitly chooses a goal
+  through **选择已有目标…** / `/goal-focus`.
+- Preserve paused state across session reconnections without asking to resume.
+- Tell the model to handle ordinary messages and independent tasks normally while
+  paused, without asking/reminding the user to resume. Messages and related
+  discussion are not consent to resume; `/goal-resume` remains explicit.
+
+- Recognize `fetch failed`, common socket disconnects and Node transport error
+  codes as recoverable Goal network failures. Pi's own retries run first; after
+  settlement the extension's existing recovery policy owns backoff and attempt
+  limits. Shared permanent-error exclusions prevent retrying auth/invalid-request
+  failures even when they include transient wording. Final `agent_settled.aborted`
+  pauses the active Goal when the user stops during Pi backoff, without arming a
+  Goal recovery timer; an already paused Goal is never resumed.
+
+The patches do not change extension tools, model selection, autonomous scheduling,
+storage, auditing or permissions; transport classification only routes these
+failures into the existing scheduler. They remove the implicit session-resume goal
+picker and resume confirmation; explicit focus/resume and stale-continuation
+guards remain upstream. Unknown versions and local source modifications fail
 explicitly instead of being overwritten. A package reinstall may remove the
 patches: rerun the installer and `--check` after changing extension installations.
 Nothing here restarts an existing Pi process or the running app; existing sessions
@@ -70,9 +92,13 @@ archive; the redundant composer-row entry is hidden for a focused Pi goal.
 it configures execution/auditing, not objective content. The raw advanced picker
 has not been replaced by a native settings implementation.
 
-Pi controls send the extension's original commands only when the thread is idle,
-without touching unsent composer text or attachments. During execution, use the
-existing Stop control; the extension observes the user abort. Switching projects,
+Idle Pi controls send the extension's original commands without touching unsent
+composer text or attachments. **暂停执行** also remains available during execution:
+it uses the existing independent Stop request (also holding the message queue),
+not a queued `/goal-pause` prompt. The extension observes the user abort and owns
+the persisted paused state; the desktop does not optimistically fake that state.
+Stopping disables repeated pause clicks. Editing, resume and management still
+require an idle session. Switching projects,
 threads or tabs destroys the local form context. Busy transitions keep editor
 input and fixed feedback space; they do not queue a control command. Details,
 settings, focus and archive dialogs use the existing T3 extension UI bridge.
@@ -96,8 +122,19 @@ is disabled or filtered by this integration.
 
 ## Validation and limitations
 
+- Running-pause Swift tests cover connected active-Pi availability and an isolated
+  real Server stop while message delivery is suspended, preserving the draft and
+  holding the queue without enqueueing `/goal-pause`. This Server test uses a goal
+  projection fixture; it does not establish real-extension pause persistence.
 - Focused Swift tests cover wire validation, active-provider isolation, clearing
   and disconnected views; existing V2 presentation tests cover regression paths.
+- Paused-conversation regression tests execute the actual patched session-start
+  handler and request-context function from a hash-verified 0.32.3 source fixture
+  (`tests/fixtures/pi-goal-events-0.32.3.txt`, upstream MIT license alongside it).
+  They cover repeated reconnections without confirmation or implicit resume,
+  unfocused sessions with multiple open goals without a picker or goal mutation,
+  quiet paused instructions, stale-checkpoint precedence, idempotent installation
+  and upgrading the earlier status-only bridge. They do not prove model compliance.
 - Node tests execute the actual installed bridge snippet, including deduplication,
   empty states and session changes. Adapter patch execution tests cover early
   reports, stale turn snapshots, malformed reports and session-switch isolation;
@@ -110,6 +147,12 @@ is disabled or filtered by this integration.
   empty/busy/rejected actions) and an isolated local Server protocol fixture.
   The latter confirms exact `/goal` and `/goal-direct` dispatch, no duplicate
   submission and no draft/attachment consumption, without a live model/account.
+- Transport regression tests execute the hash-verified upstream classifier and
+  `agent_end` / `agent_settled` handlers. They cover fetch/socket failures, recovery
+  only after settlement, configured cap handling, quota/billing exclusions and
+  user-stop/paused-goal precedence, including cancellation after `agent_end` while
+  Pi is in backoff. The persistent-retry offline RPC test also loads the real Goal
+  extension and checks active → paused with no restart. Neither simulates a real provider outage.
 - Real-model autonomous continuation/auditor acceptance is not established by
   these tests. Full-page offscreen native capture produced invalid compositing;
   component-level captures are separate evidence, not running-app acceptance.

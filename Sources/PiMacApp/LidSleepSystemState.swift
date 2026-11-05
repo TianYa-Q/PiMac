@@ -71,17 +71,20 @@ extension LidSleepSystemState {
     }
   }
 
-  func managementDescription(requested: Bool, enabled: Bool, busy: Bool) -> String {
+  func managementDescription(
+    requested: Bool, enabled: Bool, busy: Bool, batteryOverride: Bool = false
+  ) -> String {
     if busy { return "正在应用策略，请稍候…" }
     guard case .available(let onAC, let disabled) = self else {
       return "实际状态未确认，不能保证策略生效"
     }
-    let desired = requested && onAC
+    let desired = requested && (onAC || batteryOverride)
     if disabled != desired {
       return "状态异常：\(desired ? "应禁用休眠" : "应恢复正常休眠")，请重试"
     }
     if !requested { return "功能已关闭，系统允许休眠" }
     guard enabled else { return "系统开关符合策略，但 PiMac 尚未接管，请重试" }
+    if !onAC && batteryOverride { return "已接管 · 手动开启电池合盖运行" }
     return onAC ? "已接管 · 插电合盖不休眠" : "已接管 · 电池供电允许休眠"
   }
 }
