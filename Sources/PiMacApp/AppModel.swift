@@ -249,7 +249,8 @@ final class AppModel: ObservableObject {
   }
   var canSubmitPrompt: Bool { promptSubmissionUnavailableReason == nil }
   var goalCreationUnavailableReason: String? {
-    if isBusy { return "会话正在执行或等待交互，请空闲后创建目标" }
+    // 运行本身不阻止创建：目标沿用发件箱排队，不中断当前任务。
+    // 停止、压缩、交互和真实投递中的互斥仍由发送门禁保护。
     guard canSubmitPrompt else { return "会话尚未就绪，请连接后再创建目标" }
     guard projectURL != nil else { return "请先选择项目" }
     guard !selectedModelId.isEmpty else { return "请先选择模型" }

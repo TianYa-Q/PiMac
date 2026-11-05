@@ -71,7 +71,7 @@ struct GoalCreationForm: View {
         .frame(height: 100)
         .padding(6)
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(.secondary.opacity(0.3)))
-      Text("每个会话保留一个目标，开始后立即执行。默认每 25 次自动响应暂停，供你检查进度。目标最多 4000 字符。")
+      Text("每个会话保留一个目标；空闲时立即执行，运行中则排队，当前任务结束后执行。默认每 25 次自动响应暂停，供你检查进度。目标最多 4000 字符。")
         .font(.caption)
         .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
@@ -82,7 +82,7 @@ struct GoalCreationForm: View {
       HStack {
         Button("取消") { perform(.cancel) }.keyboardShortcut(.cancelAction)
         Spacer()
-        Button("开始执行") { perform(.start) }
+        Button("设置目标") { perform(.start) }
           .buttonStyle(.borderedProminent)
           .keyboardShortcut(.defaultAction)
           .disabled(!canStart)

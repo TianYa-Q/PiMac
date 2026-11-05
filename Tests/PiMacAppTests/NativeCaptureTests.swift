@@ -30,6 +30,12 @@ struct PiMacNativeCaptureTests {
     workspace.selectedTabID = tab.id
     tab.model.currentSessionPath = "t3:\(selectedID)"
     if let detail = fixture["detail"] as? [String: Any] { tab.model.apply(detail) }
+    if fixture["connectionReady"] as? Bool == true {
+      workspace.server.didCompletePoll()
+      tab.model.connectionState = .connected
+      tab.model.projectURL = URL(fileURLWithPath: "/tmp/pimac-ui-fixture")
+      tab.model.selectedModelId = "test/model"
+    }
     if let text = fixture["composerText"] as? String { tab.model.composerText = text }
     tab.model.composerContext = T3MessageContext.read(fixture["composerContext"])
     if fixture["draftAccountSwitch"] as? Bool == true {

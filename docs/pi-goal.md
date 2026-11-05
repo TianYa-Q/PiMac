@@ -26,7 +26,7 @@ a normal safe restart/reload; installation alone does not update loaded code.
 
 ## Native controls
 
-- Start: `/goal <objective>`; one goal per Pi session, immediately executable.
+- Start: `/goal <objective>`; one goal per Pi session. Native creation is allowed during an active run and uses the existing durable `queue_after_active` delivery: idle sessions execute immediately; active sessions finish their current task first. It does not stop or steer that work.
 - Status: `/goal status`.
 - Pause/resume: `/goal pause`, `/goal resume`.
 - Edit: `/goal edit <complete objective>`; retains usage, leaves paused goals paused.
