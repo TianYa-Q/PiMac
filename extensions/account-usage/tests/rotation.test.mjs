@@ -88,7 +88,7 @@ test("hidden, failed, stale, unknown and exhausted candidate quotas are skipped"
 test("weekly load balances sustainable percent/day rather than account name", () => {
   const active = usage("active", 50, 50, 6);
   assert.deepEqual(
-    choose([active, usage("A", 90, 100, 7), usage("Z", 90, 40, 1)]),
+    choose([active, usage("A", 90, 100, 7), usage("Z", 90, 25, 1)]),
     { accountName: "Z", reason: "weekly-balance" },
   );
   assert.equal(
@@ -96,6 +96,56 @@ test("weekly load balances sustainable percent/day rather than account name", ()
       .accountName,
     "fresh",
   );
+});
+test("weekly gaps up to 20 percentage points do not rebalance across pacing or reset-time differences", () => {
+  // 本次误切：74%仅略低于进度达标线，不能因此切到78%。
+  assert.equal(
+    choose([usage("active", 41, 74, 6.2316), usage("spare", 98, 78, 6.2316)]),
+    undefined,
+  );
+  for (const gap of [19.99, 20, 20.01]) {
+    const decision = choose([
+      usage("active", 80, 50, 6),
+      usage("spare", 80, 50 + gap, 5),
+    ]);
+    assert.deepEqual(
+      decision,
+      gap > 20 ? { accountName: "spare", reason: "weekly-balance" } : undefined,
+    );
+  }
+  assert.equal(
+    choose([usage("active", 80, 50, 6), usage("near-reset", 80, 30, 1)]),
+    undefined,
+  );
+});
+test("weekly gap filters candidates before ranking and does not override other balance guards", () => {
+  assert.deepEqual(
+    choose([
+      usage("active", 80, 50, 6),
+      usage("near-reset", 80, 40, 1),
+      usage("eligible", 80, 90, 6),
+    ]),
+    { accountName: "eligible", reason: "weekly-balance" },
+  );
+  assert.equal(
+    choose([usage("active", 80, 60, 4), usage("spare", 80, 81, 4)]),
+    undefined,
+  );
+});
+test("urgent rotation ignores the weekly gap for short quota, weekly quota and confirmed failures", () => {
+  for (const [short, weekly, confirmedQuotaFailure] of [
+    [1, 74, false],
+    [80, 5, false],
+    [80, 74, true],
+  ]) {
+    assert.deepEqual(
+      choose(
+        [usage("active", short, weekly), usage("spare", 80, weekly + 4)],
+        { confirmedQuotaFailure },
+      ),
+      { accountName: "spare", reason: "low-quota" },
+    );
+  }
 });
 test("rebalance has 1.5x hysteresis and can be disabled without disabling urgent rotation", () => {
   assert.equal(

@@ -42,6 +42,8 @@ Existing account documents are read as validated, atomically committed snapshots
 
 Session startup restores the saved binding or future-session default, but does not rebalance or start the weekly cooldown. Before a Pi prompt, the Server waits for the host's quota sampling to finish and write its identity-matched snapshot; existing host caching and concurrent-query coalescing still apply. `before_agent_start` then selects the account using that snapshot before the first model request. The extension never queries quota itself.
 
+Weekly balancing requires a difference of more than 20 percentage points in remaining weekly quota between the current and candidate accounts, in addition to the existing pacing and daily-budget checks. Differences of 20 points or less keep the current binding, even across different reset times; urgent low-quota or confirmed-quota-failure rotation is exempt.
+
 Normal completion only refreshes the displayed snapshot: it no longer switches accounts for weekly balancing. The next run is the next balancing boundary. Manual choices retain their cooldown; genuine low quota can still switch at a safe turn boundary, and a confirmed quota error permits at most one continuation. These choices remain session-local and do not rewrite the future-session default.
 
 Quota sampling failure is logged safely and does not block otherwise valid authentication. Only fresh, successful, identity-matched telemetry participates in balancing; missing/failed telemetry cannot guarantee an optimal initial account. No user prompt is injected or replayed to refresh quota.

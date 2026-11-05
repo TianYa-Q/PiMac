@@ -36,6 +36,7 @@ function weeklyBudget(usage: AccountUsage, now: number) {
     return undefined;
   const days = seconds / 86_400;
   return {
+    remainingPercent: value,
     rate: Math.max(0, value - 5) / Math.max(0.25, days),
     paced: value >= (100 * days) / 7 - 15,
   };
@@ -90,6 +91,15 @@ export function nextAccount({
           (remaining(usage, WEEK, now) ?? 0) > 5),
     )
     .map((usage) => ({ usage, budget: weeklyBudget(usage, now) }))
+    // 周额度相差不超过20个百分点时保持绑定，避免进度达标线附近的小差异触发切换。
+    // 先筛选再排序，防止差额不足的高日预算候选挡住真正符合条件的账户；紧急切换不受限。
+    .filter(
+      ({ budget }) =>
+        urgent ||
+        (weeklyRemaining !== undefined &&
+          budget !== undefined &&
+          Math.abs(budget.remainingPercent - weeklyRemaining) > 20),
+    )
     .sort((left, right) => {
       const tier = (budget: ReturnType<typeof weeklyBudget>) =>
         budget ? (budget.paced ? 2 : 1) : 0;
