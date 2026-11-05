@@ -32,14 +32,14 @@ PiMac uses the official [T3 Server](https://github.com/pingdotgg/t3code) orchest
 ### Requirements
 
 - macOS 14 or later.
-- Pi installed and authenticated; the documented compatibility baseline is **1.0.0**. See [Pi compatibility](docs/pi-1.0-compatibility.md).
+- Source builds use internally managed Pi **1.5.0** and locked extensions. Run the [managed module setup](docs/managed-modules.md); authenticate using Pi as usual. Published ZIPs may predate this setup.
 - Node.js **24+** for the bundled T3 Server.
 
 ### Install
 
 1. Download `Pi-Mac-vX.Y.Z.zip` from [GitHub Releases](https://github.com/TianYa-Q/PiMac/releases/latest).
 2. Extract it and move **Pi Mac.app** to Applications.
-3. Install/authenticate Pi using its [upstream instructions](https://github.com/earendil-works/pi). In PiMac, check the Pi executable path in Settings if it is not discovered automatically.
+3. Authenticate Pi using its [upstream instructions](https://github.com/earendil-works/pi). For current source builds, deploy the [internal runtime](docs/managed-modules.md); Settings displays module versions without update/install controls.
 4. Open a project, choose an available model, and send a message.
 
 > Releases currently use ad-hoc signing and are not notarized by Apple. If macOS blocks first launch, right-click the app in Finder and choose **Open**, or review the block in **System Settings → Privacy & Security**. Only run downloads you trust.

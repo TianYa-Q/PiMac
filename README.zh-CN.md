@@ -32,14 +32,14 @@ PiMac 使用官方 [T3 Server](https://github.com/pingdotgg/t3code) orchestrator
 ### 环境要求
 
 - macOS 14 或更高版本。
-- 已安装并认证的 Pi；文档兼容性基线为 **1.0.0**，详见 [Pi 兼容性说明](docs/pi-1.0-compatibility.md)。
+- 当前源码使用内部管理的 Pi **1.5.0** 与锁定扩展，先按[内部模块部署](docs/managed-modules.md)安装并完成 Pi 认证；已有发布 ZIP 可能早于此变更。
 - Node.js **24+**，供随应用打包的 T3 Server 使用。
 
 ### 安装
 
 1. 从 [GitHub Releases](https://github.com/TianYa-Q/PiMac/releases/latest) 下载 `Pi-Mac-vX.Y.Z.zip`。
 2. 解压，将 **Pi Mac.app** 移入“应用程序”目录。
-3. 按 [Pi 官方说明](https://github.com/earendil-works/pi)安装并完成认证。如果 PiMac 未自动找到 Pi，请在设置中检查可执行文件路径。
+3. 按 [Pi 官方说明](https://github.com/earendil-works/pi)完成认证；当前源码按[内部模块部署](docs/managed-modules.md)安装运行时。设置只展示版本，不提供模块安装或更新操作。
 4. 打开项目，选择可用模型，发送消息。
 
 > 当前发行版使用 ad-hoc 签名，尚未经过 Apple 公证。如果 macOS 首次启动时拦截，请在 Finder 中右键应用并选择“打开”，或在“系统设置 → 隐私与安全性”查看拦截提示。仅运行你信任的下载。

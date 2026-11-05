@@ -2,7 +2,7 @@
 
 ## Ownership and policy
 
-Pi owns recovery for ordinary chats and Goals alike. We reuse Pi 1.3.0's existing
+Pi owns recovery for ordinary chats and Goals alike. We reuse Pi 1.5.0's existing
 agent retry loop, failed-response projection, timers, abort controllers and RPC
 progress events. No client retry loop, synthetic user “continue” message or new
 Goal is introduced. Successful tool executions are not replayed.
@@ -51,12 +51,11 @@ Use the exact package directory belonging to the Pi executable configured in
 PiMac; do not substitute another installation:
 
 ```sh
-sidecars/t3-server/node_modules/.bin/tsx scripts/install-pi-retry.ts --package-root /path/to/pi-coding-agent
-sidecars/t3-server/node_modules/.bin/tsx scripts/install-pi-retry.ts --package-root /path/to/pi-coding-agent --check
-sidecars/t3-server/node_modules/.bin/tsx scripts/install-pi-goal.ts
+node --import ./extensions/runtime/node_modules/tsx/dist/loader.mjs scripts/manage-pi-runtime.ts
+node --import ./extensions/runtime/node_modules/tsx/dist/loader.mjs scripts/manage-pi-runtime.ts --check
 ```
 
-The installer supports only the pinned Pi and pi-ai 1.3.0 distributions. It verifies
+The installer supports only the internally managed Pi and pi-ai 1.5.0 distributions. It verifies
 all four complete source hashes and unique anchors before changing code, updates
 both SDK and bundled CLI/RPC implementations, and uses Pi's settings-storage lock
 to merge only retry settings. Unknown versions or source modifications are errors.
@@ -73,7 +72,7 @@ Server remains functional, but may show an incorrect finite total until updated.
 ## Verification
 
 ```sh
-PI_RETRY_PACKAGE_ROOT=/path/to/pi-coding-agent \
+PI_RETRY_PACKAGE_ROOT="$PWD/extensions/runtime/node_modules/@earendil-works/pi-coding-agent" \
 PI_RETRY_GOAL_ROOT=/path/to/PiMac/extensions/pi-goal \
 sidecars/t3-server/node_modules/.bin/tsx scripts/test-pi-retry.ts
 ```

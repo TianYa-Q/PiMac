@@ -10,13 +10,13 @@ not patch third-party files or implement another Goal scheduler.
 ## Install and verify
 
 ```sh
-node --import ./extensions/pi-goal/node_modules/tsx/dist/loader.mjs scripts/install-pi-goal.ts
-node --import ./extensions/pi-goal/node_modules/tsx/dist/loader.mjs scripts/install-pi-goal.ts --check
+node --import ./extensions/runtime/node_modules/tsx/dist/loader.mjs scripts/manage-pi-runtime.ts
+node --import ./extensions/runtime/node_modules/tsx/dist/loader.mjs scripts/manage-pi-runtime.ts --check
 ```
 
-On a fresh checkout first run `npm ci --ignore-scripts --legacy-peer-deps --prefix extensions/pi-goal`.
-The installer selects `npm:@schovest/pi-goal@0.2.1` with its direct extension
-resource disabled, plus the local PiMac adapter that loads the same pinned engine.
+On a fresh checkout first run `npm ci --ignore-scripts --legacy-peer-deps --prefix extensions/runtime`.
+The internal installer selects the local PiMac adapter, which loads the pinned
+`@schovest/pi-goal@0.2.1` factory once. See [managed modules](managed-modules.md).
 This prevents duplicate `/goal` registrations. It removes `pi-goal-x` from package
 selection, not from npm's cache, and preserves unrelated settings. The switch does
 not create backups or migrate old goals. Old `.pi/goals` files are not read by the
@@ -60,13 +60,13 @@ node --import ./sidecars/t3-server/node_modules/tsx/dist/loader.mjs --test --tes
 swift test --jobs 1 --no-parallel --filter 'GoalCommandTests|GoalCreationTests|GoalMenuLayoutTests|ThreadGoalTests|GoalExpansionTests|T3GoalControlTests'
 ```
 
-The adapter tests launch real Pi 1.3.0 RPC in an isolated directory with no credentials,
+The adapter tests launch real Pi 1.5.0 RPC in an isolated directory with no credentials,
 seed a Goal through public session entries, and exercise restore, pause, edit and
 clear without a model or confirmation dialog. Source remains unmodified.
-The package's raw TS has a known Pi 1.3 typing mismatch in its
+The package's raw TS has a known Pi custom-event typing mismatch in its
 `before_agent_start` handler (`prompt` is absent on Pi's custom-event union member).
 The adapter typecheck uses a declaration of the package's public factory, not a
-claim that its internal source typechecks against Pi 1.3. Ordinary prompt and
+claim that its internal source typechecks against Pi 1.5. Ordinary prompt and
 custom-message autonomous execution require separate real-model acceptance.
 The real offline retry test also loads the replacement engine: retrying keeps
 Goal active and abort prevents further continuation. An abort after a failed
