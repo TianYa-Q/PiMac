@@ -2,6 +2,7 @@ import type { AccountUsage, UsageWindow } from "./types.js";
 
 const FIVE_HOURS = 18_000;
 const WEEK = 604_800;
+const WEEKLY_LOW_QUOTA_PERCENT = 2;
 export const REBALANCE_COOLDOWN_MS = 10 * 60_000;
 const MAX_USAGE_AGE_MS = 3 * 60_000;
 
@@ -37,7 +38,7 @@ function weeklyBudget(usage: AccountUsage, now: number) {
   const days = seconds / 86_400;
   return {
     remainingPercent: value,
-    rate: Math.max(0, value - 5) / Math.max(0.25, days),
+    rate: Math.max(0, value - WEEKLY_LOW_QUOTA_PERCENT) / Math.max(0.25, days),
     paced: value >= (100 * days) / 7 - 15,
   };
 }
@@ -75,7 +76,8 @@ export function nextAccount({
   const urgent =
     confirmedQuotaFailure ||
     (shortRemaining !== undefined && shortRemaining < 5) ||
-    (weeklyRemaining !== undefined && weeklyRemaining <= 5);
+    (weeklyRemaining !== undefined &&
+      weeklyRemaining <= WEEKLY_LOW_QUOTA_PERCENT);
   if (!urgent && !allowRebalance) return undefined;
 
   const hidden = new Set(hiddenAccounts);
@@ -88,7 +90,7 @@ export function nextAccount({
         (![usage.primary, usage.secondary].some(
           (window) => window?.windowSeconds === WEEK,
         ) ||
-          (remaining(usage, WEEK, now) ?? 0) > 5),
+          (remaining(usage, WEEK, now) ?? 0) > WEEKLY_LOW_QUOTA_PERCENT),
     )
     .map((usage) => ({ usage, budget: weeklyBudget(usage, now) }))
     // 周额度相差不超过20个百分点时保持绑定，避免进度达标线附近的小差异触发切换。

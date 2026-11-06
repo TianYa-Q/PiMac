@@ -1056,6 +1056,7 @@ final class AppModel: ObservableObject {
         htmlDocument: message["htmlDocument"] as? String,
         htmlRenderError: message["htmlRenderError"] as? String,
         timestamp: T3DesktopClient.date(message["createdAt"]),
+        contentUpdatedAt: T3DesktopClient.date(message["updatedAt"]),
         runID: message["runId"] as? String,
         messageContext: T3MessageContext.read(message["context"]))
     }
@@ -1094,6 +1095,7 @@ final class AppModel: ObservableObject {
         diff: data["diff"] as? String,
         attachments: data["localImages"] as? [PromptAttachment] ?? [],
         timestamp: T3DesktopClient.date(activity["createdAt"]),
+        contentUpdatedAt: T3DesktopClient.date(activity["updatedAt"]),
         runID: activity["turnId"] as? String)
       if kind.hasPrefix("tool.") {
         entry.toolInput = entry.toolInput ?? toolEntries[entryID]?.toolInput

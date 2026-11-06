@@ -55,6 +55,7 @@ struct ChatEntry: Identifiable, Equatable, Codable, Sendable {
   var modelProvider: String? = nil
   var modelID: String? = nil
   var timestamp: Date? = .now
+  var contentUpdatedAt: Date? = nil
   var runID: String? = nil
   var messageContext: T3MessageContext? = nil
 

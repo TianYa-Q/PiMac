@@ -115,6 +115,7 @@ enum T3V2Presentation {
           "role": type == "user_message" ? "user" : type == "reasoning" ? "reasoning" : "assistant",
           "text": item["text"] ?? "", "streaming": item["streaming"] ?? false,
           "attachments": item["attachments"] ?? [], "createdAt": date,
+          "updatedAt": item["updatedAt"] ?? item["startedAt"] ?? NSNull(),
           "context": item["context"] ?? NSNull(),
           "runId": item["runId"] ?? NSNull(),
         ])
@@ -207,6 +208,7 @@ enum T3V2Presentation {
               ? "tool.failed" : active.contains(status) ? "tool.started" : "tool.completed")
             : type == "error" ? "error" : "warning",
           "summary": name, "createdAt": date,
+          "updatedAt": item["updatedAt"] ?? item["completedAt"] ?? item["startedAt"] ?? NSNull(),
           "payload": [
             "toolCallId": item["id"] ?? "", "title": name, "detail": detail,
             "status": active.contains(status) ? "inProgress" : status, "data": data,

@@ -135,14 +135,13 @@ test("weekly gap filters candidates before ranking and does not override other b
 test("urgent rotation ignores the weekly gap for short quota, weekly quota and confirmed failures", () => {
   for (const [short, weekly, confirmedQuotaFailure] of [
     [1, 74, false],
-    [80, 5, false],
+    [80, 2, false],
     [80, 74, true],
   ]) {
     assert.deepEqual(
-      choose(
-        [usage("active", short, weekly), usage("spare", 80, weekly + 4)],
-        { confirmedQuotaFailure },
-      ),
+      choose([usage("active", short, weekly), usage("spare", 80, weekly + 4)], {
+        confirmedQuotaFailure,
+      }),
       { accountName: "spare", reason: "low-quota" },
     );
   }
@@ -165,12 +164,24 @@ test("rebalance has 1.5x hysteresis and can be disabled without disabling urgent
     "near",
   );
 });
-test("exhausted weekly active quota is urgent even with healthy 5h quota", () => {
+test("weekly quota rotates at 2% or below, not at 5%, even with healthy 5h quota", () => {
+  for (const weekly of [0, 1.99, 2, 2.01, 5]) {
+    assert.deepEqual(
+      choose([usage("active", 80, weekly), usage("spare", 80, weekly + 4)]),
+      weekly <= 2 ? { accountName: "spare", reason: "low-quota" } : undefined,
+    );
+  }
+});
+test("weekly candidate quota must exceed 2% while 5h quota must still exceed 5%", () => {
+  for (const weekly of [0, 1.99, 2, 2.01, 5]) {
+    assert.deepEqual(
+      choose([usage("active", 0, 0), usage("spare", 80, weekly)]),
+      weekly > 2 ? { accountName: "spare", reason: "low-quota" } : undefined,
+    );
+  }
   assert.equal(
-    choose([usage("active", 80, 5), usage("spare", 80, 80)], {
-      allowRebalance: false,
-    }).reason,
-    "low-quota",
+    choose([usage("active", 0, 0), usage("spare", 5, 5)]),
+    undefined,
   );
 });
 test("invalid or expired windows never receive a reset urgency bonus", () => {

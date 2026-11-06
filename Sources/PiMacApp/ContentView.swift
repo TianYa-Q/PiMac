@@ -2652,6 +2652,14 @@ private struct ActivityGroupView: View {
             )
           }
           Spacer()
+          if !expanded && shouldStayExpanded {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+              Text(ActivityContentAge.label(entries: entries, at: context.date) ?? "")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+          }
         }
         .contentShape(Rectangle())
       }
