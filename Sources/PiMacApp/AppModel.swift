@@ -264,13 +264,17 @@ final class AppModel: ObservableObject {
   var canReuseProcessForNewSession: Bool { false }  // A tab is a view, not a process pool slot.
   /// 仅供列表补齐尚未进入 Server shell 的本地提交，不持久化另一份会话目录。
   var locallySubmittedSession: SessionItem? {
-    guard let entry = pendingSentMessages.first ?? pendingQueuedMessages.first,
-      !currentSessionPath.isEmpty
+    guard !currentSessionPath.isEmpty else { return nil }
+    let records = deliveryRecords
+    // 保持 steer 优先的旧语义，但列表元信息不再构造全部 ChatEntry/附件投影。
+    guard
+      let record = records.first(where: { $0.delivery == .steer && $0.state != .draft })
+        ?? records.first(where: { $0.delivery == .followUp && $0.state != .draft })
     else { return nil }
-    let title = String(entry.text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
+    let title = String(record.rpcText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
     return SessionItem(
       path: currentSessionPath, title: title.isEmpty ? "附件消息" : title,
-      modifiedAt: entry.timestamp ?? .now)
+      modifiedAt: record.createdAt)
   }
   var hasUserMessage: Bool { messages.contains { $0.kind == .user } }
   var hasUnsubmittedInput: Bool {

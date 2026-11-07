@@ -69,11 +69,14 @@ final class WorkspaceModel: ObservableObject {
 
   func project(forSessionPath path: String) -> WorkspaceProject? {
     if let id = AppModel.threadID(from: path),
-      let record = deliveries.store.messages.first(where: { $0.threadID == id && $0.isVisible })
+      let record = deliveries.store.firstVisibleRecord(threadID: id)
     {
       return WorkspaceProject(url: URL(fileURLWithPath: record.projectPath))
     }
-    if let model = tabs.first(where: { $0.model.locallySubmittedSession?.path == path })?.model,
+    // 先比较廉价身份，不能为每一行对所有标签页构造正文、附件和队列投影。
+    if let model = tabs.first(where: {
+      $0.model.currentSessionPath == path && $0.model.locallySubmittedSession != nil
+    })?.model,
       let url = model.projectURL
     {
       return projects.first { $0.url == url } ?? WorkspaceProject(url: url)

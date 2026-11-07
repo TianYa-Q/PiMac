@@ -63,7 +63,16 @@ final class MessageOutboxStore: ObservableObject {
     var messages: [OutboxMessage]
   }
 
-  @Published private(set) var messages: [OutboxMessage] = []
+  @Published private(set) var messages: [OutboxMessage] = [] {
+    didSet {
+      // 索引只保存位置，由唯一事实来源重建；状态确认、迁移和重新加载不会留下旧记录。
+      visibleIndicesByThread = [:]
+      for index in messages.indices where messages[index].isVisible {
+        visibleIndicesByThread[messages[index].threadID, default: []].append(index)
+      }
+    }
+  }
+  private var visibleIndicesByThread: [String: [Int]] = [:]
   @Published private(set) var failure: String?
   private let directory: URL?
   private var loadFailed = false
@@ -119,9 +128,14 @@ final class MessageOutboxStore: ObservableObject {
   }
 
   func records(threadID: String, project: URL) -> [OutboxMessage] {
-    messages.filter {
-      $0.threadID == threadID && $0.projectPath == project.standardizedFileURL.path && $0.isVisible
+    let path = project.standardizedFileURL.path
+    return (visibleIndicesByThread[threadID] ?? []).compactMap { index in
+      messages[index].projectPath == path ? messages[index] : nil
     }
+  }
+
+  func firstVisibleRecord(threadID: String) -> OutboxMessage? {
+    visibleIndicesByThread[threadID]?.first.map { messages[$0] }
   }
 
   func message(_ id: String) -> OutboxMessage? { messages.first { $0.id == id } }

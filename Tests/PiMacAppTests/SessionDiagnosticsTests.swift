@@ -37,6 +37,72 @@ struct SessionDiagnosticsTests {
     #expect(try String(contentsOf: file, encoding: .utf8).split(separator: "\n").count == 2)
   }
 
+  @Test func rotationBoundsFilesAndKeepsCompleteNewestEntries() throws {
+    let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("tmp/session-diagnostics-tests/\(UUID().uuidString)")
+    let file = directory.appendingPathComponent("diagnostics.log")
+    for index in 0..<12 {
+      try SessionDiagnostics.append(
+        "event", id: "\(index)", fields: ["payload": String(repeating: "x", count: 250)],
+        destination: file, maxFileBytes: 512, maxArchives: 2)
+    }
+    let files = try FileManager.default.contentsOfDirectory(
+      at: directory, includingPropertiesForKeys: nil)
+    #expect(files.count == 3)
+    for item in files {
+      let data = try Data(contentsOf: item)
+      #expect(data.count <= 512)
+      #expect(try JSONSerialization.jsonObject(with: data) is [String: Any])
+    }
+    let current = try #require(
+      JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+    #expect(current["id"] as? String == "11")
+  }
+
+  @Test func startupPrunesLegacyArchivesByByteBudgetWithoutTouchingUnrelatedFiles() throws {
+    let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("tmp/session-diagnostics-tests/\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let file = directory.appendingPathComponent("diagnostics.log")
+    let oversized = file.appendingPathExtension(UUID().uuidString)
+    try Data(repeating: 120, count: 2048).write(to: oversized)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: oversized.path)
+    let unrelated = file.appendingPathExtension("manual-backup")
+    try Data("keep".utf8).write(to: unrelated)
+    try SessionDiagnostics.append(
+      "event", id: "id", fields: [:], destination: file, maxFileBytes: 512, maxArchives: 2)
+    #expect(!FileManager.default.fileExists(atPath: oversized.path))
+    #expect(try String(contentsOf: unrelated, encoding: .utf8) == "keep")
+    let before = try Data(contentsOf: file)
+    #expect(throws: (any Error).self) {
+      try SessionDiagnostics.append(
+        "large", id: "id", fields: ["body": String(repeating: "x", count: 1024)],
+        destination: file, maxFileBytes: 512, maxArchives: 2)
+    }
+    #expect(try Data(contentsOf: file) == before)
+    try SessionDiagnostics.append(
+      "next", id: "id", fields: [:], destination: file, maxFileBytes: 512, maxArchives: 0)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 2)
+  }
+
+  @Test func refusesArchiveSymlinkWithoutFollowingIt() throws {
+    let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("tmp/session-diagnostics-tests/\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let target = directory.appendingPathComponent("target")
+    try Data("untouched".utf8).write(to: target)
+    let file = directory.appendingPathComponent("diagnostics.log")
+    try FileManager.default.createSymbolicLink(
+      at: file.appendingPathExtension(UUID().uuidString), withDestinationURL: target)
+    #expect(throws: (any Error).self) {
+      try SessionDiagnostics.append("event", id: "id", fields: [:], destination: file)
+    }
+    #expect(try String(contentsOf: target, encoding: .utf8) == "untouched")
+  }
+
   @Test
   func refusesSymlinkWithoutChangingTarget() throws {
     let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
